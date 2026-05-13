@@ -1,4 +1,4 @@
-"""
+"""20260513
 Streamlit 使用者介面層：
 包含側邊欄、主畫面、卡片、圖表與互動按鈕。
 由原始 app(1).py 拆分而來。
@@ -744,6 +744,8 @@ def render_main_page(sidebar_state=None):
                 stock_id=curr_id,
                 stock_name=c_name,
             )
+            # ✅ 重要：從這一行開始，所有估值、Markdown 顯示與 AI prompt 都只使用「校正後」資料。
+            # 不再讓校驗前的 gross_margin / op_margin / rev_growth / sys_de 進入畫面或極限高空價演算法。
             gross_margin = corrected_sys.get("gross_margin")
             op_margin = corrected_sys.get("operating_margin")
             rev_growth = corrected_sys.get("rev_growth")
@@ -752,6 +754,16 @@ def render_main_page(sidebar_state=None):
             ai_om = corrected_ai.get("operating_margin")
             ai_yoy = corrected_ai.get("rev_growth")
             ai_de = corrected_ai.get("debt_to_equity")
+
+            # 明確宣告「顯示層專用」變數，避免日後維護時誤拿校驗前欄位組 Markdown。
+            display_rev_growth = rev_growth
+            display_ai_yoy = ai_yoy
+            display_gross_margin = gross_margin
+            display_operating_margin = op_margin
+            display_ai_gross_margin = ai_gm
+            display_ai_operating_margin = ai_om
+            display_debt_to_equity = sys_de
+            display_ai_debt_to_equity = ai_de
 
             if dq_warnings:
                 # 右下角短提示：讓操盤手知道資料已被校正，不是靜默改值
@@ -922,10 +934,11 @@ def render_main_page(sidebar_state=None):
             fpe_str = f"{orig_fpe_str}<br><span style='color:#FFD700; font-size:0.85rem;'>(AI推估: {ai_fpe:.1f}x{time_str})</span>" if ai_fpe is not None else orig_fpe_str
         
             pe_str = build_cmp_str(pe_ratio, ai_pe, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
-            rg_str = build_cmp_str(rev_growth, ai_yoy, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
-            gm_om_str = build_cmp_dual_str(gross_margin, op_margin, ai_gm, ai_om, 'pct', 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            # ✅ 顯示字串只吃 validate_and_correct_financial_metrics() 校正後的 display_* 變數。
+            rg_str = build_cmp_str(display_rev_growth, display_ai_yoy, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            gm_om_str = build_cmp_dual_str(display_gross_margin, display_operating_margin, display_ai_gross_margin, display_ai_operating_margin, 'pct', 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
             roe_str = build_cmp_str(roe, ai_roe, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
-            de_str = build_cmp_str(sys_de, ai_de, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            de_str = build_cmp_str(display_debt_to_equity, display_ai_debt_to_equity, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
             pb_str = build_cmp_str(pb_ratio, ai_pb, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
         
             rg_color = "#ff4d4d" if eff_rg and eff_rg > 0 else ("#00cc66" if eff_rg and eff_rg < 0 else "#fff")
@@ -1259,6 +1272,7 @@ def render_main_page(sidebar_state=None):
             panel_pb = _nullize_text(pb_str)
             panel_peg = _nullize_text(peg_str_disp)
             panel_eps = _nullize_text(f_eps_display)
+            # ✅ AI prompt / 戰情面板也沿用已校正後的 Markdown 字串，避免 prompt 吃到舊值。
             panel_rg = _nullize_text(rg_str)
             panel_eg = _nullize_text(eg_str_disp)
             panel_gmom = _nullize_text(gm_om_str)
