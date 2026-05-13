@@ -191,8 +191,9 @@ def render_sidebar():
                             pe = s_float(inf.get('trailingPE'))
                             roe = s_float(inf.get('returnOnEquity'))
                             eg = s_float(inf.get('earningsGrowth'))
+                            # 月營收資料需每次先宣告，避免上一輪殘值或 NameError；營收動能以官方/月營收為優先。
+                            df_rv = get_monthly_revenue(c, st.session_state.finmind_key)
                             if eg is None:
-                                df_rv = get_monthly_revenue(c, st.session_state.finmind_key)
                                 if df_rv is not None and not df_rv.empty: eg = s_float(df_rv['YoY'].iloc[-1]) / 100.0
                         
                             sys_peg = s_float(inf.get('pegRatio'))
@@ -209,6 +210,8 @@ def render_sidebar():
 
                             # 2) 成長分數（EPS/營收成長）
                             rev_g = s_float(inf.get('revenueGrowth'))
+                            if df_rv is not None and not df_rv.empty:
+                                rev_g = s_float(df_rv['YoY'].iloc[-1]) / 100.0
                             growth_components = []
                             if eg is not None: growth_components.append(pct_score(eg, center=0.0, scale=2.5))
                             if rev_g is not None: growth_components.append(pct_score(rev_g, center=0.0, scale=2.0))
@@ -715,9 +718,54 @@ def render_main_page(sidebar_state=None):
             ai_lo_val = s_float(ai_fin.get('target_price_low'))
             ai_analyst_count = ai_fin.get('target_price_analyst_count')
             ai_target_rationale = str(ai_fin.get('target_price_rationale') or "").strip()
-            ai_mom = s_float(ai_fin.get('mom'))
+            ai_mom = normalize_financial_ratio(ai_fin.get('mom'))
             if ai_mom is not None: 
                 latest_mom_val = ai_mom * 100
+
+            # ==========================================
+            # 🧯 資料品質閘門：避免欄位錯位直接進估值模型
+            # ==========================================
+            sys_vals_for_check = {
+                "gross_margin": gross_margin,
+                "operating_margin": op_margin,
+                "rev_growth": rev_growth,
+                "debt_to_equity": sys_de,
+            }
+            ai_vals_for_check = {
+                "gross_margin": ai_gm,
+                "operating_margin": ai_om,
+                "rev_growth": ai_yoy,
+                "debt_to_equity": ai_de,
+            }
+            corrected_sys, corrected_ai, dq_warnings = validate_and_correct_financial_metrics(
+                sys_vals_for_check,
+                ai_vals_for_check,
+                monthly_rev_df=df_rev_bk,
+                stock_id=curr_id,
+                stock_name=c_name,
+            )
+            gross_margin = corrected_sys.get("gross_margin")
+            op_margin = corrected_sys.get("operating_margin")
+            rev_growth = corrected_sys.get("rev_growth")
+            sys_de = corrected_sys.get("debt_to_equity")
+            ai_gm = corrected_ai.get("gross_margin")
+            ai_om = corrected_ai.get("operating_margin")
+            ai_yoy = corrected_ai.get("rev_growth")
+            ai_de = corrected_ai.get("debt_to_equity")
+
+            if dq_warnings:
+                # 右下角短提示：讓操盤手知道資料已被校正，不是靜默改值
+                toast_key = f"dq_toast_{curr_id}_{hash(tuple(dq_warnings))}"
+                if not st.session_state.get(toast_key, False):
+                    try:
+                        st.toast(f"🩺 目前標的 {c_name} ({curr_id}) 觸發資料品質校驗，已啟動自動校正／NULL 防護。", icon="🩺")
+                    except Exception:
+                        pass
+                    st.session_state[toast_key] = True
+
+                with st.expander("🩺 資料品質校驗提醒", expanded=True):
+                    for w in dq_warnings:
+                        st.warning(w)
         
             if latest_mom_val is not None:
                 latest_mom_str = f"{latest_mom_val:.2f}%"
