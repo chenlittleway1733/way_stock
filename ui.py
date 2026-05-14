@@ -1,4 +1,4 @@
-""" 20260514
+"""20260514
 Streamlit 使用者介面層：
 包含側邊欄、主畫面、卡片、圖表與互動按鈕。
 由原始 app(1).py 拆分而來。
@@ -563,6 +563,66 @@ def render_main_page(sidebar_state=None):
             st.markdown(clean_html(quote_html), unsafe_allow_html=True)
 
             # ==========================================
+            # 📦 ETF 持股曝險追蹤（系統抓取 + AI 按鈕補齊）
+            # ==========================================
+            st.markdown("#### 📦 ETF 持股曝險追蹤")
+            with st.expander(f"查看含有 {c_name} ({curr_id}) 的 ETF", expanded=False):
+                st.caption("系統會先用公開資料源自動查詢；AI 補查資料只會在按下「🪄 啟動 AI 全方位校對與補齊財報」後出現。ETF 持股通常非即時，請以投信公告為準。")
+
+                try:
+                    etf_holders = get_stock_etf_holders(curr_id)
+                except Exception as e:
+                    etf_holders = []
+                    st.warning(f"⚠️ ETF 系統資料源暫時無法取得：{str(e)[:120]}")
+
+                def _render_etf_holder_table(rows, title, source_tag):
+                    rows = rows or []
+                    if not rows:
+                        return False
+                    table_rows = []
+                    for r in rows:
+                        if not isinstance(r, dict):
+                            continue
+                        weight = r.get("weight")
+                        try:
+                            weight_text = f"{float(weight):.2f}%" if weight is not None and str(weight).strip() != "" else "N/A"
+                        except Exception:
+                            weight_text = str(weight) if weight else "N/A"
+                        table_rows.append({
+                            "ETF名稱": r.get("etf_name") or "",
+                            "代號": r.get("etf_code") or "",
+                            "持股比例": weight_text,
+                            "資料日期": r.get("data_date") or "未標示",
+                            "來源": r.get("source") or source_tag,
+                            "資料性質": r.get("data_type") or source_tag,
+                        })
+                    if not table_rows:
+                        return False
+                    st.markdown(title)
+                    df_etf = pd.DataFrame(table_rows)
+                    st.dataframe(df_etf, use_container_width=True, hide_index=True)
+                    return True
+
+                has_system_etf = _render_etf_holder_table(etf_holders, "**系統抓取 ETF 持股資料**", "系統抓取")
+                if not has_system_etf:
+                    st.info("目前系統資料源查無 ETF 持有資料，或網站版面暫時無法解析。")
+
+                ai_etf_rows = []
+                try:
+                    ai_etf_rows = st.session_state.ai_fetched_financials.get(curr_id, {}).get("etf_holders_ai", [])
+                except Exception:
+                    ai_etf_rows = []
+
+                if ai_etf_rows:
+                    st.markdown("---")
+                    _render_etf_holder_table(ai_etf_rows, "**🤖 AI 補查 ETF 資料**", "AI補齊")
+                    st.caption("⚠️ AI ETF 資料為按下「啟動 AI 全方位校對與補齊財報」後的聯網補查結果，只作交叉比對，不直接視為官方持股資料。")
+                else:
+                    st.caption("🤖 尚未執行 AI 補查；如需 AI 協助交叉比對 ETF 持股，請按下方「啟動 AI 全方位校對與補齊財報」。")
+
+            st.markdown("---")
+
+            # ==========================================
             # 🌍 國際連動與動態時間趨勢推估
             # ==========================================
             st.markdown("<br>", unsafe_allow_html=True)
@@ -607,7 +667,7 @@ def render_main_page(sidebar_state=None):
                 st.markdown("#### 💼 財務基本面與獲利基準微調")
             with col_fin_btn:
                 if st.button("🪄 啟動 AI 全方位校對與補齊財報", disabled=not st.session_state.api_key, use_container_width=True, help="點此讓 AI 上網搜尋最新財報與估值指標，並與現有資料進行比對"):
-                    with st.spinner("AI 正在聯網為您抓取最新財報數據，請稍候...（Pro Only 最多重試 3 次，約需 30-90 秒）"):
+                    with st.spinner("AI 正在聯網為您強行抓取最新財報數據，請稍候...（Pro Only 最多重試 3 次，約需 30-90 秒）"):
                         selected_model = get_selected_model_id()
                         fetched_data = get_financials_from_ai(c_name, curr_id, st.session_state.api_key, selected_model)
                     
