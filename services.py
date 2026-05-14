@@ -1,4 +1,4 @@
-"""
+"""20260514
 外部資料與模型服務層：
 yfinance、Fugle、FinMind、Yahoo、Gemini 等 API 存取都集中在這裡。
 由原始 app(1).py 拆分而來，已全面升級為最新的 google-genai 官方 SDK。
@@ -49,7 +49,170 @@ def fetch_fugle_kline(stock_id, api_key, timeframe="D"):
             else:
                 log_data_health("Fugle", False, res.status_code)
     except: pass
+
     return pd.DataFrame()
+
+# ==========================================
+# 3.1 ETF 持股曝險追蹤（系統抓取，不使用 AI）
+# ==========================================
+def _normalize_etf_code(code):
+    """ETF 代號標準化：支援 00987A / 00987a / 0050。"""
+    if code is None:
+        return ""
+    return str(code).strip().upper().replace(".TW", "")
+
+
+def _normalize_etf_holders(rows, default_source="系統抓取"):
+    """將不同來源抓到的 ETF 持股資料統一欄位，並去重。"""
+    normalized = []
+    seen = set()
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        code = _normalize_etf_code(r.get("etf_code") or r.get("code") or r.get("id"))
+        name = str(r.get("etf_name") or r.get("name") or "").strip()
+        if not code:
+            continue
+
+        weight = r.get("weight")
+        try:
+            if isinstance(weight, str):
+                weight = weight.replace("%", "").replace(",", "").strip()
+            weight = float(weight) if weight not in (None, "", "null") else None
+            # AI 偶爾會回傳 0.0685，畫面統一顯示為 6.85
+            if weight is not None and 0 < abs(weight) <= 1:
+                weight = weight * 100
+        except Exception:
+            weight = None
+
+        shares = r.get("shares") or r.get("holding_shares") or r.get("持有股數")
+        data_date = str(r.get("data_date") or r.get("date") or r.get("資料日期") or "").strip()
+        source = str(r.get("source") or default_source).strip()
+        data_type = str(r.get("data_type") or default_source).strip()
+        note = str(r.get("note") or r.get("備註") or "").strip()
+
+        key = code
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append({
+            "etf_code": code,
+            "etf_name": name,
+            "weight": weight,
+            "shares": shares,
+            "data_date": data_date,
+            "source": source,
+            "data_type": data_type,
+            "note": note,
+        })
+
+    normalized.sort(key=lambda x: (x.get("weight") is None, -(x.get("weight") or 0)))
+    return normalized
+
+
+def _extract_etf_holders_from_text(raw_text, source_name):
+    """
+    從 Yahoo / FindBillion 等頁面的 HTML 或嵌入 JSON 文字中，盡量抽取 ETF 代號、名稱、持股比例。
+    注意：這是備援式解析，網站改版時仍可能失效，因此 UI 會明確標示資料來源與限制。
+    """
+    if not raw_text:
+        return []
+
+    text = re.sub(r"\\u002F", "/", raw_text)
+    text = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), text)
+    text = re.sub(r"&quot;|&#34;", '"', text)
+    text = re.sub(r"&amp;", "&", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text)
+
+    rows = []
+
+    # 先抓常見格式：ETF中文名稱 00987A ... 6.85%
+    # 名稱長度設寬一點，避免抓到整段敘述；後面再清洗。
+    pattern = re.compile(r"([\u4e00-\u9fffA-Za-z0-9\-＋+（）()·\.]{2,32})\s*(00\d{2,3}[A-Z]?)\s{0,20}(.{0,120}?)(\d{1,2}(?:\.\d{1,4})?)\s*%", re.I)
+    for m in pattern.finditer(text):
+        name = m.group(1).strip(" ：:-｜|,，。")
+        code = _normalize_etf_code(m.group(2))
+        weight = m.group(4)
+        if not code or not name:
+            continue
+        if any(bad in name for bad in ["http", "Yahoo", "FindBillion", "資料", "持有"]):
+            # 若名稱被抓太長，取最後一段可能的 ETF 名稱
+            name = re.split(r"[：:｜|，,。\s]", name)[-1].strip()
+        rows.append({
+            "etf_code": code,
+            "etf_name": name,
+            "weight": weight,
+            "source": source_name,
+            "data_type": "系統抓取",
+        })
+
+    # 另外抓 JSON 常見 key-value 格式，例如 symbol/name/weight 分散在附近。
+    code_pat = re.compile(r'"(?:symbol|code|etfCode|stockNo|id)"\s*:\s*"?(00\d{2,3}[A-Z]?)"?', re.I)
+    for m in code_pat.finditer(text):
+        start = max(0, m.start() - 250)
+        end = min(len(text), m.end() + 350)
+        block = text[start:end]
+        code = _normalize_etf_code(m.group(1))
+        name_match = re.search(r'"(?:name|etfName|stockName|shortName)"\s*:\s*"([^"{}]{2,40})"', block, re.I)
+        weight_match = re.search(r'"(?:weight|holdingRatio|ratio|percent|shareholding)"\s*:\s*"?(-?\d+(?:\.\d+)?)"?', block, re.I)
+        rows.append({
+            "etf_code": code,
+            "etf_name": name_match.group(1).strip() if name_match else "",
+            "weight": weight_match.group(1) if weight_match else None,
+            "source": source_name,
+            "data_type": "系統抓取",
+        })
+
+    return _normalize_etf_holders(rows, default_source="系統抓取")
+
+
+@st.cache_data(ttl=86400)
+def get_stock_etf_holders(stock_id):
+    """
+    查詢「哪些 ETF 持有此股票」。
+    重要：此函式只使用公開網頁資料源，不呼叫 AI；AI 補查只會在 get_financials_from_ai() 被按鈕觸發時執行。
+    回傳格式：
+    [{etf_code, etf_name, weight, shares, data_date, source, data_type, note}]
+    """
+    stock_id = str(stock_id).strip()
+    if not stock_id:
+        return []
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+    }
+
+    sources = [
+        ("Yahoo股市", f"https://tw.stock.yahoo.com/quote/{stock_id}.TW/etf"),
+        ("FindBillion", f"https://www.findbillion.com/twstock/{stock_id}/etf"),
+    ]
+
+    best_rows = []
+    for source_name, url in sources:
+        try:
+            res = requests.get(url, headers=headers, timeout=12)
+            if res.status_code != 200 or not res.text:
+                log_data_health(source_name, False, res.status_code)
+                continue
+            rows = _extract_etf_holders_from_text(res.text, source_name)
+            if rows:
+                log_data_health(source_name, True, res.status_code)
+                for r in rows:
+                    r["source_url"] = url
+                # 取資料較多者；若 Yahoo 有資料優先直接用 Yahoo。
+                if not best_rows or len(rows) > len(best_rows) or source_name == "Yahoo股市":
+                    best_rows = rows
+                if source_name == "Yahoo股市" and len(rows) >= 3:
+                    break
+            else:
+                log_data_health(source_name, False, "NO_ETF_ROWS")
+        except Exception as e:
+            log_data_health(source_name, False, f"ERR:{str(e)[:80]}")
+
+    return _normalize_etf_holders(best_rows, default_source="系統抓取")[:20]
+
 
 def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1-pro-preview"):
     """
@@ -57,7 +220,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     v7 修正重點：
     1) 僅允許 Gemini 3 Pro Preview 付費版 + Google Search。
     2) 不自動降級到 2.5 Pro / 2.5 Flash / 離線保底，避免不準資料進入估值模型。
-    3) 尖峰時段採用「同模型 Pro Only Retry」：立即重試、等待 30 秒、等待 60 秒。
+    3) 尖峰時段採用「同模型 Pro Only Retry」：立即重試、等待 3 秒、等待 8 秒。
     4) 全部失敗時只回傳 error 與 attempts，不產生 AI 財報數據。
     """
     if not api_key:
@@ -90,13 +253,14 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     16. 「最新自由現金流 (Free Cash Flow)」
     17. 「最新流動比率 (Current Ratio)」
     18. 「總發行股數或股本大小 (Shares Outstanding / Capital)」
-    必須嚴格回傳包含上述 18 個欄位的 JSON 格式。百分比請轉換為小數（例如 25.5% 寫成 0.255，衰退5%寫成 -0.05），數值請直接輸出數字。若查無資料，該欄位請填 null。
-    請務必搜尋近期各大券商對該公司的最新目標價。
+    19. 「持有該股票的 ETF 清單 (ETF Holders)」：請搜尋「含有該股票的 ETF」、「持有該股票的 ETF」、「ETF 成分股持股比例」，優先找最新資料日期。請回傳 etf_holders_ai 陣列，每筆包含 etf_code、etf_name、weight、data_date、source、note。weight 請用百分比數字，例如 6.85% 請寫 6.85；若查無請回傳空陣列 []。
+    必須嚴格回傳包含上述財務欄位與 etf_holders_ai 的 JSON 格式。百分比請轉換為小數（例如財務比率 25.5% 寫成 0.255，衰退5%寫成 -0.05；但 etf_holders_ai.weight 請保留為百分比數字，例如 6.85），數值請直接輸出數字。若查無資料，該欄位請填 null。
+    請務必搜尋近期各大券商對該公司的最新目標價，也請補查哪些 ETF 持有該股票。
     JSON 格式範例：
-    {{"pe": 15.2, "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin": 0.255, "operating_margin": 0.123, "roe": 0.15, "yoy": 0.35, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "mom": 0.015, "dividend_yield": 0.032, "data_period": "2024/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000}}
+    {{"pe": 15.2, "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin": 0.255, "operating_margin": 0.123, "roe": 0.15, "yoy": 0.35, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "mom": 0.015, "dividend_yield": 0.032, "data_period": "2024/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "etf_holders_ai": [{{"etf_code": "00987A", "etf_name": "主動台新優勢成長", "weight": 6.85, "data_date": "2026/04/30", "source": "Yahoo股市", "note": "AI聯網補查，請以投信公告為準"}}]}}
     絕對不要輸出 markdown 標記或其他文字。"""
 
-    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、營收 MoM，以及 {target_year} 法人預估未來三年複合成長率(CAGR)、預測 EPS 與最新目標價。請務必確認並標示出資料的發布日期！"
+    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、營收 MoM，以及 {target_year} 法人預估未來三年複合成長率(CAGR)、預測 EPS、最新目標價；並補查『哪些 ETF 持有 {stock_name} ({stock_id})』、ETF 名稱代號、持股比例與資料日期。請務必確認並標示出資料的發布日期！"
 
     def _make_config(search_enabled=True):
         kwargs = {
@@ -201,6 +365,11 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
             parsed = json.loads(clean_text)
             if isinstance(parsed, dict):
                 parsed.update({k: v for k, v in marker_data.items() if v is not None and parsed.get(k) is None})
+                parsed["etf_holders_ai"] = _normalize_etf_holders(parsed.get("etf_holders_ai") or [], default_source="AI補齊")
+                for _etf_row in parsed["etf_holders_ai"]:
+                    _etf_row["data_type"] = "AI補齊"
+                    if not _etf_row.get("note"):
+                        _etf_row["note"] = "AI 聯網補查，僅供交叉比對，請以投信公告為準。"
                 parsed["model_used"] = used_model
                 parsed["ai_search_enabled"] = bool(used_search)
                 parsed["fallback_reason"] = fallback_reason
@@ -214,6 +383,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
                     "fallback_reason": fallback_reason or "無",
                     "retry_policy": "Pro Only same-model retry: delays 0s, 3s, 8s; no downgrade.",
                     "prompt": prompt_text,
+                    "extra_task": "同時補查 etf_holders_ai：持有該股票的 ETF 名稱、代號、持股比例與資料日期。",
                 }, ensure_ascii=False, indent=2)
             return parsed
         except json.JSONDecodeError:
