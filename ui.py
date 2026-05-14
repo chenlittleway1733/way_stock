@@ -608,7 +608,7 @@ def render_main_page(sidebar_state=None):
                     st.caption(f"🗂️ ETF快取狀態暫時無法讀取：{str(e)[:100]}")
 
                 try:
-                    etf_holders = get_stock_etf_holders(curr_id)
+                    etf_holders = get_stock_etf_holders(curr_id, c_name)
                 except Exception as e:
                     etf_holders = []
                     st.warning(f"⚠️ ETF 系統資料源暫時無法取得：{str(e)[:120]}")
