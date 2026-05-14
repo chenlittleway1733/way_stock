@@ -1,4 +1,4 @@
-"""20260514
+""" 
 外部資料與模型服務層：
 yfinance、Fugle、FinMind、Yahoo、Gemini 等 API 存取都集中在這裡。
 由原始 app(1).py 拆分而來，已全面升級為最新的 google-genai 官方 SDK。
@@ -222,7 +222,7 @@ def get_stock_etf_holders(stock_id):
 ETF_CACHE_DIR = ".etf_cache"
 ETF_MASTER_CACHE_FILE = os.path.join(ETF_CACHE_DIR, "etf_master_list.json")
 ETF_HOLDINGS_CACHE_FILE = os.path.join(ETF_CACHE_DIR, "etf_holdings_cache.json")
-ETF_CACHE_VERSION = "v7.0-name-match-holdings-cache"
+ETF_CACHE_VERSION = "v8.0-regex-fallback-holdings-cache"
 ETF_SEED_CUTOFF_DATE = "2026-05-14"
 
 # 這是「保底種子清單」：避免 TWSE / 外部清單抓不到時漏掉主動式 ETF。
@@ -484,19 +484,110 @@ def discover_etf_master_list(force=False):
     return result
 
 
+def _parse_holdings_text_regex_fallback(html, etf_code, etf_name, source, source_url, data_date=""):
+    """
+    v8：MoneyDJ / CMoney / Pocket 有些頁面雖然文字裡有成分股，
+    但 pandas.read_html 在 Streamlit Cloud 可能因 lxml/bs4 或表格格式失敗，
+    因此再用純文字 regex 補抓。
+    常見格式：台積電(2330.TW) 9.68 11,657,000.00
+    或：2330 台積電 9.23%
+    """
+    if not html:
+        return []
+    text = str(html)
+    text = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), text)
+    text = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"&nbsp;|&#160;", " ", text)
+    text = re.sub(r"&amp;", "&", text)
+    text = re.sub(r"&quot;|&#34;", '"', text)
+    text = re.sub(r"\s+", " ", text)
+
+    rows = []
+    # MoneyDJ：台積電(2330.TW) 9.68 11,657,000.00
+    pat_name_code = re.compile(
+        r"([\u4e00-\u9fffA-Za-z0-9\-＋+＊*·]{1,32})\s*[\(（]\s*(\d{4})\.TW\s*[\)）]\s*[,，\s]*(-?\d{1,3}(?:\.\d{1,4})?)\s*%?\s*[,，\s]*([0-9,]+(?:\.\d+)?)?",
+        re.I
+    )
+    for m in pat_name_code.finditer(text):
+        stock_name = m.group(1).strip()
+        stock_code = m.group(2).strip()
+        weight = _clean_percent_to_float(m.group(3))
+        shares = (m.group(4) or "").strip() or None
+        if not stock_name or not stock_code:
+            continue
+        rows.append({
+            "etf_code": etf_code.upper(),
+            "etf_name": etf_name,
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "weight": weight,
+            "shares": shares,
+            "data_date": data_date,
+            "source": source,
+            "source_url": source_url,
+            "data_type": "系統抓取",
+            "fetched_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "parse_method": "regex_name_code",
+        })
+
+    # CMoney / Pocket 常見：2330 台積電 9.23%
+    pat_code_name = re.compile(
+        r"(?<!\d)(\d{4})(?!\d)\s+([\u4e00-\u9fffA-Za-z0-9\-＋+＊*·]{1,32})\s+(-?\d{1,3}(?:\.\d{1,4})?)\s*%",
+        re.I
+    )
+    for m in pat_code_name.finditer(text):
+        stock_code = m.group(1).strip()
+        stock_name = m.group(2).strip()
+        weight = _clean_percent_to_float(m.group(3))
+        if not stock_name or not stock_code:
+            continue
+        rows.append({
+            "etf_code": etf_code.upper(),
+            "etf_name": etf_name,
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "weight": weight,
+            "shares": None,
+            "data_date": data_date,
+            "source": source,
+            "source_url": source_url,
+            "data_type": "系統抓取",
+            "fetched_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "parse_method": "regex_code_name",
+        })
+
+    return rows
+
+
+def _dedup_holding_rows(rows):
+    dedup = {}
+    for r in rows or []:
+        stock_key = str(r.get("stock_code") or "").strip()
+        if not stock_key:
+            stock_key = _normalize_tw_name(r.get("stock_name", ""))
+        key = (str(r.get("etf_code", "")).upper(), stock_key)
+        if not key[0] or not stock_key:
+            continue
+        old = dedup.get(key)
+        if old is None or (old.get("weight") is None and r.get("weight") is not None):
+            dedup[key] = r
+    return list(dedup.values())
+
+
 def _parse_holdings_tables_from_html(html, etf_code, etf_name, source, source_url):
     """
     解析 MoneyDJ / Pocket / 其他 HTML 表格。
-    v6 重點：
-    - 不再假設表格一定有 4 碼股票代號；若只有「台積電」這種名稱，會用名稱對照表反查 2330。
-    - 放寬表格判斷，避免 MoneyDJ 欄名改版後整包抓成 0 筆。
+    v8 重點：
+    - pandas.read_html 失敗時不直接放棄，改用 regex 從 HTML 純文字補抓。
+    - 不再假設表格一定有 4 碼股票代號；有名稱也保留。
     """
     rows = []
     data_date = _extract_data_date_from_text(html)
     try:
         tables = pd.read_html(io.StringIO(html))
     except Exception:
-        return rows
+        tables = []
 
     name_code_map = _load_local_stock_name_code_map()
 
@@ -584,19 +675,9 @@ def _parse_holdings_tables_from_html(html, etf_code, etf_name, source, source_ur
                 "fetched_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             })
 
-    dedup = {}
-    for r in rows:
-        # v7：若來源沒有股票代號，就用股票名稱做去重 key，避免同一 ETF 只留下第一筆無代號成分股。
-        stock_key = str(r.get("stock_code") or "").strip()
-        if not stock_key:
-            stock_key = _normalize_tw_name(r.get("stock_name", ""))
-        key = (r["etf_code"], stock_key)
-        if not stock_key:
-            continue
-        old = dedup.get(key)
-        if old is None or (old.get("weight") is None and r.get("weight") is not None):
-            dedup[key] = r
-    return list(dedup.values())
+    # v8：表格解析後，再用 regex 補抓；若 read_html 失敗，也可靠 regex 建立快取。
+    rows.extend(_parse_holdings_text_regex_fallback(html, etf_code, etf_name, source, source_url, data_date=data_date))
+    return _dedup_holding_rows(rows)
 
 def fetch_moneydj_etf_holdings(etf_code, etf_name=""):
     url = f"https://www.moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={str(etf_code).lower()}.tw"
@@ -608,6 +689,12 @@ def fetch_pocket_etf_holdings(etf_code, etf_name=""):
     url = f"https://www.pocket.tw/etf/tw/{str(etf_code).upper()}/fundholding/"
     html = _request_html(url)
     return _parse_holdings_tables_from_html(html, etf_code, etf_name, "Pocket", url)
+
+
+def fetch_cmoney_etf_holdings(etf_code, etf_name=""):
+    url = f"https://www.cmoney.tw/etf/tw/{str(etf_code).upper()}/fundholding"
+    html = _request_html(url)
+    return _parse_holdings_tables_from_html(html, etf_code, etf_name, "CMoney", url)
 
 
 def update_etf_holdings_cache(force=False, max_etfs=None):
@@ -641,6 +728,11 @@ def update_etf_holdings_cache(force=False, max_etfs=None):
                 rows = fetch_pocket_etf_holdings(code, name)
             except Exception as e:
                 errors.append({"etf_code": code, "source": "Pocket", "error": str(e)[:160]})
+        if not rows:
+            try:
+                rows = fetch_cmoney_etf_holdings(code, name)
+            except Exception as e:
+                errors.append({"etf_code": code, "source": "CMoney", "error": str(e)[:160]})
         holdings.extend(rows)
         # 禮貌延遲，避免對外部網站造成壓力。
         time.sleep(0.25)
