@@ -567,7 +567,45 @@ def render_main_page(sidebar_state=None):
             # ==========================================
             st.markdown("#### 📦 ETF 持股曝險追蹤")
             with st.expander(f"查看含有 {c_name} ({curr_id}) 的 ETF", expanded=False):
-                st.caption("系統會先用公開資料源自動查詢；AI 補查資料只會在按下「🪄 啟動 AI 全方位校對與補齊財報」後出現。ETF 持股通常非即時，請以投信公告為準。")
+                st.caption("一般查詢不使用 AI、不用 Google 搜尋；系統會先讀取 ETF 成分股快取，快取過期才直接抓 MoneyDJ / Pocket / TWSE 等固定資料源。AI 補查只會在按下「🪄 啟動 AI 全方位校對與補齊財報」後出現。")
+
+                try:
+                    master_status = get_etf_master_cache_status()
+                    master_status_text = "今日已更新" if master_status.get("is_today") else "尚未更新/已過期"
+                    seed_cutoff = master_status.get("seed_cutoff_date", "2026-05-14")
+                    st.caption(
+                        f"📚 ETF主清單：目前內建清單包含 {seed_cutoff} 前已知上市 ETF；"
+                        f"若有新上市/漏收 ETF，請按「更新ETF主清單快取」。"
+                    )
+                    st.caption(
+                        f"📚 主清單狀態：{master_status_text}｜更新時間：{master_status.get('updated_at', '尚未更新')}｜"
+                        f"收錄ETF：{master_status.get('count', 0)}檔｜主動式/疑似主動式：{master_status.get('active_count', 0)}檔"
+                    )
+
+                    cache_status = get_etf_cache_status()
+                    status_text = "今日已更新" if cache_status.get("is_today") else "尚未更新/已過期"
+                    st.caption(
+                        f"🗂️ ETF持股快取：{status_text}｜更新時間：{cache_status.get('updated_at', '尚未更新')}｜"
+                        f"掃描ETF：{cache_status.get('master_count', 0)}檔｜成分股筆數：{cache_status.get('holdings_count', 0)}"
+                    )
+
+                    btn_master, btn_holdings = st.columns(2)
+                    with btn_master:
+                        if st.button("📚 更新ETF主清單快取", key=f"refresh_etf_master_{curr_id}", use_container_width=True, help="只更新市場 ETF 名單，不抓成分股；不使用 AI、不用 Google 搜尋。"):
+                            with st.spinner("正在更新 ETF 主清單快取，檢查是否有新上市/漏收 ETF..."):
+                                update_etf_master_list_cache(force=True)
+                                st.cache_data.clear()
+                            st.success("✅ ETF 主清單快取已更新。若要把新ETF納入反查，請再按右側更新 ETF 持股快取。")
+                            st.rerun()
+                    with btn_holdings:
+                        if st.button("🔄 更新ETF持股快取", key=f"refresh_etf_cache_{curr_id}", use_container_width=True, help="依主清單逐檔抓 MoneyDJ / Pocket / TWSE 成分股；不使用 AI、不用 Google 搜尋。"):
+                            with st.spinner("正在更新 ETF 成分股快取，第一次可能需要較久..."):
+                                update_etf_holdings_cache(force=True)
+                                st.cache_data.clear()
+                            st.success("✅ ETF 持股快取已更新，重新整理畫面中...")
+                            st.rerun()
+                except Exception as e:
+                    st.caption(f"🗂️ ETF快取狀態暫時無法讀取：{str(e)[:100]}")
 
                 try:
                     etf_holders = get_stock_etf_holders(curr_id)
@@ -592,7 +630,7 @@ def render_main_page(sidebar_state=None):
                             "ETF名稱": r.get("etf_name") or "",
                             "代號": r.get("etf_code") or "",
                             "持股比例": weight_text,
-                            "資料日期": r.get("data_date") or "未標示",
+                            "資料日期": r.get("data_date") or "來源未揭露",
                             "來源": r.get("source") or source_tag,
                             "資料性質": r.get("data_type") or source_tag,
                         })
