@@ -1,4 +1,4 @@
-"""20260514
+"""
 Streamlit 使用者介面層：
 包含側邊欄、主畫面、卡片、圖表與互動按鈕。
 由原始 app(1).py 拆分而來。
@@ -584,10 +584,22 @@ def render_main_page(sidebar_state=None):
 
                     cache_status = get_etf_cache_status()
                     status_text = "今日已更新" if cache_status.get("is_today") else "尚未更新/已過期"
+                    holdings_count = int(cache_status.get('holdings_count', 0) or 0)
+                    errors_count = int(cache_status.get('errors_count', 0) or 0)
                     st.caption(
                         f"🗂️ ETF持股快取：{status_text}｜更新時間：{cache_status.get('updated_at', '尚未更新')}｜"
-                        f"掃描ETF：{cache_status.get('master_count', 0)}檔｜成分股筆數：{cache_status.get('holdings_count', 0)}"
+                        f"掃描ETF：{cache_status.get('master_count', 0)}檔｜成分股筆數：{holdings_count}｜錯誤來源：{errors_count}"
                     )
+                    if holdings_count == 0:
+                        st.warning("⚠️ ETF 成分股快取目前是 0 筆，因此畫面會退回 Yahoo 個股頁補漏；這就是 00981A 沒出現的主因。請按右側更新ETF持股快取，若仍為 0，請展開下方錯誤診斷。")
+                        try:
+                            debug_cache = load_etf_holdings_cache(auto_update=False)
+                            err_rows = debug_cache.get('errors_sample', []) if isinstance(debug_cache, dict) else []
+                            if err_rows:
+                                with st.expander("🧪 查看 ETF 快取錯誤診斷", expanded=False):
+                                    st.dataframe(pd.DataFrame(err_rows), use_container_width=True, hide_index=True)
+                        except Exception:
+                            pass
 
                     btn_master, btn_holdings = st.columns(2)
                     with btn_master:
