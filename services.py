@@ -222,7 +222,7 @@ def get_stock_etf_holders(stock_id):
 ETF_CACHE_DIR = ".etf_cache"
 ETF_MASTER_CACHE_FILE = os.path.join(ETF_CACHE_DIR, "etf_master_list.json")
 ETF_HOLDINGS_CACHE_FILE = os.path.join(ETF_CACHE_DIR, "etf_holdings_cache.json")
-ETF_CACHE_VERSION = "v5.0-etf-master-and-holdings-cache"
+ETF_CACHE_VERSION = "v7.0-name-match-holdings-cache"
 ETF_SEED_CUTOFF_DATE = "2026-05-14"
 
 # 這是「保底種子清單」：避免 TWSE / 外部清單抓不到時漏掉主動式 ETF。
@@ -296,6 +296,100 @@ def _clean_percent_to_float(v):
         return x
     except Exception:
         return None
+
+def _normalize_tw_name(name):
+    """把股票/ETF 名稱做最小清洗，方便由名稱反查代號。"""
+    s = str(name or "").strip()
+    s = re.sub(r"\([^)]*\)|（[^）]*）", "", s)
+    s = re.sub(r"\s+", "", s)
+    s = s.replace("臺", "台")
+    return s
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _load_local_stock_name_code_map():
+    """
+    建立『股票名稱 → 股票代號』對照。
+    MoneyDJ / Pocket 的 ETF 成分股表有時只有股票名稱、沒有 2330 這種代號；
+    若不做名稱反查，快取就會是 0 筆或漏掉 00981A → 台積電。
+    """
+    mapping = {
+        "台積電": "2330", "聯發科": "2454", "鴻海": "2317", "台達電": "2308",
+        "廣達": "2382", "緯穎": "6669", "奇鋐": "3017", "雙鴻": "3324",
+        "金像電": "2368", "台光電": "2383", "台燿": "6274", "欣興": "3037",
+        "南電": "8046", "日月光投控": "3711", "聯電": "2303", "中華電": "2412",
+        "富邦金": "2881", "國泰金": "2882", "兆豐金": "2886", "中信金": "2891",
+        "元大金": "2885", "玉山金": "2884", "第一金": "2892", "華南金": "2880",
+        "統一": "1216", "長榮": "2603", "陽明": "2609", "萬海": "2615",
+        "大立光": "3008", "世芯-KY": "3661", "創意": "3443", "智原": "3035",
+    }
+
+    # 從你的 stocklist.txt 補充更多自選/產業鏈股票名稱。
+    for path in ["stocklist.txt", os.path.join(os.getcwd(), "stocklist.txt")]:
+        try:
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or "," not in line:
+                        continue
+                    parts = [x.strip() for x in line.split(",")]
+                    if len(parts) >= 2 and re.fullmatch(r"\d{4}", parts[0]):
+                        mapping[_normalize_tw_name(parts[1])] = parts[0]
+        except Exception:
+            pass
+
+    return {_normalize_tw_name(k): str(v) for k, v in mapping.items() if k and v}
+
+
+def _infer_stock_name_from_row(vals, stock_code=""):
+    """從表格列中猜測成分股名稱。"""
+    candidates = []
+    for v in vals:
+        s = str(v or "").strip()
+        if not s or s.lower() in ["nan", "none"]:
+            continue
+        if any(bad in s for bad in ["投資比例", "持股比例", "持有股數", "股票代號", "證券代號", "合計", "小計", "ETF"]):
+            continue
+        if stock_code and stock_code in s:
+            # 台積電(2330.TW) 這種格式，先取代號前的名稱。
+            m = re.search(r"([\u4e00-\u9fffA-Za-z0-9\-＋+·]{2,30})\s*[\(（]?" + re.escape(stock_code), s)
+            if m:
+                return m.group(1).strip()
+            continue
+        if re.search(r"[\u4e00-\u9fff]", s):
+            # 避免拿到整段很長的說明。
+            s = re.split(r"[\s　,，|｜]", s)[0].strip()
+            if 1 < len(s) <= 30:
+                candidates.append(s)
+    return candidates[0] if candidates else ""
+
+
+def _extract_stock_code_from_row(row_text, vals, stock_name=""):
+    """優先從文字抓 4 碼代號；抓不到時，用名稱對照表反查。"""
+    m_code = re.search(r"(?<!\d)(\d{4})(?:\.TW|\s|$|\)|）|　|,|，|/)", row_text)
+    if m_code:
+        return m_code.group(1)
+
+    name_map = _load_local_stock_name_code_map()
+    possible_names = []
+    if stock_name:
+        possible_names.append(stock_name)
+    for v in vals:
+        sv = str(v or "").strip()
+        if re.search(r"[\u4e00-\u9fff]", sv):
+            possible_names.append(sv)
+
+    for nm in possible_names:
+        key = _normalize_tw_name(nm)
+        if key in name_map:
+            return name_map[key]
+        # 有時儲存格包含「台積電 普通股」或「台積電(2330)」這類字串。
+        for k, code in name_map.items():
+            if k and k in key:
+                return code
+    return ""
 
 
 def _extract_data_date_from_text(text):
@@ -391,6 +485,12 @@ def discover_etf_master_list(force=False):
 
 
 def _parse_holdings_tables_from_html(html, etf_code, etf_name, source, source_url):
+    """
+    解析 MoneyDJ / Pocket / 其他 HTML 表格。
+    v6 重點：
+    - 不再假設表格一定有 4 碼股票代號；若只有「台積電」這種名稱，會用名稱對照表反查 2330。
+    - 放寬表格判斷，避免 MoneyDJ 欄名改版後整包抓成 0 筆。
+    """
     rows = []
     data_date = _extract_data_date_from_text(html)
     try:
@@ -398,13 +498,23 @@ def _parse_holdings_tables_from_html(html, etf_code, etf_name, source, source_ur
     except Exception:
         return rows
 
+    name_code_map = _load_local_stock_name_code_map()
+
     for df in tables:
         if df is None or df.empty:
             continue
         df = _flatten_columns(df)
-        full_text = " ".join(df.astype(str).head(80).fillna("").values.ravel().tolist())
+        df = df.fillna("")
+        full_text = " ".join(df.astype(str).head(120).values.ravel().tolist())
         col_text = " ".join([str(c) for c in df.columns])
-        if not any(k in (full_text + col_text) for k in ["投資比例", "持股", "權重", "比例", "成分股", "股票代號", "證券代號"]):
+        table_text = full_text + " " + col_text
+
+        # MoneyDJ 有時欄名很簡短；只要表格像成分股/持股表，就嘗試解析。
+        looks_like_holding_table = any(k in table_text for k in [
+            "投資比例", "持股", "權重", "比例", "成分股", "股票代號", "證券代號", "持有股數", "名稱"
+        ])
+        has_known_stock_name = any(k in table_text for k in list(name_code_map.keys())[:80])
+        if not looks_like_holding_table and not has_known_stock_name:
             continue
 
         for _, r in df.iterrows():
@@ -412,46 +522,51 @@ def _parse_holdings_tables_from_html(html, etf_code, etf_name, source, source_ur
             if not vals:
                 continue
             row_text = " ".join(vals)
-            # 排除表頭、ETF 本身與明顯非台股成分。
-            if any(x in row_text for x in ["投資區域", "產業", "資產", "合計", "小計"]):
+            if any(x in row_text for x in ["投資區域", "產業", "資產配置", "合計", "小計", "現金", "期貨", "基金淨資產"]):
                 continue
-            m_code = re.search(r"(?<!\d)(\d{4})(?:\.TW|\s|$|\)|）|　)", row_text)
-            if not m_code:
-                continue
-            stock_code = m_code.group(1)
-            if stock_code == etf_code[:4]:
-                # 大多情境不會等於 ETF 本身；保守跳過。
-                pass
 
-            # 名稱：優先抓  台積電(2330.TW) 這種格式，否則取代號前後的中文。
-            stock_name = ""
-            m_name = re.search(r"([\u4e00-\u9fffA-Za-z0-9\-＋+·]{2,30})\s*[\(（]?" + re.escape(stock_code) + r"(?:\.TW)?", row_text)
-            if m_name:
-                stock_name = m_name.group(1).strip()
-            else:
-                # 從各欄位找第一個看似名稱的中文字串
-                for v in vals:
-                    if stock_code in v:
-                        continue
-                    if re.search(r"[\u4e00-\u9fff]", v) and not any(bad in v for bad in ["投資比例", "持有股數", "代號"]):
-                        stock_name = v[:30]
-                        break
+            # 先猜名稱，再由名稱/文字找代號。
+            stock_name = _infer_stock_name_from_row(vals)
+            stock_code = _extract_stock_code_from_row(row_text, vals, stock_name)
+
+            # v7：不要強制要求 ETF 成分股列一定有股票代號。
+            # 因為 MoneyDJ / Pocket 有時只提供「台積電」這種成分股名稱；
+            # 個股頁目前已經知道 curr_id 與 c_name，所以反查時可直接用名稱比對。
+            if not stock_code and not stock_name:
+                continue
+            if stock_code and stock_code == str(etf_code)[:4]:
+                # 避免把 ETF 自己誤判為成分股。
+                continue
+            if not stock_name:
+                stock_name = _infer_stock_name_from_row(vals, stock_code)
 
             weight = None
-            # 優先從欄名含比例/權重的欄位取。
+            # 優先從欄名含比例/權重/持股的欄位取。
             for c in df.columns:
                 if any(k in str(c) for k in ["投資比例", "持股比例", "權重", "比例", "%"]):
                     weight = _clean_percent_to_float(r.get(c))
                     if weight is not None:
                         break
+            # 再從整列抓百分比。
             if weight is None:
                 m_w = re.search(r"(-?\d{1,3}(?:\.\d{1,4})?)\s*%", row_text)
                 if m_w:
                     weight = _clean_percent_to_float(m_w.group(1))
+            # 最後退一步：若該列有多個數字，常見最後一個小數是比例。
+            if weight is None:
+                nums = re.findall(r"(?<!\d)(\d{1,3}(?:\.\d{1,4})?)(?!\d)", row_text.replace(",", ""))
+                for num in reversed(nums):
+                    try:
+                        x = float(num)
+                        if 0 <= x <= 100 and num != stock_code:
+                            weight = x
+                            break
+                    except Exception:
+                        pass
 
             shares = None
             for c in df.columns:
-                if any(k in str(c) for k in ["持有股數", "股數", "股"]):
+                if any(k in str(c) for k in ["持有股數", "股數", "持股"]):
                     shares = str(r.get(c)).strip()
                     break
 
@@ -468,15 +583,20 @@ def _parse_holdings_tables_from_html(html, etf_code, etf_name, source, source_ur
                 "data_type": "系統抓取",
                 "fetched_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             })
-    # 同一 ETF/股票去重，保留有比例者。
+
     dedup = {}
     for r in rows:
-        key = (r["etf_code"], r["stock_code"])
+        # v7：若來源沒有股票代號，就用股票名稱做去重 key，避免同一 ETF 只留下第一筆無代號成分股。
+        stock_key = str(r.get("stock_code") or "").strip()
+        if not stock_key:
+            stock_key = _normalize_tw_name(r.get("stock_name", ""))
+        key = (r["etf_code"], stock_key)
+        if not stock_key:
+            continue
         old = dedup.get(key)
         if old is None or (old.get("weight") is None and r.get("weight") is not None):
             dedup[key] = r
     return list(dedup.values())
-
 
 def fetch_moneydj_etf_holdings(etf_code, etf_name=""):
     url = f"https://www.moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={str(etf_code).lower()}.tw"
@@ -593,7 +713,7 @@ def get_etf_cache_status():
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_stock_etf_holders(stock_id, force_refresh=False):
+def get_stock_etf_holders(stock_id, stock_name=None, force_refresh=False):
     """
     從 ETF 成分股快取反查「哪些 ETF 持有此股票」。
     注意：此函式一般查詢不呼叫 AI、不用 Google 搜尋。
@@ -610,8 +730,17 @@ def get_stock_etf_holders(stock_id, force_refresh=False):
 
     holdings = cache.get("holdings", []) if isinstance(cache, dict) else []
     results = []
+    target_name_key = _normalize_tw_name(stock_name or "")
+    if not target_name_key:
+        try:
+            target_name_key = _normalize_tw_name(get_chinese_name(stock_id) or "")
+        except Exception:
+            target_name_key = ""
+
     for r in holdings:
-        if str(r.get("stock_code", "")).strip() == stock_id:
+        row_code = str(r.get("stock_code", "")).strip()
+        row_name_key = _normalize_tw_name(r.get("stock_name", ""))
+        if row_code == stock_id or (target_name_key and row_name_key and target_name_key == row_name_key):
             results.append({
                 "etf_code": _normalize_etf_code(r.get("etf_code")),
                 "etf_name": r.get("etf_name", ""),
