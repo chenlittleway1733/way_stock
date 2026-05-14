@@ -1,4 +1,4 @@
-""" 
+"""
 外部資料與模型服務層：
 yfinance、Fugle、FinMind、Yahoo、Gemini 等 API 存取都集中在這裡。
 由原始 app(1).py 拆分而來，已全面升級為最新的 google-genai 官方 SDK。
@@ -933,14 +933,14 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     16. 「最新自由現金流 (Free Cash Flow)」
     17. 「最新流動比率 (Current Ratio)」
     18. 「總發行股數或股本大小 (Shares Outstanding / Capital)」
-    19. 「持有該股票的 ETF 清單 (ETF Holders)」：請搜尋「含有該股票的 ETF」、「持有該股票的 ETF」、「ETF 成分股持股比例」，優先找最新資料日期。請回傳 etf_holders_ai 陣列，每筆包含 etf_code、etf_name、weight、data_date、source、note。weight 請用百分比數字，例如 6.85% 請寫 6.85；若查無請回傳空陣列 []。
-    必須嚴格回傳包含上述財務欄位與 etf_holders_ai 的 JSON 格式。百分比請轉換為小數（例如財務比率 25.5% 寫成 0.255，衰退5%寫成 -0.05；但 etf_holders_ai.weight 請保留為百分比數字，例如 6.85），數值請直接輸出數字。若查無資料，該欄位請填 null。
-    請務必搜尋近期各大券商對該公司的最新目標價，也請補查哪些 ETF 持有該股票。
+    必須嚴格回傳包含上述 18 個財務欄位的 JSON 格式。百分比請轉換為小數（例如 25.5% 寫成 0.255，衰退5%寫成 -0.05），數值請直接輸出數字。若查無資料，該欄位請填 null。
+    請務必搜尋近期各大券商對該公司的最新目標價。
+    注意：本函式只負責財報與估值校對，不要查詢 ETF 持股；ETF 持股由獨立按鈕 get_etf_holders_from_ai() 執行。
     JSON 格式範例：
-    {{"pe": 15.2, "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin": 0.255, "operating_margin": 0.123, "roe": 0.15, "yoy": 0.35, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "mom": 0.015, "dividend_yield": 0.032, "data_period": "2024/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "etf_holders_ai": [{{"etf_code": "00987A", "etf_name": "主動台新優勢成長", "weight": 6.85, "data_date": "2026/04/30", "source": "Yahoo股市", "note": "AI聯網補查，請以投信公告為準"}}]}}
+    {{"pe": 15.2, "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin": 0.255, "operating_margin": 0.123, "roe": 0.15, "yoy": 0.35, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "mom": 0.015, "dividend_yield": 0.032, "data_period": "2024/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000}}
     絕對不要輸出 markdown 標記或其他文字。"""
 
-    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、營收 MoM，以及 {target_year} 法人預估未來三年複合成長率(CAGR)、預測 EPS、最新目標價；並補查『哪些 ETF 持有 {stock_name} ({stock_id})』、ETF 名稱代號、持股比例與資料日期。請務必確認並標示出資料的發布日期！"
+    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、營收 MoM，以及 {target_year} 法人預估未來三年複合成長率(CAGR)、預測 EPS 與最新目標價。請務必確認並標示出資料的發布日期！不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
 
     def _make_config(search_enabled=True):
         kwargs = {
@@ -1045,11 +1045,6 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
             parsed = json.loads(clean_text)
             if isinstance(parsed, dict):
                 parsed.update({k: v for k, v in marker_data.items() if v is not None and parsed.get(k) is None})
-                parsed["etf_holders_ai"] = _normalize_etf_holders(parsed.get("etf_holders_ai") or [], default_source="AI補齊")
-                for _etf_row in parsed["etf_holders_ai"]:
-                    _etf_row["data_type"] = "AI補齊"
-                    if not _etf_row.get("note"):
-                        _etf_row["note"] = "AI 聯網補查，僅供交叉比對，請以投信公告為準。"
                 parsed["model_used"] = used_model
                 parsed["ai_search_enabled"] = bool(used_search)
                 parsed["fallback_reason"] = fallback_reason
@@ -1063,7 +1058,6 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
                     "fallback_reason": fallback_reason or "無",
                     "retry_policy": "Pro Only same-model retry: delays 0s, 3s, 8s; no downgrade.",
                     "prompt": prompt_text,
-                    "extra_task": "同時補查 etf_holders_ai：持有該股票的 ETF 名稱、代號、持股比例與資料日期。",
                 }, ensure_ascii=False, indent=2)
             return parsed
         except json.JSONDecodeError:
@@ -1811,3 +1805,475 @@ def translate_to_zh(text):
         res = requests.get(url, params=params, timeout=5)
         return "".join([item[0] for item in res.json()[0]])
     except: return text + "\n\n(⚠️ 翻譯服務暫時忙碌中)"
+
+# ==========================================
+# 3.3 ETF 持股快取 v9 覆寫：避免外部站連線失敗時慢掃；新增 Yahoo ETF 持股頁反查
+# ==========================================
+ETF_CACHE_VERSION = "v9.0-fast-fail-yahoo-etf-holding-fallback"
+
+# 預設只快速掃描台股/主動式與常見科技 ETF，避免 53 檔 x 3 來源造成 Streamlit 卡住。
+ETF_PRIORITY_CODES = [
+    "00981A", "00987A", "00988A", "00403A", "00400A",
+    "00980A", "00982A", "00984A", "00985A", "00986A", "00989A",
+    "0050", "0052", "006208", "00952", "00922", "00923", "00904", "00881",
+]
+
+
+def _request_html_quick(url, timeout=(1.2, 3.0)):
+    """短逾時抓取，避免 Streamlit Cloud 對 MoneyDJ/Pocket/CMoney 連線失敗時卡很久。"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Connection": "close",
+    }
+    res = requests.get(url, headers=headers, timeout=timeout)
+    res.raise_for_status()
+    if not res.encoding or str(res.encoding).lower() == "iso-8859-1":
+        res.encoding = res.apparent_encoding or "utf-8"
+    return res.text
+
+
+def _parse_yahoo_etf_holding_html(html, etf_code, etf_name=""):
+    """解析 Yahoo ETF 的 holding 頁：/quote/00981A.TW/holding。"""
+    url = f"https://tw.stock.yahoo.com/quote/{str(etf_code).upper()}.TW/holding"
+    data_date = _extract_data_date_from_text(html)
+    rows = []
+
+    # 先沿用 v8 的表格/文字解析。
+    try:
+        rows.extend(_parse_holdings_tables_from_html(html, etf_code, etf_name, "Yahoo ETF持股頁", url))
+    except Exception:
+        pass
+
+    try:
+        rows.extend(_parse_holdings_text_regex_fallback(html, etf_code, etf_name, "Yahoo ETF持股頁", url, data_date=data_date))
+    except Exception:
+        pass
+
+    # Yahoo 常把資料塞在 JSON/Next data，補抓常見 key 組合。
+    text = str(html or "")
+    text = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), text)
+    text = re.sub(r"&quot;|&#34;", '"', text)
+    text = re.sub(r"&amp;", "&", text)
+    text_plain = re.sub(r"<[^>]+>", " ", text)
+    text_plain = re.sub(r"\s+", " ", text_plain)
+
+    # JSON 區塊：symbol/name/weight 可能順序不同，所以用附近 block 判讀。
+    for m in re.finditer(r'(?<!\d)(\d{4})(?:\.TW)?(?!\d)', text_plain):
+        stock_code = m.group(1)
+        block = text_plain[max(0, m.start()-220): min(len(text_plain), m.end()+260)]
+        # 抓附近中文名
+        nm = ""
+        before = block[:block.find(stock_code)] if stock_code in block else block
+        after = block[block.find(stock_code)+len(stock_code):] if stock_code in block else block
+        name_candidates = re.findall(r"[\u4e00-\u9fffA-Za-z0-9\-＋+＊*·]{2,24}", before[-80:] + " " + after[:80])
+        for cand in name_candidates:
+            if cand not in ["持股比例", "持有股數", "資料日期", "Yahoo", "Finance"] and not re.fullmatch(r"\d+", cand):
+                nm = cand
+                break
+        # 抓附近百分比
+        wm = re.search(r"(-?\d{1,3}(?:\.\d{1,4})?)\s*%", block)
+        weight = _clean_percent_to_float(wm.group(1)) if wm else None
+        if stock_code and (nm or weight is not None):
+            rows.append({
+                "etf_code": str(etf_code).upper(),
+                "etf_name": etf_name,
+                "stock_code": stock_code,
+                "stock_name": nm,
+                "weight": weight,
+                "shares": None,
+                "data_date": data_date,
+                "source": "Yahoo ETF持股頁",
+                "source_url": url,
+                "data_type": "系統抓取",
+                "fetched_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "parse_method": "yahoo_nearby_regex",
+            })
+
+    return _dedup_holding_rows(rows)
+
+
+def fetch_yahoo_etf_holdings(etf_code, etf_name=""):
+    url = f"https://tw.stock.yahoo.com/quote/{str(etf_code).upper()}.TW/holding"
+    html = _request_html_quick(url)
+    return _parse_yahoo_etf_holding_html(html, etf_code, etf_name)
+
+
+def _probe_source_health():
+    """先探測來源是否可連線；不可連線就整批跳過，避免每檔 ETF 都 timeout。"""
+    tests = {
+        "MoneyDJ": "https://www.moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid=0050.tw",
+        "Pocket": "https://www.pocket.tw/etf/tw/0050/fundholding/",
+        "CMoney": "https://www.cmoney.tw/etf/tw/0050/fundholding",
+        "Yahoo ETF持股頁": "https://tw.stock.yahoo.com/quote/0050.TW/holding",
+    }
+    health = {}
+    for name, url in tests.items():
+        try:
+            html = _request_html_quick(url, timeout=(1.0, 2.2))
+            health[name] = bool(html and len(html) > 500)
+        except Exception as e:
+            health[name] = False
+    return health
+
+
+def _get_priority_master_items(master):
+    """把主動式與常用台股科技 ETF 放前面，且預設只掃這批，避免更新太慢。"""
+    by_code = {str(x.get("etf_code", "")).upper(): x for x in master if x.get("etf_code")}
+    items = []
+    for code in ETF_PRIORITY_CODES:
+        if code in by_code:
+            items.append(by_code[code])
+        else:
+            seed_name = next((n for c, n in ETF_SEED_LIST if c.upper() == code), "")
+            items.append({"etf_code": code, "etf_name": seed_name, "source": "priority_seed"})
+    # 去重
+    seen, out = set(), []
+    for x in items:
+        c = str(x.get("etf_code", "")).upper()
+        if c and c not in seen:
+            seen.add(c)
+            out.append(x)
+    return out
+
+
+def update_etf_holdings_cache(force=False, max_etfs=None, scan_all=False):
+    """
+    v9：快速更新 ETF → 成分股快取。
+    - 先探測來源，MoneyDJ/Pocket/CMoney 無法連線就整批跳過，不再 53 檔逐一 timeout。
+    - 預設只掃重點/主動式 ETF，避免 Streamlit Cloud 按鈕卡 1 分鐘以上。
+    - 新增 Yahoo ETF 持股頁作為可連線的 ETF→成分股來源，用來補 00981A 這類 Yahoo 個股頁漏列問題。
+    """
+    cached = _read_json_file(ETF_HOLDINGS_CACHE_FILE, {})
+    if (not force) and cached.get("updated_date") == _today_str() and cached.get("holdings"):
+        return cached
+
+    master_all = discover_etf_master_list(force=force)
+    if scan_all:
+        master = master_all
+    else:
+        master = _get_priority_master_items(master_all)
+    if max_etfs:
+        master = master[:int(max_etfs)]
+
+    source_health = _probe_source_health()
+    holdings = []
+    errors = []
+
+    for item in master:
+        code = str(item.get("etf_code", "")).upper()
+        name = item.get("etf_name", "")
+        if not code:
+            continue
+        rows = []
+
+        if source_health.get("MoneyDJ"):
+            try:
+                rows = fetch_moneydj_etf_holdings(code, name)
+            except Exception as e:
+                errors.append({"etf_code": code, "source": "MoneyDJ", "error": str(e)[:180]})
+        else:
+            errors.append({"etf_code": code, "source": "MoneyDJ", "error": "來源探測失敗，已跳過整批 MoneyDJ，避免逐檔 timeout"})
+
+        if not rows and source_health.get("Yahoo ETF持股頁"):
+            try:
+                rows = fetch_yahoo_etf_holdings(code, name)
+            except Exception as e:
+                errors.append({"etf_code": code, "source": "Yahoo ETF持股頁", "error": str(e)[:180]})
+
+        if not rows and source_health.get("Pocket"):
+            try:
+                rows = fetch_pocket_etf_holdings(code, name)
+            except Exception as e:
+                errors.append({"etf_code": code, "source": "Pocket", "error": str(e)[:180]})
+        elif not source_health.get("Pocket"):
+            errors.append({"etf_code": code, "source": "Pocket", "error": "來源探測失敗，已跳過整批 Pocket"})
+
+        if not rows and source_health.get("CMoney"):
+            try:
+                rows = fetch_cmoney_etf_holdings(code, name)
+            except Exception as e:
+                errors.append({"etf_code": code, "source": "CMoney", "error": str(e)[:180]})
+        elif not source_health.get("CMoney"):
+            errors.append({"etf_code": code, "source": "CMoney", "error": "來源探測失敗，已跳過整批 CMoney"})
+
+        holdings.extend(rows)
+        time.sleep(0.05)
+
+    cache = {
+        "version": ETF_CACHE_VERSION,
+        "updated_date": _today_str(),
+        "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "master_count": len(master),
+        "master_total_count": len(master_all),
+        "scan_mode": "all" if scan_all else "priority_fast",
+        "source_health": source_health,
+        "holdings_count": len(holdings),
+        "holdings": _dedup_holding_rows(holdings),
+        "errors_sample": errors[:80],
+        "note": "v9 預設快速掃描重點/主動式 ETF；MoneyDJ/Pocket/CMoney 若探測失敗會整批跳過，避免按鈕卡住。",
+    }
+    cache["holdings_count"] = len(cache["holdings"])
+    _write_json_file(ETF_HOLDINGS_CACHE_FILE, cache)
+    return cache
+
+
+def load_etf_holdings_cache(auto_update=True):
+    cache = _read_json_file(ETF_HOLDINGS_CACHE_FILE, {})
+    # v9：自動更新只在快取不存在時做快速更新；若今天已建立但 0 筆，不在每次頁面載入重跑，避免變慢。
+    if auto_update and (not cache or cache.get("updated_date") != _today_str()):
+        cache = update_etf_holdings_cache(force=False)
+    return cache
+
+
+def get_etf_cache_status():
+    cache = _read_json_file(ETF_HOLDINGS_CACHE_FILE, {})
+    master = _read_json_file(ETF_MASTER_CACHE_FILE, {})
+    return {
+        "cache_version": cache.get("version", "尚未建立"),
+        "updated_date": cache.get("updated_date", "尚未更新"),
+        "updated_at": cache.get("updated_at", "尚未更新"),
+        "is_today": cache.get("updated_date") == _today_str(),
+        "master_count": cache.get("master_count", master.get("count", 0)),
+        "master_total_count": cache.get("master_total_count", master.get("count", 0)),
+        "scan_mode": cache.get("scan_mode", "尚未建立"),
+        "source_health": cache.get("source_health", {}),
+        "holdings_count": cache.get("holdings_count", len(cache.get("holdings", [])) if isinstance(cache.get("holdings"), list) else 0),
+        "errors_count": len(cache.get("errors_sample", [])) if isinstance(cache.get("errors_sample"), list) else 0,
+    }
+
+
+def _scan_priority_etfs_for_stock(stock_id, stock_name=""):
+    """快取沒有命中時，快速直接檢查重點 ETF 的 Yahoo ETF 持股頁，避免 00981A 漏掉。"""
+    stock_id = str(stock_id).strip()
+    target_name_key = _normalize_tw_name(stock_name or "")
+    if not target_name_key:
+        try:
+            target_name_key = _normalize_tw_name(get_chinese_name(stock_id) or "")
+        except Exception:
+            target_name_key = ""
+
+    master = discover_etf_master_list(force=False)
+    candidates = _get_priority_master_items(master)
+    out = []
+    for item in candidates:
+        code = str(item.get("etf_code", "")).upper()
+        name = item.get("etf_name", "")
+        try:
+            rows = fetch_yahoo_etf_holdings(code, name)
+        except Exception:
+            continue
+        for r in rows:
+            row_code = str(r.get("stock_code", "")).strip()
+            row_name_key = _normalize_tw_name(r.get("stock_name", ""))
+            if row_code == stock_id or (target_name_key and row_name_key and target_name_key == row_name_key):
+                out.append({
+                    "etf_code": _normalize_etf_code(r.get("etf_code")),
+                    "etf_name": r.get("etf_name", name),
+                    "weight": r.get("weight"),
+                    "shares": r.get("shares"),
+                    "data_date": r.get("data_date") or "來源未揭露",
+                    "source": r.get("source") or "Yahoo ETF持股頁",
+                    "source_url": r.get("source_url", ""),
+                    "data_type": "ETF持股頁快速反查",
+                    "note": "快取未命中時，直接檢查重點 ETF 的持股頁；不是 Yahoo 個股頁結果",
+                })
+    return _normalize_etf_holders(out, default_source="ETF持股頁快速反查")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_stock_etf_holders(stock_id, stock_name=None, force_refresh=False):
+    """
+    v9：優先從 ETF 成分股快取反查；快取 0 筆時改用重點 ETF 持股頁快速反查；最後才退回 Yahoo 個股頁補漏。
+    """
+    stock_id = str(stock_id).strip()
+    if not stock_id:
+        return []
+
+    cache = update_etf_holdings_cache(force=True) if force_refresh else load_etf_holdings_cache(auto_update=True)
+    holdings = cache.get("holdings", []) if isinstance(cache, dict) else []
+    results = []
+    target_name_key = _normalize_tw_name(stock_name or "")
+    if not target_name_key:
+        try:
+            target_name_key = _normalize_tw_name(get_chinese_name(stock_id) or "")
+        except Exception:
+            target_name_key = ""
+
+    for r in holdings:
+        row_code = str(r.get("stock_code", "")).strip()
+        row_name_key = _normalize_tw_name(r.get("stock_name", ""))
+        if row_code == stock_id or (target_name_key and row_name_key and target_name_key == row_name_key):
+            results.append({
+                "etf_code": _normalize_etf_code(r.get("etf_code")),
+                "etf_name": r.get("etf_name", ""),
+                "weight": r.get("weight"),
+                "shares": r.get("shares"),
+                "data_date": r.get("data_date") or "來源未揭露",
+                "source": r.get("source") or "ETF成分股快取",
+                "source_url": r.get("source_url", ""),
+                "data_type": "ETF成分股快取反查",
+                "note": "由 ETF 持股明細反查，不是 Yahoo 個股頁結果",
+            })
+
+    if not results:
+        results = _scan_priority_etfs_for_stock(stock_id, stock_name)
+
+    # 去重排序
+    pref = {"MoneyDJ": 0, "Yahoo ETF持股頁": 1, "Pocket": 2, "CMoney": 3, "TWSE": 4, "Yahoo股市": 8, "FindBillion": 9}
+    dedup = {}
+    for r in results:
+        code = r.get("etf_code")
+        if not code:
+            continue
+        old = dedup.get(code)
+        if old is None:
+            dedup[code] = r
+        else:
+            old_rank = pref.get(str(old.get("source")), 99)
+            new_rank = pref.get(str(r.get("source")), 99)
+            if (old.get("weight") is None and r.get("weight") is not None) or new_rank < old_rank:
+                dedup[code] = r
+    results = list(dedup.values())
+    results.sort(key=lambda x: (x.get("weight") is None, -(x.get("weight") or 0)))
+    if results:
+        return results[:80]
+
+    # 最後補漏：舊 Yahoo 個股頁。這會漏 00981A，所以只當最後備援。
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        }
+        sources = [
+            ("Yahoo股市", f"https://tw.stock.yahoo.com/quote/{stock_id}.TW/etf"),
+            ("FindBillion", f"https://www.findbillion.com/twstock/{stock_id}/etf"),
+        ]
+        best_rows = []
+        for source_name, url in sources:
+            try:
+                res = requests.get(url, headers=headers, timeout=(1.2, 3.0))
+                if res.status_code != 200:
+                    continue
+                rows = _extract_etf_holders_from_text(res.text, source_name)
+                for rr in rows:
+                    rr["data_date"] = rr.get("data_date") or "來源未揭露"
+                    rr["data_type"] = "個股頁補漏"
+                    rr["note"] = "ETF 快取與重點 ETF 持股頁未命中，改用個股頁補漏；此來源可能漏主動式 ETF"
+                if rows and (not best_rows or len(rows) > len(best_rows)):
+                    best_rows = rows
+            except Exception:
+                continue
+        return best_rows[:20]
+    except Exception:
+        return []
+
+
+# ==========================================
+# 3.4 ETF 持股查詢 v10：一般頁面只顯示 Yahoo 主要/前十大；完整 ETF 另用 AI 按鈕查
+# ==========================================
+ETF_SYSTEM_NOTE_V10 = "Yahoo 個股 ETF 頁多為主要/前十大或公開頁面可解析清單，不代表完整 ETF 持股名單。"
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_stock_etf_holders(stock_id, stock_name=None, force_refresh=False):
+    """
+    v10：一般個股頁只做快速查詢，不再更新/掃描 ETF 成分股快取。
+    - 不使用 AI。
+    - 不掃 MoneyDJ / Pocket / CMoney，避免 Streamlit Cloud 卡住。
+    - 主要使用 Yahoo 個股 ETF 頁，必要時 FindBillion 補漏。
+    - 回傳的 data_type 固定標示為「主要/前十大快速查詢」。
+    """
+    stock_id = str(stock_id).strip()
+    if not stock_id:
+        return []
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+    }
+    sources = [
+        ("Yahoo股市", f"https://tw.stock.yahoo.com/quote/{stock_id}.TW/etf"),
+        ("FindBillion", f"https://www.findbillion.com/twstock/{stock_id}/etf"),
+    ]
+    best_rows = []
+    for source_name, url in sources:
+        try:
+            res = requests.get(url, headers=headers, timeout=(1.5, 4.0))
+            if res.status_code != 200:
+                continue
+            rows = _extract_etf_holders_from_text(res.text, source_name)
+            for rr in rows:
+                rr["data_date"] = rr.get("data_date") or "來源未揭露"
+                rr["data_type"] = "主要/前十大快速查詢"
+                rr["note"] = ETF_SYSTEM_NOTE_V10
+            if rows and (not best_rows or len(rows) > len(best_rows)):
+                best_rows = rows
+        except Exception:
+            continue
+    return _normalize_etf_holders(best_rows, default_source="主要/前十大快速查詢")[:20]
+
+
+def get_etf_holders_from_ai(stock_id, stock_name, api_key, model_name="gemini-3.1-pro-preview"):
+    """
+    獨立 AI ETF 持股查詢：只在使用者按下「AI 查完整 ETF 持有狀況」時執行。
+    不併入 get_financials_from_ai()，避免財報校對工作量過大。
+    """
+    if not api_key:
+        return {"error": "未提供 API Key"}
+    try:
+        client = genai.Client(api_key=api_key.strip())
+    except Exception as e:
+        return {"error": f"GenAI Client 初始化失敗：{str(e)}"}
+
+    system_prompt = """你是一位台股 ETF 持股查詢助理。請查詢指定台股被哪些 ETF 持有。
+重點規則：
+1. 不要只依賴 Yahoo 個股 ETF 頁，因為該頁可能只列主要或前十大 ETF。
+2. 優先查投信官網/PCF/投資組合明細，其次 MoneyDJ、Pocket、CMoney、WantGoo、Yahoo ETF 持股頁。
+3. 請特別檢查主動式 ETF：00981A、00987A、00988A、00400A、00403A、00980A、00982A、00984A、00985A、00986A、00989A、00990A。
+4. 請回傳 JSON，不要輸出 markdown 或解釋文字。
+5. weight 請用百分比數字，例如 9.68% 寫成 9.68；若查無比例請填 null。
+6. data_date 請填資料日期；若來源未揭露請填 null。
+格式：
+{"etf_holders_ai":[{"etf_code":"00981A","etf_name":"主動統一台股增長","weight":9.68,"data_date":"2026/05/13","source":"MoneyDJ","note":"資料來源說明"}],"summary":"簡短說明資料完整性與限制"}
+"""
+    prompt_text = f"請查詢台股 {stock_name} ({stock_id}) 被哪些 ETF 持有，尤其確認主動式 ETF 是否持有。請回傳 ETF 代號、名稱、持股比例、資料日期、資料來源。"
+    attempts = []
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.1-pro-preview",
+            contents=prompt_text,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                tools=[{"google_search": {}}],
+                response_mime_type="application/json",
+            ),
+        )
+        text = response.text or ""
+        attempts.append({"model": "gemini-3.1-pro-preview", "ok": True})
+    except Exception as e:
+        return {"error": f"AI ETF 持股查詢失敗：{str(e)}", "attempts": attempts}
+
+    s_idx = text.find('{')
+    e_idx = text.rfind('}')
+    if s_idx == -1 or e_idx == -1:
+        return {"error": "AI 回傳格式無法解析 JSON", "raw_text_preview": text[:500], "attempts": attempts}
+    try:
+        parsed = json.loads(text[s_idx:e_idx+1])
+    except Exception as e:
+        return {"error": f"AI ETF JSON 解析失敗：{str(e)}", "raw_text_preview": text[:500], "attempts": attempts}
+
+    rows = _normalize_etf_holders(parsed.get("etf_holders_ai") or [], default_source="AI補查ETF")
+    for row in rows:
+        row["data_type"] = "AI完整ETF補查"
+        row["note"] = row.get("note") or "AI 聯網補查，請以投信公告、PCF 或 ETF 官方持股明細為準。"
+        if not row.get("data_date"):
+            row["data_date"] = "來源未揭露"
+    return {
+        "etf_holders_ai": rows,
+        "summary": parsed.get("summary", "AI 已完成 ETF 持股補查。"),
+        "model_used": "Gemini 3 Pro Preview (付費版)",
+        "ai_search_enabled": True,
+        "query_payload": json.dumps({"stock": f"{stock_name} ({stock_id})", "prompt": prompt_text, "task": "獨立 AI ETF 持股查詢"}, ensure_ascii=False, indent=2),
+        "attempts": attempts,
+    }
