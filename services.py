@@ -7,6 +7,7 @@ import datetime
 import io
 import json
 import math
+import os
 import re
 import time
 import urllib.parse
@@ -213,6 +214,464 @@ def get_stock_etf_holders(stock_id):
 
     return _normalize_etf_holders(best_rows, default_source="系統抓取")[:20]
 
+
+
+# ==========================================
+# 3.2 ETF 成分股快取反查（v4：MoneyDJ/Pocket/TWSE；一般查詢不使用 AI / 不用 Google）
+# ==========================================
+ETF_CACHE_DIR = ".etf_cache"
+ETF_MASTER_CACHE_FILE = os.path.join(ETF_CACHE_DIR, "etf_master_list.json")
+ETF_HOLDINGS_CACHE_FILE = os.path.join(ETF_CACHE_DIR, "etf_holdings_cache.json")
+ETF_CACHE_VERSION = "v5.0-etf-master-and-holdings-cache"
+ETF_SEED_CUTOFF_DATE = "2026-05-14"
+
+# 這是「保底種子清單」：避免 TWSE / 外部清單抓不到時漏掉主動式 ETF。
+# 新 ETF 仍會盡量由 discover_etf_master_list() 從公開頁面補進來。
+ETF_SEED_LIST = [
+    ("0050", "元大台灣50"), ("0051", "元大中型100"), ("0052", "富邦科技"),
+    ("0053", "元大電子"), ("0056", "元大高股息"), ("0057", "富邦摩台"),
+    ("006208", "富邦台50"), ("00690", "兆豐藍籌30"), ("00692", "富邦公司治理"),
+    ("00701", "國泰股利精選30"), ("00713", "元大台灣高息低波"), ("00728", "第一金工業30"),
+    ("00730", "富邦臺灣優質高息"), ("00733", "富邦臺灣中小"), ("00735", "國泰臺韓科技"),
+    ("00736", "國泰新興市場"), ("00850", "元大臺灣ESG永續"), ("00878", "國泰永續高股息"),
+    ("00881", "國泰台灣5G+"), ("00891", "中信關鍵半導體"), ("00892", "富邦台灣半導體"),
+    ("00900", "富邦特選高股息30"), ("00904", "新光臺灣半導體30"), ("00905", "FT臺灣Smart"),
+    ("00907", "永豐優息存股"), ("00912", "中信臺灣智慧50"), ("00913", "兆豐台灣晶圓製造"),
+    ("00915", "凱基優選高股息30"), ("00919", "群益台灣精選高息"), ("00922", "國泰台灣領袖50"),
+    ("00923", "群益台ESG低碳50"), ("00927", "群益半導體收益"), ("00929", "復華台灣科技優息"),
+    ("00932", "兆豐永續高息等權"), ("00934", "中信成長高股息"), ("00939", "統一台灣高息動能"),
+    ("00940", "元大台灣價值高息"), ("00944", "野村趨勢動能高息"), ("00946", "群益科技高息成長"),
+    ("00952", "凱基台灣AI50"), ("00980A", "主動野村臺灣優選"), ("00981A", "主動統一台股增長"),
+    ("00982A", "主動群益台灣強棒"), ("00983A", "主動中信ARK創新"), ("00984A", "主動安聯台灣高息"),
+    ("00985A", "主動野村台灣50"), ("00986A", "主動群益科技創新"), ("00987A", "主動台新優勢成長"),
+    ("00988A", "主動統一台股優"), ("00989A", "主動復華未來50"), ("00990A", "主動野村全球航運"),
+    ("00400A", "主動國泰動能高息"), ("00403A", "主動統一台灣科技"),
+]
+
+
+def _today_str():
+    return datetime.date.today().strftime("%Y-%m-%d")
+
+
+def _ensure_etf_cache_dir():
+    os.makedirs(ETF_CACHE_DIR, exist_ok=True)
+
+
+def _read_json_file(path, default):
+    try:
+        if not os.path.exists(path):
+            return default
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _write_json_file(path, data):
+    _ensure_etf_cache_dir()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _flatten_columns(df):
+    df = df.copy()
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = ["_".join([str(x) for x in c if str(x) != "nan"]).strip() for c in df.columns]
+    else:
+        df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def _clean_percent_to_float(v):
+    if v is None:
+        return None
+    try:
+        s = str(v).strip().replace("％", "%").replace("%", "").replace(",", "")
+        if s in ["", "--", "-", "N/A", "nan", "None"]:
+            return None
+        x = float(s)
+        # 有些來源用 0.0968 表示 9.68%，統一轉為百分比數字。
+        if 0 < abs(x) <= 1:
+            x *= 100
+        return x
+    except Exception:
+        return None
+
+
+def _extract_data_date_from_text(text):
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", str(text))
+    patterns = [
+        r"(?:資料日期|資料時間|更新日期|更新時間|持股日期|成分股日期|基準日|截至|日期)[:：\s]*(\d{4}[/-]\d{1,2}[/-]\d{1,2})",
+        r"(\d{4}[/-]\d{1,2}[/-]\d{1,2})\s*(?:資料|更新|持股|成分股|基準日)",
+        r"(\d{3}[/-]\d{1,2}[/-]\d{1,2})",  # 民國年格式，先原樣保留
+    ]
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            return m.group(1).replace("/", "-")
+    return ""
+
+
+def _request_html(url, timeout=15):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        "Referer": "https://www.google.com/",
+    }
+    res = requests.get(url, headers=headers, timeout=timeout)
+    res.raise_for_status()
+    # MoneyDJ 有時編碼不是 UTF-8，交給 requests 判斷。
+    if not res.encoding or res.encoding.lower() == "iso-8859-1":
+        res.encoding = res.apparent_encoding or "utf-8"
+    return res.text
+
+
+def discover_etf_master_list(force=False):
+    """
+    建立 ETF 主清單：
+    1) 先讀快取；
+    2) 盡量從公開資料源補 ETF 代號；
+    3) 失敗時至少使用 ETF_SEED_LIST，避免 00981A 這類主動式 ETF 漏掉。
+    """
+    cached = _read_json_file(ETF_MASTER_CACHE_FILE, {})
+    if (not force) and cached.get("updated_date") == _today_str() and cached.get("items"):
+        return cached.get("items", [])
+
+    items = {code.upper(): {"etf_code": code.upper(), "etf_name": name, "source": "seed"} for code, name in ETF_SEED_LIST}
+
+    # 嘗試從 TWSE OpenAPI / 公開列表補充。不同時期 endpoint 可能調整；失敗不阻斷主流程。
+    candidate_urls = [
+        "https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX",
+        "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
+        "https://openapi.twse.com.tw/v1/opendata/t187ap05_L",
+    ]
+    for url in candidate_urls:
+        try:
+            data = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"}).json()
+            if not isinstance(data, list):
+                continue
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                txt = " ".join([str(v) for v in row.values()])
+                # 台股 ETF 常見代號：00xxx / 00xxxA / 004xxA / 006xxL 等
+                m = re.search(r"\b(00\d{2,4}[A-Z]?)\b", txt, re.I)
+                if not m:
+                    continue
+                code = m.group(1).upper()
+                if not code.startswith("00"):
+                    continue
+                # 嘗試從欄位名稱找中文名稱
+                name = ""
+                for k, v in row.items():
+                    ks = str(k)
+                    if any(x in ks for x in ["名稱", "股票名稱", "有價證券名稱", "基金"]):
+                        name = str(v).strip()
+                        break
+                if not name:
+                    name = items.get(code, {}).get("etf_name", "")
+                items[code] = {"etf_code": code, "etf_name": name, "source": "TWSE/OpenAPI"}
+        except Exception:
+            continue
+
+    result = sorted(items.values(), key=lambda x: x.get("etf_code", ""))
+    _write_json_file(ETF_MASTER_CACHE_FILE, {
+        "version": ETF_CACHE_VERSION,
+        "updated_date": _today_str(),
+        "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "seed_cutoff_date": ETF_SEED_CUTOFF_DATE,
+        "count": len(result),
+        "source_counts": {src: sum(1 for x in result if x.get("source") == src) for src in sorted(set(x.get("source", "未知") for x in result))},
+        "note": f"內建種子清單包含 {ETF_SEED_CUTOFF_DATE} 前已知上市 ETF；可按鈕重新從 TWSE/OpenAPI 補抓新上市或漏收 ETF。",
+        "items": result,
+    })
+    return result
+
+
+def _parse_holdings_tables_from_html(html, etf_code, etf_name, source, source_url):
+    rows = []
+    data_date = _extract_data_date_from_text(html)
+    try:
+        tables = pd.read_html(io.StringIO(html))
+    except Exception:
+        return rows
+
+    for df in tables:
+        if df is None or df.empty:
+            continue
+        df = _flatten_columns(df)
+        full_text = " ".join(df.astype(str).head(80).fillna("").values.ravel().tolist())
+        col_text = " ".join([str(c) for c in df.columns])
+        if not any(k in (full_text + col_text) for k in ["投資比例", "持股", "權重", "比例", "成分股", "股票代號", "證券代號"]):
+            continue
+
+        for _, r in df.iterrows():
+            vals = [str(v).strip() for v in list(r.values) if str(v).strip() not in ["", "nan", "None"]]
+            if not vals:
+                continue
+            row_text = " ".join(vals)
+            # 排除表頭、ETF 本身與明顯非台股成分。
+            if any(x in row_text for x in ["投資區域", "產業", "資產", "合計", "小計"]):
+                continue
+            m_code = re.search(r"(?<!\d)(\d{4})(?:\.TW|\s|$|\)|）|　)", row_text)
+            if not m_code:
+                continue
+            stock_code = m_code.group(1)
+            if stock_code == etf_code[:4]:
+                # 大多情境不會等於 ETF 本身；保守跳過。
+                pass
+
+            # 名稱：優先抓  台積電(2330.TW) 這種格式，否則取代號前後的中文。
+            stock_name = ""
+            m_name = re.search(r"([\u4e00-\u9fffA-Za-z0-9\-＋+·]{2,30})\s*[\(（]?" + re.escape(stock_code) + r"(?:\.TW)?", row_text)
+            if m_name:
+                stock_name = m_name.group(1).strip()
+            else:
+                # 從各欄位找第一個看似名稱的中文字串
+                for v in vals:
+                    if stock_code in v:
+                        continue
+                    if re.search(r"[\u4e00-\u9fff]", v) and not any(bad in v for bad in ["投資比例", "持有股數", "代號"]):
+                        stock_name = v[:30]
+                        break
+
+            weight = None
+            # 優先從欄名含比例/權重的欄位取。
+            for c in df.columns:
+                if any(k in str(c) for k in ["投資比例", "持股比例", "權重", "比例", "%"]):
+                    weight = _clean_percent_to_float(r.get(c))
+                    if weight is not None:
+                        break
+            if weight is None:
+                m_w = re.search(r"(-?\d{1,3}(?:\.\d{1,4})?)\s*%", row_text)
+                if m_w:
+                    weight = _clean_percent_to_float(m_w.group(1))
+
+            shares = None
+            for c in df.columns:
+                if any(k in str(c) for k in ["持有股數", "股數", "股"]):
+                    shares = str(r.get(c)).strip()
+                    break
+
+            rows.append({
+                "etf_code": etf_code.upper(),
+                "etf_name": etf_name,
+                "stock_code": stock_code,
+                "stock_name": stock_name,
+                "weight": weight,
+                "shares": shares,
+                "data_date": data_date,
+                "source": source,
+                "source_url": source_url,
+                "data_type": "系統抓取",
+                "fetched_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+    # 同一 ETF/股票去重，保留有比例者。
+    dedup = {}
+    for r in rows:
+        key = (r["etf_code"], r["stock_code"])
+        old = dedup.get(key)
+        if old is None or (old.get("weight") is None and r.get("weight") is not None):
+            dedup[key] = r
+    return list(dedup.values())
+
+
+def fetch_moneydj_etf_holdings(etf_code, etf_name=""):
+    url = f"https://www.moneydj.com/etf/x/basic/basic0007.xdjhtm?etfid={str(etf_code).lower()}.tw"
+    html = _request_html(url)
+    return _parse_holdings_tables_from_html(html, etf_code, etf_name, "MoneyDJ", url)
+
+
+def fetch_pocket_etf_holdings(etf_code, etf_name=""):
+    url = f"https://www.pocket.tw/etf/tw/{str(etf_code).upper()}/fundholding/"
+    html = _request_html(url)
+    return _parse_holdings_tables_from_html(html, etf_code, etf_name, "Pocket", url)
+
+
+def update_etf_holdings_cache(force=False, max_etfs=None):
+    """
+    更新 ETF → 成分股快取。一般查詢不使用 AI / 不用 Google。
+    max_etfs 可在測試時限制掃描檔數；正式環境建議 None。
+    """
+    cached = _read_json_file(ETF_HOLDINGS_CACHE_FILE, {})
+    if (not force) and cached.get("updated_date") == _today_str() and cached.get("holdings"):
+        return cached
+
+    master = discover_etf_master_list(force=force)
+    if max_etfs:
+        master = master[:int(max_etfs)]
+
+    holdings = []
+    errors = []
+    for i, item in enumerate(master, start=1):
+        code = item.get("etf_code", "").upper()
+        name = item.get("etf_name", "")
+        if not code:
+            continue
+        rows = []
+        # MoneyDJ 優先；抓不到才試 Pocket。
+        try:
+            rows = fetch_moneydj_etf_holdings(code, name)
+        except Exception as e:
+            errors.append({"etf_code": code, "source": "MoneyDJ", "error": str(e)[:160]})
+        if not rows:
+            try:
+                rows = fetch_pocket_etf_holdings(code, name)
+            except Exception as e:
+                errors.append({"etf_code": code, "source": "Pocket", "error": str(e)[:160]})
+        holdings.extend(rows)
+        # 禮貌延遲，避免對外部網站造成壓力。
+        time.sleep(0.25)
+
+    cache = {
+        "version": ETF_CACHE_VERSION,
+        "updated_date": _today_str(),
+        "updated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "master_count": len(master),
+        "holdings_count": len(holdings),
+        "holdings": holdings,
+        "errors_sample": errors[:30],
+    }
+    _write_json_file(ETF_HOLDINGS_CACHE_FILE, cache)
+    return cache
+
+
+def load_etf_holdings_cache(auto_update=True):
+    cache = _read_json_file(ETF_HOLDINGS_CACHE_FILE, {})
+    if auto_update and (cache.get("updated_date") != _today_str() or not cache.get("holdings")):
+        cache = update_etf_holdings_cache(force=False)
+    return cache
+
+
+def update_etf_master_list_cache(force=True):
+    """
+    更新 ETF 主清單快取：
+    - 不使用 AI、不用 Google 搜尋；
+    - 以內建種子清單為底，再嘗試從 TWSE/OpenAPI 補進新上市或漏收 ETF；
+    - 只更新 ETF 清單，不會抓每檔 ETF 的成分股。
+    """
+    discover_etf_master_list(force=force)
+    return _read_json_file(ETF_MASTER_CACHE_FILE, {})
+
+
+def get_etf_master_cache_status():
+    master = _read_json_file(ETF_MASTER_CACHE_FILE, {})
+    items = master.get("items", []) if isinstance(master.get("items"), list) else []
+    active_count = 0
+    for x in items:
+        code = str(x.get("etf_code", "")).upper()
+        name = str(x.get("etf_name", ""))
+        if code.endswith("A") or "主動" in name:
+            active_count += 1
+    return {
+        "cache_version": master.get("version", "尚未建立"),
+        "updated_date": master.get("updated_date", "尚未更新"),
+        "updated_at": master.get("updated_at", "尚未更新"),
+        "is_today": master.get("updated_date") == _today_str(),
+        "count": master.get("count", len(items)),
+        "active_count": active_count,
+        "seed_cutoff_date": master.get("seed_cutoff_date", ETF_SEED_CUTOFF_DATE),
+        "source_counts": master.get("source_counts", {}),
+        "note": master.get("note", f"內建種子清單包含 {ETF_SEED_CUTOFF_DATE} 前已知上市 ETF。"),
+    }
+
+
+def get_etf_cache_status():
+    cache = _read_json_file(ETF_HOLDINGS_CACHE_FILE, {})
+    master = _read_json_file(ETF_MASTER_CACHE_FILE, {})
+    return {
+        "cache_version": cache.get("version", "尚未建立"),
+        "updated_date": cache.get("updated_date", "尚未更新"),
+        "updated_at": cache.get("updated_at", "尚未更新"),
+        "is_today": cache.get("updated_date") == _today_str(),
+        "master_count": cache.get("master_count", master.get("count", 0)),
+        "holdings_count": cache.get("holdings_count", len(cache.get("holdings", [])) if isinstance(cache.get("holdings"), list) else 0),
+        "errors_count": len(cache.get("errors_sample", [])) if isinstance(cache.get("errors_sample"), list) else 0,
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_stock_etf_holders(stock_id, force_refresh=False):
+    """
+    從 ETF 成分股快取反查「哪些 ETF 持有此股票」。
+    注意：此函式一般查詢不呼叫 AI、不用 Google 搜尋。
+    若快取沒有資料，才用 Yahoo/FindBillion 個股反查作為最後補漏。
+    """
+    stock_id = str(stock_id).strip()
+    if not stock_id:
+        return []
+
+    if force_refresh:
+        cache = update_etf_holdings_cache(force=True)
+    else:
+        cache = load_etf_holdings_cache(auto_update=True)
+
+    holdings = cache.get("holdings", []) if isinstance(cache, dict) else []
+    results = []
+    for r in holdings:
+        if str(r.get("stock_code", "")).strip() == stock_id:
+            results.append({
+                "etf_code": _normalize_etf_code(r.get("etf_code")),
+                "etf_name": r.get("etf_name", ""),
+                "weight": r.get("weight"),
+                "shares": r.get("shares"),
+                "data_date": r.get("data_date") or "來源未揭露",
+                "source": r.get("source") or "ETF成分股快取",
+                "source_url": r.get("source_url", ""),
+                "data_type": "ETF成分股快取反查",
+                "note": "由 ETF 持股明細反查，不是 Yahoo 個股頁結果",
+            })
+
+    # 去重：同一 ETF 若多來源重複，優先保留 MoneyDJ / 有比例者。
+    pref = {"MoneyDJ": 0, "Pocket": 1, "TWSE": 2, "Yahoo股市": 3, "FindBillion": 4}
+    dedup = {}
+    for r in results:
+        code = r.get("etf_code")
+        old = dedup.get(code)
+        if old is None:
+            dedup[code] = r
+        else:
+            old_rank = pref.get(str(old.get("source")), 99)
+            new_rank = pref.get(str(r.get("source")), 99)
+            if (old.get("weight") is None and r.get("weight") is not None) or new_rank < old_rank:
+                dedup[code] = r
+    results = list(dedup.values())
+    results.sort(key=lambda x: (x.get("weight") is None, -(x.get("weight") or 0)))
+
+    if results:
+        return results[:80]
+
+    # 最後補漏：保留舊 Yahoo/FindBillion 個股頁解析，但明確標示來源。
+    # 這不是主資料源，只避免快取建置失敗時完全沒資料。
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        }
+        sources = [
+            ("Yahoo股市", f"https://tw.stock.yahoo.com/quote/{stock_id}.TW/etf"),
+            ("FindBillion", f"https://www.findbillion.com/twstock/{stock_id}/etf"),
+        ]
+        best_rows = []
+        for source_name, url in sources:
+            try:
+                res = requests.get(url, headers=headers, timeout=12)
+                if res.status_code != 200:
+                    continue
+                rows = _extract_etf_holders_from_text(res.text, source_name)
+                for rr in rows:
+                    rr["data_date"] = rr.get("data_date") or "來源未揭露"
+                    rr["data_type"] = "個股頁補漏"
+                    rr["note"] = "ETF 快取未命中，改用個股頁補漏"
+                if rows and (not best_rows or len(rows) > len(best_rows)):
+                    best_rows = rows
+            except Exception:
+                continue
+        return best_rows[:20]
+    except Exception:
+        return []
 
 def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1-pro-preview"):
     """
