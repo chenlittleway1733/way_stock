@@ -1,4 +1,4 @@
-"""20260514
+"""
 外部資料與模型服務層：
 yfinance、Fugle、FinMind、Yahoo、Gemini 等 API 存取都集中在這裡。
 由原始 app(1).py 拆分而來，已全面升級為最新的 google-genai 官方 SDK。
@@ -57,7 +57,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     v7 修正重點：
     1) 僅允許 Gemini 3 Pro Preview 付費版 + Google Search。
     2) 不自動降級到 2.5 Pro / 2.5 Flash / 離線保底，避免不準資料進入估值模型。
-    3) 尖峰時段採用「同模型 Pro Only Retry」：立即重試、等待 3 秒、等待 8 秒。
+    3) 尖峰時段採用「同模型 Pro Only Retry」：立即重試、等待 30 秒、等待 60 秒。
     4) 全部失敗時只回傳 error 與 attempts，不產生 AI 財報數據。
     """
     if not api_key:
