@@ -1,4 +1,4 @@
-""" 
+"""
 Streamlit 使用者介面層：
 包含側邊欄、主畫面、卡片、圖表與互動按鈕。
 由原始 app(1).py 拆分而來。
@@ -410,7 +410,7 @@ def render_main_page(sidebar_state=None):
     # ==========================================
     # 5. 主畫面開始
     # ==========================================
-    st.markdown("## 📈 WAY AI 投資戰情室 版本1.25")
+    st.markdown("## 📈 WAY AI 投資戰情室 版本1.26,版本修改2026/05/19")
 
     if st.session_state.fugle_key and not f_ok:
         st.error("🚨 **系統警報**：您輸入的「富果 (Fugle) API Key」驗證失敗！請至左側欄檢查金鑰是否輸入正確。")
@@ -901,6 +901,18 @@ def render_main_page(sidebar_state=None):
                 if ai_om is not None:
                     display_operating_margin = ai_om
 
+            # v1.27：D/E 與財報期間強相關。若按下 AI 校對且 AI 有明確 data_period，
+            # 當系統值被排除、或系統值與 AI 最新財報差距明顯時，主值改採 AI，並保留系統原值。
+            de_should_prefer_ai = False
+            if has_ai_fin_fetch and ai_de is not None and raw_ai_period:
+                if sys_de is None:
+                    de_should_prefer_ai = True
+                elif abs(sys_de - ai_de) >= max(0.50, abs(sys_de) * 0.50):
+                    de_should_prefer_ai = True
+
+            if de_should_prefer_ai:
+                display_debt_to_equity = ai_de
+
             # v1.25：同一月份的系統月營收與 AI 聯網值若明顯不一致，代表快取/來源口徑可能錯位。
             # 例如技嘉 2376：系統抓到 2026/04 但 YoY/MoM 仍像 2026/03，AI 查到同月公開速報值。
             # 此時畫面、估值與打包提示詞改用 AI 同月份校正值，並保留警告，避免錯數據進 prompt。
@@ -944,6 +956,13 @@ def render_main_page(sidebar_state=None):
                 st.warning(
                     f"⚠️ AI 營收月份與系統月營收不一致：AI={ai_rev_month}，系統={latest_rev_month}。"
                     "營收 YoY/MoM 顯示仍以系統月營收為主，AI 只保留為交叉校對。"
+                )
+
+            if de_should_prefer_ai and sys_de is not None:
+                st.warning(
+                    f"⚠️ {c_name} ({curr_id}) D/E 採用邏輯調整："
+                    f"系統 D/E={to_val_str(sys_de, 'pct')}，AI 最新財報({raw_ai_period}) D/E={to_val_str(ai_de, 'pct')}；"
+                    "因差距明顯，已改用 AI 最新財報值進入畫面與打包提示詞。"
                 )
 
             if latest_mom_val is not None:
@@ -1122,7 +1141,12 @@ def render_main_page(sidebar_state=None):
                 sys_om_txt = to_val_str(op_margin, 'pct')
                 gm_om_str += f"<br><span style='color:#FFD700; font-size:0.85rem;'>(採 AI 最新財報{', ' + ai_period_val if ai_period_val else ''}；系統原值: {sys_gm_txt} / {sys_om_txt})</span>"
             roe_str = build_cmp_str(roe, ai_roe, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
-            de_str = build_cmp_str(display_debt_to_equity, display_ai_debt_to_equity, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            if de_should_prefer_ai:
+                sys_de_txt = to_val_str(sys_de, 'pct') if sys_de is not None else "NULL"
+                de_str = to_val_str(display_debt_to_equity, 'pct')
+                de_str += f"<br><span style='color:#FFD700; font-size:0.85rem;'>(採 AI 最新財報{', ' + ai_period_val if ai_period_val else ''}；系統原值: {sys_de_txt})</span>"
+            else:
+                de_str = build_cmp_str(display_debt_to_equity, display_ai_debt_to_equity, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
             pb_str = build_cmp_str(pb_ratio, ai_pb, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
         
             rg_color = "#ff4d4d" if eff_rg and eff_rg > 0 else ("#00cc66" if eff_rg and eff_rg < 0 else "#fff")
