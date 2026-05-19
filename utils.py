@@ -1,5 +1,5 @@
-"""
-共用常數、格式化工具、自選股與 Streamlit Session State 管理。 
+""" 
+共用常數、格式化工具、自選股與 Streamlit Session State 管理。
 由原始 app(1).py 拆分而來。
 """
 import os
@@ -237,7 +237,7 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
                 if old_sys_yoy is not None and abs(old_sys_yoy - monthly_yoy) >= 0.10:
                     period_text = f"({monthly_period})" if monthly_period else ""
                     warnings.append(
-                        f"{label} 的營收 YoY 已改用月營收資料{period_text}：原 yfinance revenueGrowth={to_val_str(old_sys_yoy, 'pct')}，月營收 YoY={to_val_str(monthly_yoy, 'pct')}。"
+                        f"{label} 的 yfinance revenueGrowth={to_val_str(old_sys_yoy, 'pct')}，系統月營收快取{period_text} YoY={to_val_str(monthly_yoy, 'pct')}；已先以月營收快取取代 yfinance 值。若 AI 同月份交叉校對不一致，畫面與打包提示詞會再改用 AI 同月份值。"
                     )
                 corrected["rev_growth"] = monthly_yoy
                 corrected["revenue_yoy"] = monthly_yoy
