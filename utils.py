@@ -1,5 +1,5 @@
 """
-共用常數、格式化工具、自選股與 Streamlit Session State 管理。
+共用常數、格式化工具、自選股與 Streamlit Session State 管理。 
 由原始 app(1).py 拆分而來。
 """
 import os
@@ -98,13 +98,38 @@ def clean_html(html_str):
 # 1.1 財務資料合理性校驗 / 欄位錯位防呆
 # ==========================================
 def normalize_financial_ratio(val, default=None):
-    """將百分比欄位統一成小數格式：31.5 -> 0.315；0.315 -> 0.315。"""
+    """將一般百分比欄位統一成小數格式：31.5 -> 0.315；0.315 -> 0.315。
+    注意：D/E 不可使用此函式，因為 2.69 可能代表 2.69 倍，而不是 2.69%。
+    """
     v = s_float(val, default)
     if v is None:
         return default
     # Yahoo / AI / 不同 API 有時會把百分比以 31.5 而非 0.315 回傳
     if abs(v) > 1.5 and abs(v) <= 100:
         return v / 100.0
+    return v
+
+
+def normalize_debt_to_equity(val, default=None):
+    """將 D/E 統一成「倍數」：0.608=60.8%；2.69=269%；132.1=132.1%。
+
+    為什麼要獨立處理：
+    - 毛利率/ROE 這類欄位的 12.01 通常代表 12.01%。
+    - 但 D/E 的 2.69 常代表 2.69 倍，而不是 2.69%。
+    - yfinance 或台灣財報來源常回傳 132.1 代表 132.1%，需轉成 1.321 倍。
+    """
+    v = s_float(val, default)
+    if v is None:
+        return default
+
+    av = abs(v)
+    # 2.69 這種常見寫法多半是 2.69 倍 = 269%。
+    if 1.5 < av <= 10:
+        return v
+    # 60.8 / 132.1 / 269 這種通常是百分比數字。
+    if 10 < av <= 1000:
+        return v / 100.0
+    # 0.608 / 1.321 這種已是倍數。
     return v
 
 def normalize_revenue_month(val):
@@ -162,10 +187,12 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
     if ai_norm.get("rev_growth") is None and ai_norm.get("revenue_yoy") is not None:
         ai_norm["rev_growth"] = ai_norm.get("revenue_yoy")
 
-    # 統一百分比欄位尺度
-    for key in ["gross_margin", "operating_margin", "rev_growth", "revenue_yoy", "revenue_mom", "earnings_cagr", "eps_growth_yoy", "debt_to_equity"]:
+    # 統一百分比欄位尺度；D/E 需獨立正規化，避免 2.69 倍被誤判成 2.69%。
+    for key in ["gross_margin", "operating_margin", "rev_growth", "revenue_yoy", "revenue_mom", "earnings_cagr", "eps_growth_yoy"]:
         corrected[key] = normalize_financial_ratio(corrected.get(key))
         ai_norm[key] = normalize_financial_ratio(ai_norm.get(key))
+    corrected["debt_to_equity"] = normalize_debt_to_equity(corrected.get("debt_to_equity"))
+    ai_norm["debt_to_equity"] = normalize_debt_to_equity(ai_norm.get("debt_to_equity"))
 
     def is_reasonable_ratio(v, lo=-1.0, hi=1.0):
         return v is None or (lo <= v <= hi)
