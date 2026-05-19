@@ -410,7 +410,7 @@ def render_main_page(sidebar_state=None):
     # ==========================================
     # 5. 主畫面開始
     # ==========================================
-    st.markdown("## 📈 WAY AI 投資戰情室 版本1.25(最新更新日期:2026/05/19)")
+    st.markdown("## 📈 WAY AI 投資戰情室 版本1.26(最新更新日期:2026/05/19)")
 
     if st.session_state.fugle_key and not f_ok:
         st.error("🚨 **系統警報**：您輸入的「富果 (Fugle) API Key」驗證失敗！請至左側欄檢查金鑰是否輸入正確。")
