@@ -107,6 +107,38 @@ def normalize_financial_ratio(val, default=None):
         return v / 100.0
     return v
 
+def normalize_revenue_month(val):
+    """將 2026-04 / 2026年4月 / 202604 等格式盡量統一成 YYYY/MM。"""
+    if val is None:
+        return ""
+    s = str(val).strip().replace("None", "")
+    if not s:
+        return ""
+    m = re.search(r"(20\d{2})\D{0,3}(0?[1-9]|1[0-2])", s)
+    if m:
+        return f"{int(m.group(1)):04d}/{int(m.group(2)):02d}"
+    m = re.search(r"(20\d{2})(0[1-9]|1[0-2])", s)
+    if m:
+        return f"{int(m.group(1)):04d}/{int(m.group(2)):02d}"
+    return s
+
+
+def expected_latest_revenue_month(today=None):
+    """台股月營收通常看上一個完整月份；用來檢查資料是否明顯過舊。"""
+    today = today or datetime.date.today()
+    first_day = today.replace(day=1)
+    prev_last_day = first_day - datetime.timedelta(days=1)
+    return prev_last_day.strftime("%Y/%m")
+
+
+def revenue_month_is_older(actual_month, expected_month=None):
+    actual = normalize_revenue_month(actual_month)
+    expected = normalize_revenue_month(expected_month or expected_latest_revenue_month())
+    try:
+        return bool(actual and expected and actual < expected)
+    except Exception:
+        return False
+
 
 def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_rev_df=None, stock_id="", stock_name=""):
     """
@@ -124,8 +156,14 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
     warnings = []
     label = f"{stock_name} ({stock_id})" if stock_name and stock_id else (stock_name or stock_id or "目前標的")
 
+    # v1.24 欄位相容：rev_growth/revenue_yoy、mom/revenue_mom 新舊欄位可互通。
+    if ai_norm.get("revenue_yoy") is None and ai_norm.get("rev_growth") is not None:
+        ai_norm["revenue_yoy"] = ai_norm.get("rev_growth")
+    if ai_norm.get("rev_growth") is None and ai_norm.get("revenue_yoy") is not None:
+        ai_norm["rev_growth"] = ai_norm.get("revenue_yoy")
+
     # 統一百分比欄位尺度
-    for key in ["gross_margin", "operating_margin", "rev_growth", "debt_to_equity"]:
+    for key in ["gross_margin", "operating_margin", "rev_growth", "revenue_yoy", "revenue_mom", "earnings_cagr", "eps_growth_yoy", "debt_to_equity"]:
         corrected[key] = normalize_financial_ratio(corrected.get(key))
         ai_norm[key] = normalize_financial_ratio(ai_norm.get(key))
 
@@ -164,13 +202,18 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
         if monthly_rev_df is not None and not monthly_rev_df.empty and "YoY" in monthly_rev_df.columns:
             monthly_yoy_pct = s_float(monthly_rev_df["YoY"].iloc[-1])
             monthly_yoy = monthly_yoy_pct / 100.0 if monthly_yoy_pct is not None else None
+            monthly_period = ""
+            if "Month" in monthly_rev_df.columns:
+                monthly_period = normalize_revenue_month(monthly_rev_df["Month"].iloc[-1])
             if monthly_yoy is not None and -1.0 <= monthly_yoy <= 10.0:
                 old_sys_yoy = corrected.get("rev_growth")
                 if old_sys_yoy is not None and abs(old_sys_yoy - monthly_yoy) >= 0.10:
+                    period_text = f"({monthly_period})" if monthly_period else ""
                     warnings.append(
-                        f"{label} 的營收 YoY 已改用月營收資料：原 yfinance revenueGrowth={to_val_str(old_sys_yoy, 'pct')}，月營收 YoY={to_val_str(monthly_yoy, 'pct')}。"
+                        f"{label} 的營收 YoY 已改用月營收資料{period_text}：原 yfinance revenueGrowth={to_val_str(old_sys_yoy, 'pct')}，月營收 YoY={to_val_str(monthly_yoy, 'pct')}。"
                     )
                 corrected["rev_growth"] = monthly_yoy
+                corrected["revenue_yoy"] = monthly_yoy
     except Exception:
         pass
 
