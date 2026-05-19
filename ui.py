@@ -410,7 +410,7 @@ def render_main_page(sidebar_state=None):
     # ==========================================
     # 5. 主畫面開始
     # ==========================================
-    st.markdown("## 📈 WAY AI 投資戰情室 版本1.23")
+    st.markdown("## 📈 WAY AI 投資戰情室 版本1.25")
 
     if st.session_state.fugle_key and not f_ok:
         st.error("🚨 **系統警報**：您輸入的「富果 (Fugle) API Key」驗證失敗！請至左側欄檢查金鑰是否輸入正確。")
@@ -892,6 +892,30 @@ def render_main_page(sidebar_state=None):
             display_ai_operating_margin = ai_om
             display_debt_to_equity = sys_de
             display_ai_debt_to_equity = ai_de
+
+            # v1.25：同一月份的系統月營收與 AI 聯網值若明顯不一致，代表快取/來源口徑可能錯位。
+            # 例如技嘉 2376：系統抓到 2026/04 但 YoY/MoM 仍像 2026/03，AI 查到同月公開速報值。
+            # 此時畫面、估值與打包提示詞改用 AI 同月份校正值，並保留警告，避免錯數據進 prompt。
+            revenue_conflict_note = ""
+            if has_ai_fin_fetch and ai_rev_month and latest_rev_month not in ["無資料", "未知", "AI補齊"]:
+                sys_mom_ratio = (latest_mom_val / 100.0) if latest_mom_val is not None else None
+                yoy_gap = abs((rev_growth or 0) - ai_yoy) if (rev_growth is not None and ai_yoy is not None) else 0
+                mom_gap = abs(sys_mom_ratio - ai_mom) if (sys_mom_ratio is not None and ai_mom is not None) else 0
+                if ai_rev_month == latest_rev_month and (yoy_gap >= 0.005 or mom_gap >= 0.005):
+                    old_yoy_txt = to_val_str(rev_growth, 'pct')
+                    old_mom_txt = f"{latest_mom_val:.2f}%" if latest_mom_val is not None else "N/A"
+                    if ai_yoy is not None:
+                        rev_growth = ai_yoy
+                        display_rev_growth = ai_yoy
+                    if ai_mom is not None:
+                        latest_mom_val = ai_mom * 100
+                    revenue_conflict_note = (
+                        f"⚠️ {c_name} ({curr_id}) 同月份營收資料交叉校對不一致："
+                        f"系統 YoY/MoM={old_yoy_txt}/{old_mom_txt}，"
+                        f"AI 聯網 YoY/MoM={to_val_str(ai_yoy, 'pct')}/{to_val_str(ai_mom, 'pct')}，"
+                        f"已改用 AI 的 {ai_rev_month} 同月份值進入畫面與打包提示詞。"
+                    )
+
             if dq_warnings:
                 # 右下角短提示：讓操盤手知道資料已被校正，不是靜默改值
                 toast_key = f"dq_toast_{curr_id}_{hash(tuple(dq_warnings))}"
@@ -906,7 +930,9 @@ def render_main_page(sidebar_state=None):
                     for w in dq_warnings:
                         st.warning(w)
         
-            if has_ai_fin_fetch and ai_rev_month and latest_rev_month not in ["無資料", "未知", "AI補齊"] and ai_rev_month != latest_rev_month:
+            if revenue_conflict_note:
+                st.warning(revenue_conflict_note)
+            elif has_ai_fin_fetch and ai_rev_month and latest_rev_month not in ["無資料", "未知", "AI補齊"] and ai_rev_month != latest_rev_month:
                 st.warning(
                     f"⚠️ AI 營收月份與系統月營收不一致：AI={ai_rev_month}，系統={latest_rev_month}。"
                     "營收 YoY/MoM 顯示仍以系統月營收為主，AI 只保留為交叉校對。"
@@ -916,10 +942,14 @@ def render_main_page(sidebar_state=None):
                 latest_mom_str = f"{latest_mom_val:.2f}%"
             else:
                 latest_mom_str = "N/A"
+
+            # 給打包提示詞用：MoM 也納入 AI 交叉校對，避免 prompt 只看到系統值。
+            latest_mom_ratio_for_prompt = latest_mom_val / 100.0 if latest_mom_val is not None else None
         
             # 設定 AI 標籤與時間後綴
             ai_label = "AI捉取"
             ai_period_val = f"({raw_ai_period})" if raw_ai_period else ""
+            mom_prompt_str = build_cmp_str(latest_mom_ratio_for_prompt, ai_mom, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
         
             # 🚀 在目標價 html 生成前，先宣告給 prompt 用的純文字變數，絕對防禦 NameError
             ai_tp_str = f"{ai_target_price:.1f}" if ai_target_price is not None else "未捕捉到"
@@ -1449,7 +1479,7 @@ def render_main_page(sidebar_state=None):
 【B. 財務動能（原始/AI/推估整合）】
 - EPS(目前/預估): {panel_eps}
 - 營收年增率 YoY [{latest_rev_month}]: {panel_rg}
-- 最新單月營收月增率 MoM [{latest_rev_month}]: {_nullize_text(latest_mom_str)}
+- 最新單月營收月增率 MoM [{latest_rev_month}]: {_nullize_text(mom_prompt_str)}
 - 預估獲利成長 YoY: {panel_eg}
 - 毛利率 / 營益率: {panel_gmom}
 - ROE (恆等式校正): {panel_roe}
@@ -1573,7 +1603,7 @@ def render_main_page(sidebar_state=None):
                     value=full_prompt_for_copy,
                     height=300,
                     label_visibility="collapsed",
-                    key=f"copy_prompt_textarea_{curr_id}"
+                    key=f"copy_prompt_textarea_{curr_id}_{abs(hash(full_prompt_for_copy))}"
                 )
             
             st.markdown("---")
