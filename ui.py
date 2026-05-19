@@ -1,4 +1,4 @@
-"""
+""" 
 Streamlit 使用者介面層：
 包含側邊欄、主畫面、卡片、圖表與互動按鈕。
 由原始 app(1).py 拆分而來。
@@ -818,7 +818,7 @@ def render_main_page(sidebar_state=None):
             ai_gm = s_float(ai_fin.get('gross_margin')) if has_ai_fin_fetch else None
             ai_om = s_float(ai_fin.get('operating_margin')) if has_ai_fin_fetch else None
             ai_roe = s_float(ai_fin.get('roe')) if has_ai_fin_fetch else None
-            ai_de = s_float(ai_fin.get('debt_to_equity')) if has_ai_fin_fetch else None
+            ai_de = normalize_debt_to_equity(ai_fin.get('debt_to_equity')) if has_ai_fin_fetch else None
             ai_dy = s_float(ai_fin.get('dividend_yield')) if has_ai_fin_fetch else None
             
             # 接取剛增加的三項防禦/主力籌碼指標
@@ -893,6 +893,14 @@ def render_main_page(sidebar_state=None):
             display_debt_to_equity = sys_de
             display_ai_debt_to_equity = ai_de
 
+            # v1.26：按下 AI 全方位校對後，若 AI 有明確財報期間，毛利率/營益率主值採最新 AI 財報值。
+            # 但仍保留 AI 對照值，讓打包提示詞與卡片可看到系統舊值 vs AI 新值的差異。
+            if gm_should_prefer_ai:
+                if ai_gm is not None:
+                    display_gross_margin = ai_gm
+                if ai_om is not None:
+                    display_operating_margin = ai_om
+
             # v1.25：同一月份的系統月營收與 AI 聯網值若明顯不一致，代表快取/來源口徑可能錯位。
             # 例如技嘉 2376：系統抓到 2026/04 但 YoY/MoM 仍像 2026/03，AI 查到同月公開速報值。
             # 此時畫面、估值與打包提示詞改用 AI 同月份校正值，並保留警告，避免錯數據進 prompt。
@@ -949,7 +957,10 @@ def render_main_page(sidebar_state=None):
             # 設定 AI 標籤與時間後綴
             ai_label = "AI捉取"
             ai_period_val = f"({raw_ai_period})" if raw_ai_period else ""
-            mom_prompt_str = build_cmp_str(latest_mom_ratio_for_prompt, ai_mom, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            # v1.26：月營收欄位使用 revenue_month；財報欄位才使用 data_period。
+            ai_rev_period_val = ai_rev_month or latest_rev_month or raw_ai_period
+            ai_rev_period_suffix = f"({ai_rev_period_val})" if ai_rev_period_val else ""
+            mom_prompt_str = build_cmp_str(latest_mom_ratio_for_prompt, ai_mom, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_rev_period_suffix)
         
             # 🚀 在目標價 html 生成前，先宣告給 prompt 用的純文字變數，絕對防禦 NameError
             ai_tp_str = f"{ai_target_price:.1f}" if ai_target_price is not None else "未捕捉到"
@@ -1103,8 +1114,13 @@ def render_main_page(sidebar_state=None):
         
             pe_str = build_cmp_str(pe_ratio, ai_pe, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
             # ✅ 顯示字串只吃 validate_and_correct_financial_metrics() 校正後的 display_* 變數。
-            rg_str = build_cmp_str(display_rev_growth, display_ai_yoy, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            rg_str = build_cmp_str(display_rev_growth, display_ai_yoy, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_rev_period_suffix)
             gm_om_str = build_cmp_dual_str(display_gross_margin, display_operating_margin, display_ai_gross_margin, display_ai_operating_margin, 'pct', 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            if gm_should_prefer_ai and (ai_gm is not None or ai_om is not None):
+                gm_om_str = f"{to_val_str(display_gross_margin, 'pct')} / {to_val_str(display_operating_margin, 'pct')}"
+                sys_gm_txt = to_val_str(gross_margin, 'pct')
+                sys_om_txt = to_val_str(op_margin, 'pct')
+                gm_om_str += f"<br><span style='color:#FFD700; font-size:0.85rem;'>(採 AI 最新財報{', ' + ai_period_val if ai_period_val else ''}；系統原值: {sys_gm_txt} / {sys_om_txt})</span>"
             roe_str = build_cmp_str(roe, ai_roe, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
             de_str = build_cmp_str(display_debt_to_equity, display_ai_debt_to_equity, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
             pb_str = build_cmp_str(pb_ratio, ai_pb, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
