@@ -410,7 +410,7 @@ def render_main_page(sidebar_state=None):
     # ==========================================
     # 5. 主畫面開始
     # ==========================================
-    st.markdown("## 📈 WAY AI 投資戰情室 版本1.26,版本修改2026/05/19")
+    st.markdown("## 📈 WAY AI 投資戰情室 版本1.25(最新更新日期:2026/05/19)")
 
     if st.session_state.fugle_key and not f_ok:
         st.error("🚨 **系統警報**：您輸入的「富果 (Fugle) API Key」驗證失敗！請至左側欄檢查金鑰是否輸入正確。")
@@ -1146,7 +1146,13 @@ def render_main_page(sidebar_state=None):
                 de_str = to_val_str(display_debt_to_equity, 'pct')
                 de_str += f"<br><span style='color:#FFD700; font-size:0.85rem;'>(採 AI 最新財報{', ' + ai_period_val if ai_period_val else ''}；系統原值: {sys_de_txt})</span>"
             else:
-                de_str = build_cmp_str(display_debt_to_equity, display_ai_debt_to_equity, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+                # v1.28：若 AI 沒抓到 D/E，但系統 D/E 通過校驗，不再顯示「AI找不到數據」污染卡片與打包提示詞。
+                # 直接說明沿用系統值，避免誤以為 D/E 是 AI 最新財報值。
+                if has_ai_fin_fetch and display_ai_debt_to_equity is None and display_debt_to_equity is not None:
+                    de_str = to_val_str(display_debt_to_equity, 'pct')
+                    de_str += "<br><span style='color:#FFD700; font-size:0.85rem;'>(AI 未取得 D/E，暫沿用系統值)</span>"
+                else:
+                    de_str = build_cmp_str(display_debt_to_equity, display_ai_debt_to_equity, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
             pb_str = build_cmp_str(pb_ratio, ai_pb, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
         
             rg_color = "#ff4d4d" if eff_rg and eff_rg > 0 else ("#00cc66" if eff_rg and eff_rg < 0 else "#fff")
