@@ -1206,6 +1206,53 @@ def render_main_page(sidebar_state=None):
                 s = re.sub(r'\s+', ' ', s)
                 return s.strip() if s.strip() else "NULL"
 
+            def _prompt_df(df, max_rows=20):
+                """將 Streamlit 表格壓成可貼給外部 AI 的純文字，避免 2.0 面板資訊沒被打包。"""
+                try:
+                    if df is None or getattr(df, "empty", True):
+                        return "NULL"
+                    rows = []
+                    for i, row in df.head(max_rows).iterrows():
+                        parts = []
+                        for col in df.columns:
+                            val = row.get(col, "")
+                            val = _nullize_text(val)
+                            if val != "NULL":
+                                parts.append(f"{col}={val}")
+                        if parts:
+                            rows.append(f"- " + "；".join(parts))
+                    return "\n".join(rows) if rows else "NULL"
+                except Exception as e:
+                    try:
+                        log_exception("PromptPack", "_prompt_df", e)
+                    except Exception:
+                        pass
+                    return "NULL"
+
+            def _prompt_warnings(warnings):
+                try:
+                    if not warnings:
+                        return "NULL"
+                    rows = []
+                    for w in warnings[:12]:
+                        rows.append(
+                            "- "
+                            f"規則={_nullize_text(w.get('規則'))}；"
+                            f"嚴重度={_nullize_text(w.get('嚴重度'))}；"
+                            f"警告={_nullize_text(w.get('警告文字'))}；"
+                            f"系統值={_nullize_text(w.get('系統值'))}；"
+                            f"AI值={_nullize_text(w.get('AI值'))}；"
+                            f"差距={_nullize_text(w.get('差距'))}；"
+                            f"建議={_nullize_text(w.get('建議處理'))}"
+                        )
+                    return "\n".join(rows)
+                except Exception as e:
+                    try:
+                        log_exception("PromptPack", "_prompt_warnings", e)
+                    except Exception:
+                        pass
+                    return "NULL"
+
             # 面板核心數值（系統/AI/推估）
             ctx_tp_est = _nullize_text(tp_est_str)
             panel_pe = _nullize_text(pe_str)
@@ -1236,72 +1283,132 @@ def render_main_page(sidebar_state=None):
                 if prompt_hi_str == "N/A": prompt_hi_str = f"{ai_target_price:.1f} (AI回填)"
                 if prompt_me_str == "N/A": prompt_me_str = f"{ai_target_price:.1f} (AI回填)"
                 if prompt_lo_str == "N/A": prompt_lo_str = f"{ai_target_price:.1f} (AI回填)"
+            ai_source_trace_df_for_prompt = build_ai_source_trace_report(temp_ai_fin) if isinstance(temp_ai_fin, dict) else pd.DataFrame()
+            ai_validation_warnings_for_prompt = temp_ai_fin.get("_ai_validation_warnings", []) if isinstance(temp_ai_fin, dict) else []
+            ai_validation_status_for_prompt = temp_ai_fin.get("_ai_validation_status", "") if isinstance(temp_ai_fin, dict) else ""
+            final_signal_report_for_prompt = final_signal.get("report") if isinstance(final_signal, dict) else None
+            valuation_report_for_prompt = valuation_separation.get("report") if isinstance(valuation_separation, dict) else None
+            target_confidence_report_for_prompt = build_target_price_confidence_report(ai_analyst_count, ai_hi_val, ai_me_val, ai_lo_val, ai_target_rationale)
+            industry_report_for_prompt = build_industry_valuation_model_report(industry_profile)
+
             context_str = f"""
-【A. 盤面與估值（請逐項引用；缺值為 NULL）】
+【0. WAY AI 投資戰情室 2.0 判讀總覽】
 - 股票: {c_name} ({curr_id})
 - 最新收盤價: {_nullize_text(curr_p)} 元
-- 歷史本益比(系統/AI整合): {panel_pe}
-- 前瞻本益比(系統/AI整合): {panel_fpe}
-- 股價淨值比(系統/AI整合): {panel_pb}
-- 前瞻PEG(系統/AI整合): {panel_peg}
-- 系統逆向推算公式極限價: {ctx_tp_est}
+- 系統版本: 2.0
+- 最終操作燈號: {_nullize_text(final_signal.get('signal') if isinstance(final_signal, dict) else 'NULL')}
+- 操作含義: {_nullize_text(final_signal.get('advice') if isinstance(final_signal, dict) else 'NULL')}
+- 資料可信度: {_nullize_text(final_signal.get('data_confidence') if isinstance(final_signal, dict) else 'NULL')}
+- 估值可信度: {_nullize_text(final_signal.get('valuation_confidence') if isinstance(final_signal, dict) else 'NULL')}
+- 操作可信度: {_nullize_text(final_signal.get('operation_confidence') if isinstance(final_signal, dict) else 'NULL')}
+- 法人目標價可信度: {_nullize_text(target_confidence.get('label') if isinstance(target_confidence, dict) else 'NULL')}｜{_nullize_text(target_confidence.get('message') if isinstance(target_confidence, dict) else 'NULL')}
 
-【B. 財務動能（原始/AI/推估整合）】
-- EPS(TTM/Forward): {panel_eps}
-- 營收年增率 YoY [{latest_rev_display_label}]: {panel_rg}
-- 最新單月營收月增率 MoM [{latest_rev_display_label}]: {_nullize_text(latest_mom_str)}
+【1. 月營收公告月份與營收動能】
+- 營收公告月份標籤: {_nullize_text(latest_rev_display_label)}
+- 最新單月營收 YoY [{latest_rev_display_label}]: {panel_rg}
+- 最新單月營收 MoM [{latest_rev_display_label}]: {_nullize_text(latest_mom_str)}
 - 月營收資料源: {_nullize_text(latest_rev_source)}
 - 月營收月份提示: {_nullize_text(latest_rev_notice)}
+- 注意: 若查詢當月尚未公告，不可把查詢月份誤當最新公告月份。
+
+【2. EPS 口徑拆欄（不可混用）】
+{_prompt_df(eps_report_df, max_rows=10)}
+
+【3. 盤面與基礎估值（系統/AI整合值）】
+- 歷史本益比 Trailing P/E: {panel_pe}
+- 前瞻本益比 Forward P/E: {panel_fpe}
+- 股價淨值比 P/B: {panel_pb}
+- 前瞻 PEG: {panel_peg}
+- EPS（TTM / Forward 顯示值）: {panel_eps}
 - 預估獲利成長 YoY: {panel_eg}
 - 毛利率 / 營益率: {panel_gmom}
-- ROE (恆等式校正): {panel_roe}
-- 負債權益比 (D/E): {panel_de}
-
-【C. 防禦力與健康】
+- ROE（恆等式校正）: {panel_roe}
+- 負債權益比 D/E: {panel_de}
 - 預估殖利率: {_nullize_text(dy_str)}
 - 自由現金流 FCF: {_nullize_text(fcf_str)}
 - 流動比率: {_nullize_text(cr_str)}
 - Piotroski F-Score: {_nullize_text(fs_str)}（滿分 9 分）
 
-【D. 法人與 AI 聯網目標價】
+【4. 系統 / AI 分歧警告（2.0 風險層）】
+{_prompt_warnings(divergence_warnings)}
+
+【5. 統一資料品質報告（系統 / AI / 採用值）】
+{_prompt_df(dq_report_df, max_rows=30)}
+
+【6. 法人目標價與可信度】
 - 最高目標價: {_nullize_text(prompt_hi_str)}
 - 平均目標價: {_nullize_text(prompt_me_str)}
 - 最低保底價: {_nullize_text(prompt_lo_str)}
 - AI 最新聯網目標價({ai_label}): {_nullize_text(ai_tp_str)}
 - 目標價分析師人數: {_nullize_text(ai_analyst_count)}
+- 目標價可信度: {_nullize_text(target_confidence.get('label') if isinstance(target_confidence, dict) else 'NULL')}
 - 目標價核心理由: {_nullize_text(ai_target_rationale)}
+- 可信度明細:
+{_prompt_df(target_confidence_report_for_prompt, max_rows=5)}
+
+【7. 公式估值 / 可操作估值分離】
+- 系統逆向推算估值摘要: {ctx_tp_est}
+- 可操作估值提示: {_nullize_text(valuation_separation.get('action_hint') if isinstance(valuation_separation, dict) else 'NULL')}
+- 可操作估值區間低/中/高: {_nullize_text(valuation_separation.get('operable_low') if isinstance(valuation_separation, dict) else 'NULL')} / {_nullize_text(valuation_separation.get('operable_mid') if isinstance(valuation_separation, dict) else 'NULL')} / {_nullize_text(valuation_separation.get('operable_high') if isinstance(valuation_separation, dict) else 'NULL')}
+- 警告數: {_nullize_text(valuation_separation.get('warning_count') if isinstance(valuation_separation, dict) else 'NULL')}；重大警告數: {_nullize_text(valuation_separation.get('danger_count') if isinstance(valuation_separation, dict) else 'NULL')}
+- 估值分離表:
+{_prompt_df(valuation_report_for_prompt, max_rows=20)}
+
+【8. 產業估值模型】
+- 匹配模型: {_nullize_text(industry_profile.get('model_label') if isinstance(industry_profile, dict) else 'NULL')}
+- stocklist 分類: {_nullize_text(industry_profile.get('stocklist_category') if isinstance(industry_profile, dict) else 'NULL')}
+- 主要估值框架: {_nullize_text(industry_profile.get('valuation_framework') if isinstance(industry_profile, dict) else 'NULL')}
+- P/E 模型是否適用: {_nullize_text(industry_profile.get('pe_model_suitable') if isinstance(industry_profile, dict) else 'NULL')}
+- 產業模型明細:
+{_prompt_df(industry_report_for_prompt, max_rows=20)}
+
+【9. 最終操作燈號明細】
+{_prompt_df(final_signal_report_for_prompt, max_rows=20)}
+
+【10. AI 逐欄來源追蹤與 JSON 驗證】
+- AI 模型/資料期間: {_nullize_text(temp_ai_fin.get('model_used') if isinstance(temp_ai_fin, dict) else 'NULL')}｜{_nullize_text(raw_ai_period)}
+- AI JSON 驗證狀態: {_nullize_text(ai_validation_status_for_prompt)}
+- AI JSON 驗證警告: {_nullize_text('；'.join([str(x) for x in ai_validation_warnings_for_prompt[:20]]) if ai_validation_warnings_for_prompt else 'NULL')}
+- AI 逐欄來源追蹤:
+{_prompt_df(ai_source_trace_df_for_prompt, max_rows=30)}
 """
 
-            full_prompt_for_copy = f"""你是台股研究總監 + 交易策略專家。請用繁體中文、條列、可執行結論，並嚴格使用下方數據。
+            full_prompt_for_copy = f"""你是台股研究總監 + 交易策略專家。請用繁體中文、條列、可執行結論，並嚴格使用下方 WAY AI 投資戰情室 2.0 數據。
+
+重要原則：
+1) 請優先尊重系統 2.0 已產出的「月營收公告月份、EPS 拆欄、分歧警告、資料品質報告、法人目標價可信度、公式估值/可操作估值分離、產業估值模型、最終操作燈號」。
+2) 公式合理估值與公式極限價只代表模型輸出，不可直接當作買進目標；真正操作請以「可操作估值區間」與最終燈號為主。
+3) 若系統 / AI 分歧警告存在，必須先說明分歧對估值可信度與操作可信度的影響，不可直接給樂觀目標價。
+4) EPS 必須分清楚最新單季 EPS、TTM EPS、完整年度 EPS、系統 Forward EPS、AI Forward EPS、法人共識 Forward EPS，不可混用。
+5) 月營收必須以公告月份為準，不可用查詢當月推定最新月營收。
+6) 若關鍵欄位為 NULL，需提出替代判斷法；若資料異常，請明確說「暫不適合做買賣判斷」。
 
 任務要求：
-1) 先做「資料品質盤點」：逐項標記哪些欄位是系統/AI/推估/NULL，並說明對結論影響。
-2) 產業與公司質化分析：
-   - 公司優勢/護城河、劣勢/結構風險、管理層與資本配置、供應鏈位置。
-   - 未來 1~2 年成長動能與可能失速點。
-3) 估值判斷：
-   - 用 P/E、Forward P/E、PEG、P/B、ROE、D/E、FCF 綜合判斷目前屬低估/合理/高估。
-   - 若關鍵值為 NULL，需提出替代判斷法，不可跳過。
-4) 交易決策（最重要）：
-   - 是否可買：給「可買/觀望/不建議」三選一結論。
-   - 買點：給 2~3 個分批區間與理由（基本面+技術面+風險報酬）。
-   - 賣點：給 2~3 個減碼/停利/停損條件（價位或事件觸發）。
-   - 倉位建議：保守/中性/積極 三種配置比例。
-5) 風險情境：
-   - 牛市/基準/熊市三情境，列出目標價區間、假設前提、觸發條件。
-6) 監控清單：
-   - 未來每月要追的 8 個指標與警戒閾值（如 YoY、MoM、毛利率、存貨、接單、法人調整目標價等）。
+1) 先做「2.0 資料品質盤點」：逐項說明哪些欄位是系統/AI/推估/NULL，並指出最影響結論的 3 個資料風險。
+2) 解讀「分歧警告」：EPS / YoY / PEG / 合理價 / D/E 若有警告，請說明是否會讓估值降級。
+3) 解讀「產業估值模型」：說明這檔股票適合用哪些估值指標，不適合用哪些指標。
+4) 解讀「公式估值 vs 可操作估值」：請分開說明公式合理價、公式極限價、可操作估值區間，不可混成同一個目標價。
+5) 交易決策：
+   - 先引用系統最終燈號，再判斷是否同意。
+   - 給「可買 / 觀望 / 不建議 / 資料異常」之一。
+   - 買點：給 2~3 個分批區間與理由。
+   - 賣點：給 2~3 個減碼 / 停利 / 停損條件。
+   - 倉位建議：保守 / 中性 / 積極三種配置比例。
+6) 三情境目標價：牛市 / 基準 / 熊市，各列目標價區間、假設前提、觸發條件。
+7) 下月追蹤清單：列出 8 個要追蹤的指標與警戒閾值，必須包含月營收 YoY、MoM、毛利率、EPS、法人目標價或 EPS 預估調整。
 
 輸出格式（必須照做）：
 - [投資結論一句話]
+- [2.0 資料品質與分歧警告]
+- [產業估值模型解讀]
+- [公式估值 vs 可操作估值]
 - [公司優缺點]
-- [估值與成長解讀]
-- [買點/賣點/停損停利]
+- [買點 / 賣點 / 停損停利]
 - [三情境目標價]
 - [風險與反證]
 - [下月追蹤清單]
 
-以下是系統面板完整數據（含網路抓取 / AI 抓取 / 推估；無資料為 NULL）,若出現數據不合理，可上網查詢並說明不合理原因：
+以下是系統面板完整數據（含網路抓取 / AI 抓取 / 推估 / 2.0 風險判斷；無資料為 NULL）。若出現數據不合理，可上網查詢並說明不合理原因，但不可忽略系統已標示的分歧與資料品質警告：
 {context_str}
 """
             
