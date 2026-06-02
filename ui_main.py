@@ -752,9 +752,9 @@ def render_main_page(sidebar_state=None):
                     _cap_low = dynamic_cap_pack.get("operable_cap_low")
                     _cap_high = dynamic_cap_pack.get("operable_cap_high")
                     if _cap_low is not None and _cap_high is not None:
-                        cap_reason = f"Dynamic Cap 2.0 可操作倍率：{float(_cap_low):.1f}～{float(_cap_high):.1f}x；中性建議 {suggested_cap:.1f}x。已採 17-B-4：AI 校對後採用值 + 分歧折扣校準 + 循環復甦區間 + 產業 hard ceiling。"
+                        cap_reason = f"Dynamic Cap 2.0 可操作倍率：{float(_cap_low):.1f}～{float(_cap_high):.1f}x；中性建議 {suggested_cap:.1f}x。已採 17-C-5：AI 校對後採用值 + 分歧折扣校準 + 循環復甦區間 + 產業 hard ceiling。"
                     else:
-                        cap_reason = f"Dynamic Cap 2.0 最終建議倍率：{suggested_cap:.1f}x。已採 17-B-4：AI 校對後採用值 + 分歧折扣校準 + 循環復甦區間 + 產業 hard ceiling。"
+                        cap_reason = f"Dynamic Cap 2.0 最終建議倍率：{suggested_cap:.1f}x。已採 17-C-5：AI 校對後採用值 + 分歧折扣校準 + 循環復甦區間 + 產業 hard ceiling。"
                 else:
                     suggested_cap = float(industry_profile.get('cap_hint') or 30.0)
                     cap_reason = f"此產業主要估值模式為 {dynamic_cap_pack.get('valuation_mode', industry_profile.get('primary_valuation', 'N/A'))}，P/E Cap 僅作輔助；後續請優先看 P/B / 週期 / 題材落地。"
@@ -860,7 +860,7 @@ def render_main_page(sidebar_state=None):
                 except Exception:
                     return default
 
-            # 17-B-4：倍率分層。可操作倍率 ≠ 公式合理倍率 ≠ 樂觀/極限倍率。
+            # 17-C-5：倍率分層。可操作倍率 ≠ 公式合理倍率 ≠ 樂觀/極限倍率。
             operable_pe_cap = _cap_float(target_pe_cap, suggested_cap)
             formula_pe_cap = _cap_float(dynamic_cap_pack.get("formula_cap"), None)
             if formula_pe_cap is None:
@@ -1138,7 +1138,7 @@ def render_main_page(sidebar_state=None):
                         if dynamic_cap_pack.get("valuation_mode") == "pb_cycle":
                             st.warning("本分類採 P/B 週期模型：P/E Cap 僅作輔助，不直接作買進倍率。")
                         else:
-                            st.caption("17-B-4：已加入循環復甦判斷、分歧折扣校準、公式/可操作/樂觀倍率分離，最後才套用產業 hard ceiling。")
+                            st.caption("17-C-5：已加入循環復甦判斷、分歧折扣校準、公式/可操作/樂觀倍率分離，最後才套用產業 hard ceiling。")
                         st.dataframe(dynamic_cap_pack.get("report"), use_container_width=True, hide_index=True)
                         dc_warnings = dynamic_cap_pack.get("warnings") or []
                         if dc_warnings:
@@ -1721,7 +1721,7 @@ def render_main_page(sidebar_state=None):
 - 最新單季 EPS: 系統={_nullize_text(sys_latest_quarter_eps)} / AI={_nullize_text(ai_latest_quarter_eps)} / 採用={_nullize_text(ai_latest_quarter_eps)} / 期間={_nullize_text(raw_ai_period)}
 - TTM EPS: 系統={_nullize_text(sys_ttm_eps)} / AI={_nullize_text(ai_ttm_eps)} / 採用={_nullize_text(eff_t_eps)}
 - 完整年度 EPS: 系統={_nullize_text(sys_fiscal_year_eps)} / AI={_nullize_text(ai_fiscal_year_eps)} / 採用={_nullize_text(ai_fiscal_year_eps)}
-- Forward EPS－系統: {_nullize_text(sys_forward_eps)}
+- Forward EPS－系統: {_nullize_text(sys_forward_eps_system)}
 - Forward EPS－AI: {_nullize_text(ai_forward_eps_ai)}
 - Forward EPS－法人共識: {_nullize_text(ai_forward_eps_consensus)}
 - Dynamic Cap 採用 EPS/輸入: {eps_adopted_for_prompt}
