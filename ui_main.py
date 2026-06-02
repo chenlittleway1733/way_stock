@@ -921,10 +921,9 @@ def render_main_page(sidebar_state=None):
             with st.expander("🧭 法人目標價可信度 + 公式估值 / 可操作估值分離", expanded=True):
                 tc = target_confidence
                 st.markdown(
-                    f"<div style='background:#1e1e1e;border-left:5px solid {tc.get('color', '#FFD700')};padding:12px;border-radius:8px;margin-bottom:10px;'>"
-                    f"<b>法人目標價可信度：</b><span style='color:{tc.get('color', '#FFD700')};font-weight:bold;'>{tc.get('label', '低可信')}</span>｜"
-                    f"{tc.get('message', '')}<br>"
-                    f"<b>可操作估值提示：</b>{valuation_separation.get('action_hint', '觀望 / 資料不足')}"
+                    f"<div style='background:#111827;color:#F3F4F6;border-left:5px solid {tc.get('color', '#FFD700')};padding:12px 14px;border-radius:8px;margin-bottom:10px;line-height:1.7;'>"
+                    f"<div style='color:#F3F4F6;'><b>法人目標價可信度：</b><span style='color:{tc.get('color', '#FFD700')};font-weight:bold;'>{tc.get('label', '低可信')}</span>｜<span style='color:#D1D5DB;'>{tc.get('message', '')}</span></div>"
+                    f"<div style='margin-top:4px;color:#F3F4F6;'><b>可操作估值提示：</b><span style='color:#E5E7EB;'>{valuation_separation.get('action_hint', '觀望 / 資料不足')}</span></div>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
