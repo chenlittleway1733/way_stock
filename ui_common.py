@@ -18,3 +18,5 @@ from utils import *
 from scoring import calculate_strategy_score, normalize_screener_weights, backtest_return_from_hist, score_icon
 
 from industry_model import get_industry_valuation_profile, build_industry_valuation_model_report
+
+from dynamic_cap_model import calculate_dynamic_cap_v2

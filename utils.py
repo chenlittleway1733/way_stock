@@ -1391,6 +1391,8 @@ def build_valuation_separation_report(
     target_pe_cap=None,
     divergence_warnings=None,
     industry_profile=None,
+    dynamic_cap_pack=None,
+    pb_ratio=None,
 ):
     """
     產生「公式估值」與「可操作估值區間」分離報告。
@@ -1411,6 +1413,10 @@ def build_valuation_separation_report(
         industry_discount = 1.0
     industry_discount = max(0.50, min(industry_discount, 1.05))
     pe_model_suitable = bool(industry_profile.get("pe_model_suitable", True))
+    dynamic_cap_pack = dynamic_cap_pack or {}
+    primary_valuation = str(industry_profile.get("primary_valuation") or "")
+    pb_range = industry_profile.get("pb_range")
+    pb_model_active = primary_valuation.startswith("pb_cycle") or (dynamic_cap_pack.get("valuation_mode") == "pb_cycle")
 
     conservative_eps_candidates = _positive_numbers(consensus_forward_eps, system_forward_eps, ai_forward_eps)
     conservative_eps = min(conservative_eps_candidates) if conservative_eps_candidates else None
@@ -1424,6 +1430,23 @@ def build_valuation_separation_report(
         base_candidates.append(conservative_eps * max(float(target_pe_cap) * 0.65, 1))
 
     formula_base = min(base_candidates) if base_candidates else None
+
+    # 第 17-B：P/B 週期模型。金融、記憶體、面板、航運等產業不硬套 P/E。
+    pb_operable_low = pb_operable_high = pb_bvps = None
+    if pb_model_active:
+        try:
+            pb_val = s_float(pb_ratio)
+            cp_val = s_float(current_price)
+            if cp_val is not None and pb_val is not None and pb_val > 0:
+                pb_bvps = cp_val / pb_val
+            if isinstance(pb_range, (tuple, list)) and len(pb_range) == 2 and pb_bvps is not None:
+                pb_low = s_float(pb_range[0]); pb_high = s_float(pb_range[1])
+                if pb_low is not None and pb_high is not None:
+                    pb_operable_low = pb_bvps * pb_low
+                    pb_operable_high = pb_bvps * pb_high
+                    formula_base = (pb_operable_low + pb_operable_high) / 2
+        except Exception:
+            pass
 
     # 依法人可信度與分歧警告折減可操作價格。
     conf_discount_map = {5: 1.00, 4: 0.95, 3: 0.90, 2: 0.82, 1: 0.75}
@@ -1445,7 +1468,12 @@ def build_valuation_separation_report(
     operable_high = operable_mid * 1.10 if operable_mid is not None else None
 
     cp = s_float(current_price)
-    if not pe_model_suitable:
+    if pb_model_active and pb_operable_low is not None and pb_operable_high is not None:
+        operable_low = pb_operable_low
+        operable_high = pb_operable_high
+        operable_mid = (operable_low + operable_high) / 2
+        action_hint = "P/B 週期模型已建立，P/E 僅作輔助，請搭配週期位置與報價/運價判斷"
+    elif not pe_model_suitable:
         action_hint = "產業模型不適合純 P/E 買進判斷，請改看題材、籌碼、訂單與現金流"
     elif operable_low is None or operable_high is None or warning_count >= 3 or danger_count >= 2:
         action_hint = "資料異常 / 先確認資料"
@@ -1490,10 +1518,16 @@ def build_valuation_separation_report(
             "可信度/限制": industry_profile.get("warning_note", "若分類不準，請人工調整 stocklist.txt 或產業模型規則。"),
         },
         {
+            "估值類型": "Dynamic Cap 2.0 最終建議倍率",
+            "數值": "NULL" if dynamic_cap_pack.get("final_cap") is None else f"{float(dynamic_cap_pack.get('final_cap')):.1f}x",
+            "用途": "用於取代舊版單一毛利率 Cap；由產業基準、成長、毛利、ROE、題材、市值與折扣係數計算。",
+            "可信度/限制": dynamic_cap_pack.get("explanation", "若為 P/B 週期模型，P/E Cap 僅作輔助。"),
+        },
+        {
             "估值類型": "可操作估值區間",
             "數值": "NULL" if operable_low is None else f"{operable_low:,.2f}～{operable_high:,.2f}",
-            "用途": "用保守 EPS、法人樣本數、分歧警告與產業模型折減後的輔助區間。",
-            "可信度/限制": f"法人目標價可信度：{target_conf['level']}；分歧警告：{warning_count} 項；產業折減：{industry_discount:.2f}；總折減係數：約 {discount:.2f}。",
+            "用途": "用保守 EPS、Dynamic Cap 2.0、法人樣本數、分歧警告與產業模型折減後的輔助區間。",
+            "可信度/限制": (f"P/B 週期模型；BVPS 推估：{pb_bvps:.2f}；P/B 區間：{pb_range}" if pb_model_active and pb_bvps is not None else f"法人目標價可信度：{target_conf['level']}；分歧警告：{warning_count} 項；產業折減：{industry_discount:.2f}；總折減係數：約 {discount:.2f}。"),
         },
     ]
     return {
@@ -1509,5 +1543,10 @@ def build_valuation_separation_report(
         "action_hint": action_hint,
         "warning_count": warning_count,
         "danger_count": danger_count,
+        "dynamic_cap_pack": dynamic_cap_pack,
+        "pb_model_active": pb_model_active,
+        "pb_bvps": pb_bvps,
+        "pb_operable_low": pb_operable_low,
+        "pb_operable_high": pb_operable_high,
         "report": pd.DataFrame(rows),
     }

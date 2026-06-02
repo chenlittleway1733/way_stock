@@ -17,7 +17,7 @@ def render_main_page(sidebar_state=None):
     # ==========================================
     # 5. 主畫面開始
     # ==========================================
-    st.markdown("## 📈 WAY AI 投資戰情室 版本2.0")
+    st.markdown("## 📈 WAY AI 投資戰情室 版本2.1")
 
     if st.session_state.fugle_key and not f_ok:
         st.error("🚨 **系統警報**：您輸入的「富果 (Fugle) API Key」驗證失敗！請至左側欄檢查金鑰是否輸入正確。")
@@ -109,7 +109,15 @@ def render_main_page(sidebar_state=None):
 
             sector_disp = SECTOR_MAP.get(info.get('sector', '未知'), info.get('sector', '未知'))
             industry_profile = get_industry_valuation_profile(curr_id, c_name, sector_disp, info.get('industry', '未知'))
-            st.markdown(f"**🏷️ 產業分類：** {sector_disp} / {info.get('industry', '未知')}｜估值模型：{industry_profile.get('model_label', '一般產業')}")
+            st.markdown(
+                f"**🏷️ 產業分類：** {sector_disp} / {info.get('industry', '未知')}｜"
+                f"估值模型：{industry_profile.get('model_label', '一般產業')}｜"
+                f"題材標籤：{industry_profile.get('themes_text', '—')}"
+            )
+            if industry_profile.get('pe_trap_warning'):
+                st.warning("⚠️ 本產業具有 P/E 陷阱風險：低 P/E 不一定代表低估，請優先檢查 P/B、週期位置、報價或訂單落地。")
+            if industry_profile.get('pe_model_suitable') is False:
+                st.warning("⚠️ 本分類不適合使用一般 P/E 公式估值作為買進依據，應以事件、訂單、籌碼與財報落地程度評估。")
             with st.expander("📖 查看公司詳細營業項目簡介 (自動英翻中)"):
                 st.write(translate_to_zh(info.get('longBusinessSummary', '暫無簡介。')))
 
@@ -601,48 +609,44 @@ def render_main_page(sidebar_state=None):
                     help="教練密技：目標價逆推公式的乘數。大盤熱度高或作夢空間大時可調升至 1.5。"
                 )
             with col_eps2:
-                suggested_cap = 30.0
-                cap_reason = "預設 30x (無毛利率數據)"
-                if eff_gm is not None:
-                    if eff_gm >= 0.50:
-                        suggested_cap, cap_reason = 40.0, "建議 40x (高毛利>50%: 軟體/IP/專利壟斷)"
-                    elif eff_gm >= 0.30:
-                        suggested_cap, cap_reason = 30.0, "建議 30x (中高毛利>30%: 高階零組件/利基型)"
-                    elif eff_gm >= 0.15:
-                        suggested_cap, cap_reason = 20.0, "建議 20x (穩健毛利>15%: 傳統優質硬體/代工)"
-                    else:
-                        suggested_cap, cap_reason = 15.0, "建議 15x (低毛利<15%: 紅海競爭/純組裝)"
-            
-                summary_text = info.get('longBusinessSummary', '') + c_name + info.get('industry', '') + sector_disp
-                ai_keywords = ["AI", "伺服器", "CoWoS", "矽光子", "散熱", "CPO", "先進封裝", "半導體設備", "水冷", "ASIC", "資料中心", "輝達", "Nvidia"]
-                if any(kw.lower() in summary_text.lower() for kw in ai_keywords):
-                    suggested_cap += 15.0
-                    cap_reason += "<br>🚀 <span style='color:#ff4d4d;'>偵測到 AI/先進製程題材，Cap 強制上調 +15x</span>"
-
-                # 🏭 第 13 階段：產業估值模型 Cap 修正
+                # ⚙️ 第 17-B 階段：Dynamic Cap 2.0 初算。
+                # 此處使用已取得的 EPS / 毛利率 / ROE / 題材 / 流動性資料建立可解釋倍率。
                 try:
-                    industry_cap = industry_profile.get('cap_hint')
-                    industry_cap_adjust = industry_profile.get('cap_adjust', 0.0)
-                    if industry_cap is not None:
-                        # 產業模型只作為建議天花板，不硬壓過毛利率/題材模型；取兩者平均再加微調，避免跳動過大。
-                        suggested_cap = max(8.0, (float(suggested_cap) + float(industry_cap)) / 2 + float(industry_cap_adjust) * 0.25)
-                        cap_reason += f"<br>🏭 <span style='color:#66ccff;'>產業估值模型：{industry_profile.get('model_label')}，參考 Cap {industry_cap:.0f}x</span>"
-                    if not industry_profile.get('pe_model_suitable', True):
-                        cap_reason += "<br>⚠️ <span style='color:#ff9900;'>此類型不宜把 P/E 公式價當作買進建議，系統會降低可操作估值可信度。</span>"
+                    dynamic_cap_pack = calculate_dynamic_cap_v2(
+                        stock_id=curr_id,
+                        stock_name=c_name,
+                        current_price=curr_p,
+                        info=info,
+                        hist_data=hist,
+                        industry_profile=industry_profile,
+                        gross_margin=eff_gm,
+                        roe=eff_roe,
+                        debt_to_equity=eff_de,
+                        revenue_yoy=eff_rg,
+                        ttm_eps=eff_t_eps,
+                        system_forward_eps=sys_forward_eps_system,
+                        ai_forward_eps=ai_forward_eps_ai,
+                        consensus_forward_eps=ai_forward_eps_consensus,
+                        ai_ttm_eps=ai_t_eps,
+                        pb_ratio=eff_pb,
+                        divergence_warnings=[],
+                        dq_warnings=dq_warnings,
+                    )
                 except Exception as e:
-                    log_exception("IndustryModel", "ui_main:suggested_cap", e)
-                
-                if df_per_bk is not None and not df_per_bk.empty:
-                    recent_date = pd.Timestamp.today() - pd.DateOffset(years=2)
-                    recent_df = df_per_bk[df_per_bk['date'] >= recent_date]
-                    if not recent_df.empty:
-                        valid_pe = recent_df[recent_df['PER'] < 300]['PER']
-                        if not valid_pe.empty:
-                            hist_high_pe = valid_pe.quantile(0.9)
-                            if hist_high_pe > suggested_cap + 5:
-                                cap_reason += f"<br>📈 <span style='color:#FFD700;'>近兩年 AI 週期高位達 {hist_high_pe:.1f}x，動態釋放天花板！</span>"
-            
-                target_pe_cap = st.number_input("⚙️ 動態本益比天花板 (Cap)", value=float(suggested_cap), step=5.0, help="防禦低基期失真陷阱！系統已根據毛利率與產業題材自動調整合理的極限本益比。")
+                    log_exception("DynamicCapV2", "ui_main:calculate_dynamic_cap_v2", e)
+                    dynamic_cap_pack = {"available": False, "valuation_mode": "fallback", "final_cap": industry_profile.get('cap_hint') or 30.0, "report": pd.DataFrame()}
+
+                if dynamic_cap_pack.get("available") and dynamic_cap_pack.get("final_cap") is not None:
+                    suggested_cap = float(dynamic_cap_pack.get("final_cap"))
+                    cap_reason = f"Dynamic Cap 2.0 最終建議倍率：{suggested_cap:.1f}x。已整合產業基準、成長、毛利、ROE、題材、市值與流動性折扣。"
+                else:
+                    suggested_cap = float(industry_profile.get('cap_hint') or 30.0)
+                    cap_reason = f"此產業主要估值模式為 {dynamic_cap_pack.get('valuation_mode', industry_profile.get('primary_valuation', 'N/A'))}，P/E Cap 僅作輔助；後續請優先看 P/B / 週期 / 題材落地。"
+
+                target_pe_cap = st.number_input("⚙️ 動態本益比天花板 (Dynamic Cap 2.0)", value=float(suggested_cap), step=5.0, help="第 17-B 階段：以產業基準倍率 + 成長/毛利/ROE/題材/市值修正，再乘資料可信度、估值風險與流動性折扣。")
+                if dynamic_cap_pack.get("available"):
+                    # 使用者仍可手動覆寫 Cap；若覆寫，估值公式採手動值，拆解表仍保留系統建議值。
+                    dynamic_cap_pack["user_selected_cap"] = target_pe_cap
                 st.markdown(f"<div style='color:#00bfff; font-size:0.75rem; margin-top:-10px; line-height:1.2;'>💡 {cap_reason}</div>", unsafe_allow_html=True)
 
             is_base_normalized = False 
@@ -874,6 +878,8 @@ def render_main_page(sidebar_state=None):
                 target_pe_cap=target_pe_cap,
                 divergence_warnings=divergence_warnings,
                 industry_profile=industry_profile,
+                dynamic_cap_pack=dynamic_cap_pack,
+                pb_ratio=eff_pb,
             )
             target_confidence = valuation_separation.get('target_confidence', classify_target_price_confidence(ai_analyst_count))
             val_html = f"""
@@ -926,6 +932,13 @@ def render_main_page(sidebar_state=None):
                 st.dataframe(valuation_separation.get('report'), use_container_width=True, hide_index=True)
                 with st.expander("🏭 產業估值模型明細", expanded=False):
                     st.dataframe(build_industry_valuation_model_report(industry_profile), use_container_width=True, hide_index=True)
+                if isinstance(dynamic_cap_pack, dict) and dynamic_cap_pack.get("report") is not None:
+                    with st.expander("⚙️ Dynamic Cap 2.0 倍率拆解", expanded=True):
+                        if dynamic_cap_pack.get("valuation_mode") == "pb_cycle":
+                            st.warning("本分類採 P/B 週期模型：P/E Cap 僅作輔助，不直接作買進倍率。")
+                        else:
+                            st.caption("先加總產業基準、成長、毛利、ROE、題材與市值修正，再乘上資料可信度、估值風險與流動性折扣。")
+                        st.dataframe(dynamic_cap_pack.get("report"), use_container_width=True, hide_index=True)
                 with st.expander("法人目標價可信度明細", expanded=False):
                     st.dataframe(build_target_price_confidence_report(ai_analyst_count, ai_hi_val, ai_me_val, ai_lo_val, ai_target_rationale), use_container_width=True, hide_index=True)
 
@@ -1290,12 +1303,13 @@ def render_main_page(sidebar_state=None):
             valuation_report_for_prompt = valuation_separation.get("report") if isinstance(valuation_separation, dict) else None
             target_confidence_report_for_prompt = build_target_price_confidence_report(ai_analyst_count, ai_hi_val, ai_me_val, ai_lo_val, ai_target_rationale)
             industry_report_for_prompt = build_industry_valuation_model_report(industry_profile)
+            dynamic_cap_report_for_prompt = dynamic_cap_pack.get("report") if isinstance(dynamic_cap_pack, dict) else None
 
             context_str = f"""
-【0. WAY AI 投資戰情室 2.0 判讀總覽】
+【0. WAY AI 投資戰情室 2.1 判讀總覽】
 - 股票: {c_name} ({curr_id})
 - 最新收盤價: {_nullize_text(curr_p)} 元
-- 系統版本: 2.0
+- 系統版本: 2.1
 - 最終操作燈號: {_nullize_text(final_signal.get('signal') if isinstance(final_signal, dict) else 'NULL')}
 - 操作含義: {_nullize_text(final_signal.get('advice') if isinstance(final_signal, dict) else 'NULL')}
 - 資料可信度: {_nullize_text(final_signal.get('data_confidence') if isinstance(final_signal, dict) else 'NULL')}
@@ -1329,7 +1343,7 @@ def render_main_page(sidebar_state=None):
 - 流動比率: {_nullize_text(cr_str)}
 - Piotroski F-Score: {_nullize_text(fs_str)}（滿分 9 分）
 
-【4. 系統 / AI 分歧警告（2.0 風險層）】
+【4. 系統 / AI 分歧警告（2.1 風險層）】
 {_prompt_warnings(divergence_warnings)}
 
 【5. 統一資料品質報告（系統 / AI / 採用值）】
@@ -1356,16 +1370,37 @@ def render_main_page(sidebar_state=None):
 
 【8. 產業估值模型】
 - 匹配模型: {_nullize_text(industry_profile.get('model_label') if isinstance(industry_profile, dict) else 'NULL')}
+- 主分類: {_nullize_text(industry_profile.get('parent_category') if isinstance(industry_profile, dict) else 'NULL')}
 - stocklist 分類: {_nullize_text(industry_profile.get('stocklist_category') if isinstance(industry_profile, dict) else 'NULL')}
-- 主要估值框架: {_nullize_text(industry_profile.get('valuation_framework') if isinstance(industry_profile, dict) else 'NULL')}
-- P/E 模型是否適用: {_nullize_text(industry_profile.get('pe_model_suitable') if isinstance(industry_profile, dict) else 'NULL')}
+- 股票對應來源: {_nullize_text(industry_profile.get('mapping_source') if isinstance(industry_profile, dict) else 'NULL')}
+- 題材標籤: {_nullize_text(industry_profile.get('themes_text') if isinstance(industry_profile, dict) else 'NULL')}
+- 主要估值方式: {_nullize_text(industry_profile.get('primary_valuation') if isinstance(industry_profile, dict) else 'NULL')}
+- 次要估值方式: {_nullize_text(industry_profile.get('secondary_valuation') if isinstance(industry_profile, dict) else 'NULL')}
+- P/E 模型適用性: {_nullize_text(industry_profile.get('pe_applicability_text') if isinstance(industry_profile, dict) else 'NULL')}
+- 是否循環股: {_nullize_text(industry_profile.get('cyclical') if isinstance(industry_profile, dict) else 'NULL')}
+- 是否有 P/E 陷阱: {_nullize_text(industry_profile.get('pe_trap_warning') if isinstance(industry_profile, dict) else 'NULL')}
+- P/B 參考區間: {_nullize_text(industry_profile.get('pb_range') if isinstance(industry_profile, dict) else 'NULL')}
+- 風險旗標: {_nullize_text(industry_profile.get('risk_flags') if isinstance(industry_profile, dict) else 'NULL')}
 - 產業模型明細:
-{_prompt_df(industry_report_for_prompt, max_rows=20)}
+{_prompt_df(industry_report_for_prompt, max_rows=25)}
 
-【9. 最終操作燈號明細】
+【9. Dynamic Cap 2.0 動態本益比 / P/B 模型】
+- 使用模型: {_nullize_text(dynamic_cap_pack.get('valuation_mode') if isinstance(dynamic_cap_pack, dict) else 'NULL')}
+- 產業基準倍率: {_nullize_text(dynamic_cap_pack.get('base_multiple') if isinstance(dynamic_cap_pack, dict) else 'NULL')}
+- 原始建議倍率: {_nullize_text(dynamic_cap_pack.get('raw_cap') if isinstance(dynamic_cap_pack, dict) else 'NULL')}
+- 最終建議倍率: {_nullize_text(dynamic_cap_pack.get('final_cap') if isinstance(dynamic_cap_pack, dict) else 'NULL')}
+- 使用者帶入 Cap: {_nullize_text(target_pe_cap)}
+- 樓地板 / 天花板: {_nullize_text(dynamic_cap_pack.get('floor_cap') if isinstance(dynamic_cap_pack, dict) else 'NULL')} / {_nullize_text(dynamic_cap_pack.get('ceiling_cap') if isinstance(dynamic_cap_pack, dict) else 'NULL')}
+- P/B 週期模型 BVPS: {_nullize_text(dynamic_cap_pack.get('bvps') if isinstance(dynamic_cap_pack, dict) else 'NULL')}
+- P/B 週期估值區間: {_nullize_text(dynamic_cap_pack.get('pb_low_price') if isinstance(dynamic_cap_pack, dict) else 'NULL')} ～ {_nullize_text(dynamic_cap_pack.get('pb_high_price') if isinstance(dynamic_cap_pack, dict) else 'NULL')}
+- 模型提醒: {_nullize_text(dynamic_cap_pack.get('warnings') if isinstance(dynamic_cap_pack, dict) else 'NULL')}
+- 倍率拆解表:
+{_prompt_df(dynamic_cap_report_for_prompt, max_rows=30)}
+
+【10. 最終操作燈號明細】
 {_prompt_df(final_signal_report_for_prompt, max_rows=20)}
 
-【10. AI 逐欄來源追蹤與 JSON 驗證】
+【11. AI 逐欄來源追蹤與 JSON 驗證】
 - AI 模型/資料期間: {_nullize_text(temp_ai_fin.get('model_used') if isinstance(temp_ai_fin, dict) else 'NULL')}｜{_nullize_text(raw_ai_period)}
 - AI JSON 驗證狀態: {_nullize_text(ai_validation_status_for_prompt)}
 - AI JSON 驗證警告: {_nullize_text('；'.join([str(x) for x in ai_validation_warnings_for_prompt[:20]]) if ai_validation_warnings_for_prompt else 'NULL')}
@@ -1373,10 +1408,10 @@ def render_main_page(sidebar_state=None):
 {_prompt_df(ai_source_trace_df_for_prompt, max_rows=30)}
 """
 
-            full_prompt_for_copy = f"""你是台股研究總監 + 交易策略專家。請用繁體中文、條列、可執行結論，並嚴格使用下方 WAY AI 投資戰情室 2.0 數據。
+            full_prompt_for_copy = f"""你是台股研究總監 + 交易策略專家。請用繁體中文、條列、可執行結論，並嚴格使用下方 WAY AI 投資戰情室 2.1 數據。
 
 重要原則：
-1) 請優先尊重系統 2.0 已產出的「月營收公告月份、EPS 拆欄、分歧警告、資料品質報告、法人目標價可信度、公式估值/可操作估值分離、產業估值模型、最終操作燈號」。
+1) 請優先尊重系統 2.1 已產出的「月營收公告月份、EPS 拆欄、分歧警告、資料品質報告、法人目標價可信度、公式估值/可操作估值分離、產業估值模型、Dynamic Cap 2.0、最終操作燈號」。
 2) 公式合理估值與公式極限價只代表模型輸出，不可直接當作買進目標；真正操作請以「可操作估值區間」與最終燈號為主。
 3) 若系統 / AI 分歧警告存在，必須先說明分歧對估值可信度與操作可信度的影響，不可直接給樂觀目標價。
 4) EPS 必須分清楚最新單季 EPS、TTM EPS、完整年度 EPS、系統 Forward EPS、AI Forward EPS、法人共識 Forward EPS，不可混用。
@@ -1384,7 +1419,7 @@ def render_main_page(sidebar_state=None):
 6) 若關鍵欄位為 NULL，需提出替代判斷法；若資料異常，請明確說「暫不適合做買賣判斷」。
 
 任務要求：
-1) 先做「2.0 資料品質盤點」：逐項說明哪些欄位是系統/AI/推估/NULL，並指出最影響結論的 3 個資料風險。
+1) 先做「2.1 資料品質盤點」：逐項說明哪些欄位是系統/AI/推估/NULL，並指出最影響結論的 3 個資料風險。
 2) 解讀「分歧警告」：EPS / YoY / PEG / 合理價 / D/E 若有警告，請說明是否會讓估值降級。
 3) 解讀「產業估值模型」：說明這檔股票適合用哪些估值指標，不適合用哪些指標。
 4) 解讀「公式估值 vs 可操作估值」：請分開說明公式合理價、公式極限價、可操作估值區間，不可混成同一個目標價。
@@ -1399,7 +1434,7 @@ def render_main_page(sidebar_state=None):
 
 輸出格式（必須照做）：
 - [投資結論一句話]
-- [2.0 資料品質與分歧警告]
+- [2.1 資料品質與分歧警告]
 - [產業估值模型解讀]
 - [公式估值 vs 可操作估值]
 - [公司優缺點]
@@ -1408,7 +1443,7 @@ def render_main_page(sidebar_state=None):
 - [風險與反證]
 - [下月追蹤清單]
 
-以下是系統面板完整數據（含網路抓取 / AI 抓取 / 推估 / 2.0 風險判斷；無資料為 NULL）。若出現數據不合理，可上網查詢並說明不合理原因，但不可忽略系統已標示的分歧與資料品質警告：
+以下是系統面板完整數據（含網路抓取 / AI 抓取 / 推估 / 2.1 風險判斷；無資料為 NULL）。若出現數據不合理，可上網查詢並說明不合理原因，但不可忽略系統已標示的分歧與資料品質警告：
 {context_str}
 """
             
