@@ -1826,22 +1826,68 @@ def render_main_page(sidebar_state=None):
             panel_roe = _nullize_text(roe_str)
             panel_de = _nullize_text(de_str)
 
-            # 🚀 法人目標價：提示詞只讀「法人目標價面板快照」，不再重新抓 yfinance / AI 欄位。
-            # 這可避免畫面顯示 3030/2750/2288、10 位，但打包提示詞卻顯示無資料或另一組目標價。
+            # 🚀 hotfix-final：法人目標價提示詞「直接讀面板同源變數」，不只依賴 snapshot。
+            # 前幾版若 snapshot 在某些 rerun/分支未帶到值，提示詞會變成「無可用法人目標價」；
+            # 這裡改成：snapshot → AI/法人聯網欄位 → yfinance/info 欄位，並同步分析師人數。
             _target_panel = locals().get("target_panel_for_prompt", {})
-            _tp_hi = s_float(_target_panel.get("high")) if isinstance(_target_panel, dict) else None
-            _tp_me = s_float(_target_panel.get("mean")) if isinstance(_target_panel, dict) else None
-            _tp_lo = s_float(_target_panel.get("low")) if isinstance(_target_panel, dict) else None
+            if not isinstance(_target_panel, dict):
+                _target_panel = {}
+
+            def _prompt_first_float(*vals):
+                for v in vals:
+                    fv = s_float(v)
+                    if fv is not None and fv > 0:
+                        return fv
+                return None
+
+            _tp_hi = _prompt_first_float(
+                _target_panel.get("high"),
+                locals().get("ai_hi_val"),
+                ai_fin.get("target_price_high") if isinstance(ai_fin, dict) else None,
+                info.get("targetHighPrice") if isinstance(info, dict) else None,
+            )
+            _tp_me = _prompt_first_float(
+                _target_panel.get("mean"),
+                locals().get("ai_me_val"),
+                ai_fin.get("target_price_avg") if isinstance(ai_fin, dict) else None,
+                ai_fin.get("target_price") if isinstance(ai_fin, dict) else None,
+                info.get("targetMeanPrice") if isinstance(info, dict) else None,
+            )
+            _tp_lo = _prompt_first_float(
+                _target_panel.get("low"),
+                locals().get("ai_lo_val"),
+                ai_fin.get("target_price_low") if isinstance(ai_fin, dict) else None,
+                info.get("targetLowPrice") if isinstance(info, dict) else None,
+            )
+
             prompt_hi_str = f"{_tp_hi:.1f}" if _tp_hi is not None else "N/A"
             prompt_me_str = f"{_tp_me:.1f}" if _tp_me is not None else "N/A"
             prompt_lo_str = f"{_tp_lo:.1f}" if _tp_lo is not None else "N/A"
-            prompt_target_source = _target_panel.get("source", "無可用法人目標價") if isinstance(_target_panel, dict) else "無可用法人目標價"
-            prompt_analyst_count = _first_valid_analyst_count(_target_panel.get("analyst_count") if isinstance(_target_panel, dict) else None)
-            prompt_target_confidence = _target_panel.get("confidence") if isinstance(_target_panel, dict) else classify_target_price_confidence(prompt_analyst_count)
-            if not isinstance(prompt_target_confidence, dict):
-                prompt_target_confidence = classify_target_price_confidence(prompt_analyst_count)
+
+            prompt_analyst_count = _first_valid_analyst_count(
+                _target_panel.get("analyst_count"),
+                locals().get("ai_analyst_count"),
+                ai_fin.get("target_price_analyst_count") if isinstance(ai_fin, dict) else None,
+                ai_fin.get("analyst_count") if isinstance(ai_fin, dict) else None,
+                ai_fin.get("target_analyst_count") if isinstance(ai_fin, dict) else None,
+                info.get("numberOfAnalystOpinions") if isinstance(info, dict) else None,
+            )
+
+            if _tp_hi is not None or _tp_me is not None or _tp_lo is not None:
+                if (locals().get("ai_hi_val") is not None or locals().get("ai_me_val") is not None or locals().get("ai_lo_val") is not None):
+                    prompt_target_source = "法人目標價面板同源：AI/法人聯網 target_price_high-target_price_avg-target_price_low"
+                else:
+                    prompt_target_source = "系統/info 法人目標價備援：targetHighPrice-targetMeanPrice-targetLowPrice"
+            else:
+                prompt_target_source = "無可用法人目標價"
+
+            prompt_target_confidence = classify_target_price_confidence(prompt_analyst_count)
             target_confidence = prompt_target_confidence
-            prompt_target_rationale = _target_panel.get("rationale", "") if isinstance(_target_panel, dict) else ""
+            prompt_target_rationale = (
+                _target_panel.get("rationale")
+                or (ai_fin.get("target_price_rationale") if isinstance(ai_fin, dict) else "")
+                or ""
+            )
 
             ai_source_trace_df_for_prompt = build_ai_source_trace_report(temp_ai_fin) if isinstance(temp_ai_fin, dict) else pd.DataFrame()
             ai_validation_warnings_for_prompt = temp_ai_fin.get("_ai_validation_warnings", []) if isinstance(temp_ai_fin, dict) else []
@@ -3016,7 +3062,7 @@ def render_main_page(sidebar_state=None):
                 x_fmt = "%m/%d"
                 rb = [dict(bounds=["sat", "mon"])] 
                 if dt_breaks:
-                    rb.append(dict(values=dt_breaks)) 
+                    rb.append(dict(values=dt_breaks))  
 
             fig_k.update_xaxes(rangebreaks=rb, tickformat=x_fmt, showgrid=True, gridcolor='#333', mirror=True, showline=True, linecolor='#555')
             fig_k.update_layout(height=750, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=10,b=10), template="plotly_dark", hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
