@@ -2759,7 +2759,7 @@ def render_main_page(sidebar_state=None):
                     else: st.error("AI 暫時找不到明確的同業數據，或請檢查您的 API Key 額度。")
                 st.markdown("---")
 
-            # 🌊 雙河流圖 (Tabs) 
+            # 🌊 雙河流圖 (Tabs)  
             if df_per_bk is not None and not df_per_bk.empty:
                 st.markdown("### 🌊 估值位階雙河流圖 (P/E & P/B River)")
                 st.markdown("<small style='color:gray;'>*實戰密技：『成長股』看本益比判斷潛力；『景氣循環股』(航運/鋼鐵/面板) 獲利不穩定，必須看淨值比(P/B)河流圖抄底！*</small>", unsafe_allow_html=True)
