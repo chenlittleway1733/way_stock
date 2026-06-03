@@ -1,0 +1,9 @@
+| 檔案                     | 功能                                    |
+| ---------------------- | -------------------------------           |
+| `stock_mapping.py`     | 股票對應哪個產業模型                      |
+| `industry_taxonomy.py` | 各產業模型的 base / soft / hard 參數      |
+| `industry_model.py`    | 整合個股分類與產業參數，產生 industry_profile |
+| `dynamic_cap_model.py` | **真正計算 Dynamic Cap 倍率的核心**      |
+| `utils.py`             | 報表、估值分層、快照稽核、Forward EPS 分層估值   |
+| `ui_main.py`           | Streamlit 畫面顯示與打包提示詞                   |
+| `services.py`          | AI 財報補齊與外部資料抓取                        |
