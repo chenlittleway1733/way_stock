@@ -1971,43 +1971,244 @@ def render_main_page(sidebar_state=None):
                         pass
                     return "NULL"
 
-            def _prompt_dynamic_cap_core(pack):
+            def _prompt_dynamic_cap_core(pack, mode="research"):
+                """Dynamic Cap 提示詞摘要：避免 raw dict/debug log，統一格式化倍率、折扣與採用輸入。"""
                 try:
                     if not isinstance(pack, dict):
                         return "NULL"
-                    keys = [
-                        ("使用模型", "valuation_mode"),
-                        ("產業基準倍率", "base_multiple"),
-                        ("成長係數", "growth_factor"),
-                        ("品質係數", "quality_factor"),
-                        ("題材係數", "theme_factor"),
-                        ("規模係數", "scale_factor"),
-                        ("資料可信度折扣", "data_confidence_factor"),
-                        ("估值風險折扣", "valuation_risk_factor"),
-                        ("流動性折扣", "liquidity_factor"),
-                        ("可操作倍率低", "operable_cap_low"),
-                        ("可操作倍率高", "operable_cap_high"),
-                        ("中性可操作倍率", "final_cap"),
-                        ("公式合理倍率", "formula_cap"),
-                        ("樂觀情境倍率", "optimistic_cap"),
-                        ("hard ceiling", "hard_ceiling_cap"),
-                        ("模型版本", "model_version"),
-                    ]
+
+                    def _sf2(v):
+                        try:
+                            return s_float(v)
+                        except Exception:
+                            return None
+
+                    def _has(v):
+                        return _sf2(v) is not None or (_nullize_text(v) not in ("NULL", "[]", "{}"))
+
+                    def _fmt_num(v, digits=2):
+                        x = _sf2(v)
+                        return "NULL" if x is None else f"{x:.{digits}f}"
+
+                    def _fmt_x(v, digits=1):
+                        x = _sf2(v)
+                        return "NULL" if x is None else f"{x:.{digits}f}x"
+
+                    def _fmt_pct(v, digits=1):
+                        x = _sf2(v)
+                        if x is None:
+                            return "NULL"
+                        # Dynamic Cap 內部多數用 0.662 = 66.2%，但也容忍 66.2 這類輸入。
+                        if abs(x) <= 3:
+                            x *= 100
+                        return f"{x:.{digits}f}%"
+
+                    def _fmt_money(v):
+                        x = _sf2(v)
+                        if x is None:
+                            return "NULL"
+                        ax = abs(x)
+                        if ax >= 1_000_000_000_000:
+                            return f"約 {x/1_000_000_000_000:.2f} 兆"
+                        if ax >= 100_000_000:
+                            return f"約 {x/100_000_000:.1f} 億"
+                        return f"{x:,.0f}"
+
+                    def _fmt_factor(raw):
+                        """把 {'factor':0.9,'label':'中','reason':'...'} 轉成可讀文字。"""
+                        if isinstance(raw, dict):
+                            factor = _fmt_num(raw.get("factor"), 2)
+                            label = _nullize_text(raw.get("label"))
+                            reason = _nullize_text(raw.get("reason"))
+                            avg_lots = _sf2(raw.get("avg_lots"))
+                            parts = []
+                            if factor != "NULL":
+                                parts.append(f"×{factor}")
+                            if label != "NULL":
+                                parts.append(label)
+                            if avg_lots is not None:
+                                parts.append(f"近20日均量約 {avg_lots:,.0f} 張")
+                            if reason != "NULL":
+                                parts.append(f"原因: {reason}")
+                            return "；".join(parts) if parts else "NULL"
+                        x = _sf2(raw)
+                        return "NULL" if x is None else f"×{x:.2f}"
+
+                    def _fmt_list(v):
+                        if isinstance(v, (list, tuple, set)):
+                            vals = [_nullize_text(x) for x in v if _nullize_text(x) != "NULL"]
+                            return "；".join(vals) if vals else "無"
+                        t = _nullize_text(v)
+                        if t in ("NULL", "[]"):
+                            return "無"
+                        return t
+
+                    def _get_input(inp, key, fallback=None):
+                        if isinstance(inp, dict) and key in inp and _nullize_text(inp.get(key)) != "NULL":
+                            return inp.get(key)
+                        return fallback
+
+                    cap_inputs = pack.get("cap_inputs") if isinstance(pack.get("cap_inputs"), dict) else {}
+                    warnings = _fmt_list(pack.get("warnings"))
+                    notes = _fmt_list(pack.get("cap_adoption_notes"))
+
+                    valuation_mode = _nullize_text(pack.get("valuation_mode"))
+                    model_version = _nullize_text(pack.get("model_version"))
+                    base_multiple = _fmt_x(pack.get("base_multiple"), 1)
+                    op_low = _fmt_x(pack.get("operable_cap_low"), 1)
+                    op_high = _fmt_x(pack.get("operable_cap_high"), 1)
+                    final_cap = _fmt_x(pack.get("final_cap"), 1)
+                    formula_cap = _fmt_x(pack.get("formula_cap"), 1)
+                    optimistic_cap = _fmt_x(pack.get("optimistic_cap"), 1)
+                    hard_cap = _fmt_x(pack.get("hard_ceiling_cap"), 1)
+
+                    # 與 EPS/PEG 面板保持同一口徑：cap_inputs 優先，缺值時才讀畫面變數。
+                    try:
+                        _fallback_ttm = eff_t_eps
+                    except Exception:
+                        _fallback_ttm = None
+                    try:
+                        _fallback_sys_f = sys_forward_eps_system
+                    except Exception:
+                        _fallback_sys_f = None
+                    try:
+                        _fallback_ai_f = ai_f_eps_calc
+                    except Exception:
+                        _fallback_ai_f = None
+                    try:
+                        _fallback_adopted = cap_adopted_forward_eps
+                    except Exception:
+                        _fallback_adopted = None
+                    try:
+                        _fallback_fy1 = ai_forward_eps_fy1
+                    except Exception:
+                        _fallback_fy1 = None
+                    try:
+                        _fallback_fy2 = ai_forward_eps_fy2
+                    except Exception:
+                        _fallback_fy2 = None
+                    try:
+                        _fallback_fy3 = ai_forward_eps_fy3
+                    except Exception:
+                        _fallback_fy3 = None
+                    try:
+                        _fallback_fy1_year = ai_forward_eps_fy1_year
+                    except Exception:
+                        _fallback_fy1_year = None
+                    try:
+                        _fallback_fy2_year = ai_forward_eps_fy2_year
+                    except Exception:
+                        _fallback_fy2_year = None
+                    try:
+                        _fallback_fy3_year = ai_forward_eps_fy3_year
+                    except Exception:
+                        _fallback_fy3_year = None
+                    try:
+                        _fallback_fy_note = ai_forward_eps_fy_source_note
+                    except Exception:
+                        _fallback_fy_note = None
+
+                    ttm_eps = _get_input(cap_inputs, "ttm_eps", _fallback_ttm)
+                    sys_feps = _get_input(cap_inputs, "system_forward_eps", _fallback_sys_f)
+                    ai_feps = _get_input(cap_inputs, "ai_forward_eps", _fallback_ai_f)
+                    adopted_eps = _get_input(cap_inputs, "adopted_valuation_forward_eps", _fallback_adopted)
+                    fy1_eps = _get_input(cap_inputs, "adopted_fy1_eps", _fallback_fy1)
+                    fy2_eps = _get_input(cap_inputs, "adopted_fy2_eps", _fallback_fy2)
+                    fy3_eps = _get_input(cap_inputs, "adopted_fy3_eps", _fallback_fy3)
+                    fy1_year = _get_input(cap_inputs, "fy1_year", _fallback_fy1_year)
+                    fy2_year = _get_input(cap_inputs, "fy2_year", _fallback_fy2_year)
+                    fy3_year = _get_input(cap_inputs, "fy3_year", _fallback_fy3_year)
+                    fy_note = _get_input(cap_inputs, "fy_eps_source_note", _fallback_fy_note)
+
+                    gm = _get_input(cap_inputs, "gross_margin")
+                    om = _get_input(cap_inputs, "operating_margin")
+                    roe = _get_input(cap_inputs, "roe")
+                    de = _get_input(cap_inputs, "debt_to_equity")
+                    rev_yoy = _get_input(cap_inputs, "revenue_yoy")
+                    fcf = _get_input(cap_inputs, "free_cash_flow")
+
+                    # 共同核心摘要，買進版與研究版都需要，但避免 raw dict。
                     lines = []
-                    for label, key in keys:
-                        val = _nullize_text(pack.get(key))
-                        if val != "NULL":
-                            lines.append(f"- {label}: {val}")
-                    warn = _nullize_text(pack.get("warnings"))
-                    if warn != "NULL":
-                        lines.append(f"- 模型警告: {warn}")
-                    inputs = _nullize_text(pack.get("cap_inputs"))
-                    if inputs != "NULL":
-                        lines.append(f"- Dynamic Cap 實際採用輸入值: {inputs}")
-                    notes = _nullize_text(pack.get("cap_adoption_notes"))
-                    if notes != "NULL":
-                        lines.append(f"- AI校對採用/保守值紀錄: {notes}")
-                    return "\n".join(lines) if lines else "NULL"
+                    if valuation_mode != "NULL":
+                        lines.append(f"- 使用模型: {valuation_mode}")
+                    if model_version != "NULL":
+                        lines.append(f"- 模型版本: {model_version}")
+                    if base_multiple != "NULL":
+                        lines.append(f"- 產業基準倍率: {base_multiple}")
+                    if op_low != "NULL" or op_high != "NULL":
+                        lines.append(f"- 可操作倍率區間: {op_low} ～ {op_high}")
+                    if final_cap != "NULL":
+                        lines.append(f"- 中性可操作倍率: {final_cap}")
+                    if formula_cap != "NULL":
+                        lines.append(f"- 公式合理倍率: {formula_cap}（模型理論估值，不等於買點）")
+                    if optimistic_cap != "NULL":
+                        lines.append(f"- 樂觀情境倍率: {optimistic_cap}（高風險情境，不等於買點）")
+                    if hard_cap != "NULL":
+                        lines.append(f"- hard ceiling: {hard_cap}（強制估值上限，不可因股價上漲直接調高）")
+
+                    discount_parts = []
+                    for label, key in [
+                        ("資料可信度", "data_confidence_factor"),
+                        ("估值風險", "valuation_risk_factor"),
+                        ("流動性", "liquidity_factor"),
+                    ]:
+                        txt = _fmt_factor(pack.get(key))
+                        if txt != "NULL":
+                            discount_parts.append(f"{label} {txt}")
+                    if discount_parts:
+                        lines.append("- 折扣摘要: " + "；".join(discount_parts))
+
+                    eps_parts = []
+                    if _fmt_num(adopted_eps, 2) != "NULL":
+                        eps_parts.append(f"Dynamic Cap 採用估值 EPS={_fmt_num(adopted_eps, 2)}")
+                    if _fmt_num(ttm_eps, 2) != "NULL":
+                        eps_parts.append(f"TTM EPS={_fmt_num(ttm_eps, 2)}")
+                    if _fmt_num(sys_feps, 2) != "NULL":
+                        eps_parts.append(f"系統 Forward EPS={_fmt_num(sys_feps, 2)}")
+                    if _fmt_num(ai_feps, 2) != "NULL":
+                        eps_parts.append(f"AI/法人 Forward EPS={_fmt_num(ai_feps, 2)}")
+                    if eps_parts:
+                        lines.append("- EPS 採用摘要: " + "；".join(eps_parts))
+                    if any(_fmt_num(v, 2) != "NULL" for v in [fy1_eps, fy2_eps, fy3_eps]):
+                        lines.append(f"- FY1 / FY2 / FY3 EPS: {_fmt_num(fy1_eps, 2)} / {_fmt_num(fy2_eps, 2)} / {_fmt_num(fy3_eps, 2)}")
+                    if any(_nullize_text(v) != "NULL" for v in [fy1_year, fy2_year, fy3_year]):
+                        lines.append(f"- FY 年度: {_nullize_text(fy1_year)} / {_nullize_text(fy2_year)} / {_nullize_text(fy3_year)}")
+                    if _nullize_text(fy_note) != "NULL":
+                        lines.append(f"- EPS 來源說明: {_nullize_text(fy_note)}")
+                    if notes != "無":
+                        lines.append(f"- AI校對採用紀錄: {notes}")
+                    if warnings != "無":
+                        lines.append(f"- 模型警告: {warnings}")
+                    lines.append("- 使用限制: 公式合理倍率與樂觀倍率不是買點；操作應優先看可操作倍率區間、Forward PEG 估值分層與最終燈號。")
+
+                    if str(mode).lower() in {"decision", "buy", "compact"}:
+                        return "\n".join(lines) if lines else "NULL"
+
+                    # 研究完整版：補充模型採用輸入，但仍不輸出 raw dict。
+                    research_lines = list(lines)
+                    factor_parts = []
+                    if _fmt_pct(gm) != "NULL":
+                        factor_parts.append(f"毛利率 {_fmt_pct(gm)}")
+                    if _fmt_pct(om) != "NULL":
+                        factor_parts.append(f"營益率 {_fmt_pct(om)}")
+                    if _fmt_pct(roe) != "NULL":
+                        factor_parts.append(f"ROE {_fmt_pct(roe)}")
+                    if _fmt_num(de, 2) != "NULL":
+                        factor_parts.append(f"D/E {_fmt_num(de, 2)}")
+                    if factor_parts:
+                        research_lines.append("\n【9-1. Dynamic Cap 採用品質/風險因子】")
+                        research_lines.append("- " + "；".join(factor_parts))
+                    growth_parts = []
+                    if _fmt_pct(rev_yoy) != "NULL":
+                        growth_parts.append(f"營收 YoY {_fmt_pct(rev_yoy)}")
+                    if _fmt_money(fcf) != "NULL":
+                        growth_parts.append(f"FCF {_fmt_money(fcf)}")
+                    if growth_parts:
+                        research_lines.append("\n【9-2. Dynamic Cap 採用成長/現金流因子】")
+                        research_lines.append("- " + "；".join(growth_parts))
+                    research_lines.append("\n【9-3. EPS 採用規則】")
+                    research_lines.append("- TTM EPS 看目前實際獲利；FY1 作主估值；FY2 判斷市場是否先行定價；FY3 僅作高風險樂觀情境；最新單季 EPS 不進年度估值。")
+                    return "\n".join(research_lines) if research_lines else "NULL"
                 except Exception as e:
                     try:
                         log_exception("PromptPack", "_prompt_dynamic_cap_core", e)
@@ -2624,7 +2825,7 @@ def render_main_page(sidebar_state=None):
 - 風險旗標: {_nullize_text(industry_profile.get('risk_flags') if isinstance(industry_profile, dict) else 'NULL')}
 
 【11. Dynamic Cap 2.0 摘要（核心拆解，不含完整表格）】
-{_prompt_dynamic_cap_core(dynamic_cap_pack)}
+{_prompt_dynamic_cap_core(dynamic_cap_pack, mode="research")}
 
 【12. 產業模型單次快照稽核與更新判斷】
 {_prompt_snapshot_audit_core(snapshot_audit, industry_profile, dynamic_cap_pack)}
@@ -2712,7 +2913,7 @@ def render_main_page(sidebar_state=None):
 - 混合後 base / floor / soft / hard: {_nullize_text(industry_profile.get('hybrid_mixed_caps_text') if isinstance(industry_profile, dict) else 'NULL')}
 
 【9. Dynamic Cap 2.0 決策摘要】
-{_prompt_dynamic_cap_core(dynamic_cap_pack)}
+{_prompt_dynamic_cap_core(dynamic_cap_pack, mode="decision")}
 
 【10. 產業模型稽核摘要】
 {_prompt_snapshot_audit_summary(snapshot_audit, industry_profile, dynamic_cap_pack)}
