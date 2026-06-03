@@ -1244,8 +1244,18 @@ def render_main_page(sidebar_state=None):
                     )
 
                 target_price_html = f"""
-                <div style='color:#aaa; font-size:0.85rem; border-top:1px solid #444; padding-top:8px; margin-top:8px;'>
-                    <div style='font-weight:bold; color:#E5E7EB; margin-bottom:4px;'>📊 估值口徑分層：系統 / AI / FY1 / FY2 / FY3</div>
+                <div style='background:#1e1e1e; padding:16px 18px; border-radius:10px; border-left:6px solid {peg_color}; margin-top:4px; margin-bottom:20px;'>
+                    <div style='display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:12px;'>
+                        <div>
+                            <div style='font-weight:bold; color:#F3F4F6; font-size:1.25rem;'>📈 前瞻 PEG (Forward PEG)｜詳細估值分層</div>
+                            <div style='color:#AAB2C0; font-size:0.88rem; margin-top:4px;'>系統 / AI / FY1 / FY2 / FY3 獨立列示，避免與本益比、股價淨值比小卡混在同一列。</div>
+                        </div>
+                        <div style='text-align:right; min-width:170px;'>
+                            <div style='background:{peg_color}; color:#000; padding:4px 10px; border-radius:999px; font-size:0.85rem; font-weight:bold; display:inline-block;'>{peg_text}</div>
+                            <div style='font-size:2.0rem; font-weight:bold; color:#fff; margin-top:6px; line-height:1.1;'>{peg_str_disp}</div>
+                        </div>
+                    </div>
+                    <div style='border-top:1px solid #333; padding-top:8px; color:#aaa; font-size:0.85rem;'>
                     {_valuation_rows_html}
                     <div style='background:#111827; color:#E5E7EB; padding:7px 9px; border-radius:6px; margin-top:7px; line-height:1.55;'>
                         <b>使用規則</b><br>
@@ -1255,6 +1265,7 @@ def render_main_page(sidebar_state=None):
                         <small style='color:#00bfff;'>🐛 [底層運算除錯] 系統EPS: {_fmt_eps(eff_f_eps)}｜AI EPS: {_fmt_eps(ai_f_eps_calc)}｜FY1 EPS: {_fmt_eps(ai_forward_eps_fy1)}｜FY2 EPS: {_fmt_eps(ai_forward_eps_fy2)}｜FY3 EPS: {_fmt_eps(ai_forward_eps_fy3)}｜EPS 年期/來源: {eps_period_note}｜公式倍率: {_fmt_cap(formula_pe_cap)}｜手動/可操作倍率: {_fmt_cap(manual_cap_for_calc)}｜樂觀倍率: {_fmt_cap(extreme_pe_cap_for_calc)}</small>
                     </div>
                     {implied_html}{cap_warning_html}
+                    </div>
                 </div>
                 """
 
@@ -1352,14 +1363,6 @@ def render_main_page(sidebar_state=None):
                     <div style='font-size:1.6rem; font-weight:bold; color:#fff; margin-bottom:5px;'>{fpe_str}</div>
                     <div style='color:#ffd700; font-size:0.85rem; font-weight:bold;'>基準：{eps_source_text}</div>
                 </div>
-                <div style='background:#1e1e1e; padding:15px; border-radius:8px; border-left: 5px solid {peg_color};'>
-                    <div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;'>
-                        <div style='font-size:1.1rem; font-weight:bold; color:#fff;'>📈 前瞻 PEG (Forward PEG)</div>
-                        <div style='background:{peg_color}; color:#000; padding:2px 8px; border-radius:10px; font-size:0.8rem; font-weight:bold;'>{peg_text}</div>
-                    </div>
-                    <div style='font-size:1.6rem; font-weight:bold; color:#fff; margin-bottom:5px;'>{peg_str_disp}</div>
-                    {target_price_html}
-                </div>
                 <div style='background:#1e1e1e; padding:15px; border-radius:8px; border-left: 5px solid {pb_color};'>
                     <div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;'>
                         <div style='font-size:1.1rem; font-weight:bold; color:#fff;'>🏦 股價淨值比 (P/B Ratio)</div>
@@ -1370,6 +1373,10 @@ def render_main_page(sidebar_state=None):
             </div>
             """
             st.markdown(clean_html(val_html), unsafe_allow_html=True)
+
+            # Forward PEG 改為下方獨立大區塊；上方估值卡只保留 Trailing P/E、Forward P/E、P/B。
+            if target_price_html:
+                st.markdown(clean_html(target_price_html), unsafe_allow_html=True)
 
             with st.expander("🧭 法人目標價可信度 + 公式估值 / 可操作估值分離", expanded=True):
                 tc = target_confidence
