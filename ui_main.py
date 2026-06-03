@@ -1152,17 +1152,112 @@ def render_main_page(sidebar_state=None):
                 ai_manual_str = f"<span style='color:#FFD700; font-size:0.95rem;'>(AI推估: {ai_manual_target_price:.1f}元{time_str})</span>" if ai_manual_target_price else ""
                 if manual_cap_hit_hard:
                     cap_warning_html += f"<br><span style='color:#ff4d4d; font-weight:bold;'>手動情境倍率 {manual_cap_input:.1f}x 已超過產業 hard ceiling，情境價以 {hard_pe_cap:.1f}x 截斷。</span>"
-                debug_eps = eff_f_eps if eff_f_eps else (ai_f_eps_calc if ai_f_eps_calc else 0)
-                # 🚀 修正處：將計算出來的結果回填給純文字變數 tp_est_str，讓提示詞抓得到
-                ai_tp_txt = f"{ai_target_price_est:.1f}元" if ai_target_price_est else "N/A"
-                ai_ext_txt = f"{ai_extreme_target_price:.1f}元" if ai_extreme_target_price else "N/A"
-                ai_manual_txt = f"{ai_manual_target_price:.1f}元" if ai_manual_target_price else "N/A"
-                if has_ai_fin_fetch:
-                    tp_est_str = f"公式合理估值: {sys_tp_str} (AI公式合理估值: {ai_tp_txt}) | 手動情境推估價: {manual_tp_str} (AI手動情境: {ai_manual_txt}) | 樂觀情境價: {sys_ext_str} (AI樂觀情境價: {ai_ext_txt}) | 公式倍率: {formula_pe_cap:.1f}x | 手動/可操作倍率: {operable_pe_cap:.1f}x"
-                else:
-                    tp_est_str = f"公式合理估值: {sys_tp_str} | 手動情境推估價: {manual_tp_str} | 樂觀情境價: {sys_ext_str} | 公式倍率: {formula_pe_cap:.1f}x | 手動/可操作倍率: {operable_pe_cap:.1f}x"
+                # 17-C-9c-hotfix45：估值顯示口徑重整。
+                # 1) 公式合理估值保留「系統 Forward EPS × formula cap」。
+                # 2) AI估值保留「AI/法人 Forward EPS × formula cap」。
+                # 3) 年度 FY1/FY2/FY3 估值另外列示，不再混入公式合理估值。
+                # 4) 手動年度情境價與樂觀年度情境價改用 FY1 EPS 作年度情境基礎。
+                def _valuation_num(v):
+                    try:
+                        if v is None:
+                            return None
+                        v = float(v)
+                        if pd.isna(v) or v <= 0:
+                            return None
+                        return v
+                    except Exception:
+                        return None
+
+                def _valuation_price(eps, cap):
+                    e = _valuation_num(eps)
+                    c = _valuation_num(cap)
+                    return e * c if e is not None and c is not None else None
+
+                def _fmt_price(v):
+                    v = _valuation_num(v)
+                    return f"{v:.1f}元" if v is not None else "N/A"
+
+                def _fmt_eps(v):
+                    v = _valuation_num(v)
+                    return f"{v:.2f}" if v is not None else "N/A"
+
+                def _fmt_cap(v):
+                    v = _valuation_num(v)
+                    return f"{v:.1f}x" if v is not None else "N/A"
+
+                fy1_eps_for_annual = ai_forward_eps_fy1 if ai_forward_eps_fy1 is not None else cap_adopted_forward_eps
+                fy1_year_text = _fy_year_display_safe(ai_forward_eps_fy1_year)
+                fy2_year_text = _fy_year_display_safe(ai_forward_eps_fy2_year)
+                fy3_year_text = _fy_year_display_safe(ai_forward_eps_fy3_year)
+
+                fy1_formula_target_price = _valuation_price(ai_forward_eps_fy1, formula_pe_cap)
+                fy2_formula_target_price = _valuation_price(ai_forward_eps_fy2, formula_pe_cap)
+                fy3_formula_target_price = _valuation_price(ai_forward_eps_fy3, formula_pe_cap)
+                fy1_manual_target_price = _valuation_price(fy1_eps_for_annual, manual_cap_for_calc)
+                fy1_optimistic_target_price = _valuation_price(fy1_eps_for_annual, extreme_pe_cap_for_calc)
+
+                sys_tp_str = _fmt_price(sys_target_price_est)
+                ai_tp_txt = _fmt_price(ai_target_price_est)
+                fy1_formula_txt = _fmt_price(fy1_formula_target_price)
+                fy2_formula_txt = _fmt_price(fy2_formula_target_price)
+                fy3_formula_txt = _fmt_price(fy3_formula_target_price)
+                fy1_manual_txt = _fmt_price(fy1_manual_target_price)
+                fy1_optimistic_txt = _fmt_price(fy1_optimistic_target_price)
+
+                if fy1_optimistic_target_price is not None and curr_p is not None and curr_p > fy1_optimistic_target_price:
+                    cap_warning_html += "<br><span style='color:#ff4d4d; font-weight:bold;'>現價已高於 FY1 樂觀年度情境價，追高風險極大！</span>"
+
+                tp_est_str = (
+                    f"公式合理估值(系統EPS×formula cap): {sys_tp_str}；"
+                    f"AI估值(AI EPS×formula cap): {ai_tp_txt}；"
+                    f"FY1年度估值(FY1 EPS×formula cap): {fy1_formula_txt}；"
+                    f"FY2第二年度估值(FY2 EPS×formula cap): {fy2_formula_txt}；"
+                    f"FY3第三年度估值(FY3 EPS×formula cap，高風險): {fy3_formula_txt}；"
+                    f"手動年度情境價(FY1 EPS×可操作Cap): {fy1_manual_txt}；"
+                    f"樂觀年度情境價(FY1 EPS×soft ceiling): {fy1_optimistic_txt}；"
+                    f"公式倍率: {_fmt_cap(formula_pe_cap)}；手動/可操作倍率: {_fmt_cap(manual_cap_for_calc)}；樂觀倍率: {_fmt_cap(extreme_pe_cap_for_calc)}"
+                )
+
                 eps_period_note = raw_ai_period or "系統/推估，請確認 EPS 年期"
-                target_price_html = f"<div style='color:#aaa; font-size:0.85rem; border-top:1px solid #444; padding-top:8px; margin-top:8px;'>🎯 公式合理估值 (PEG 推算，非買賣目標): <b style='color:#fff; font-size:1.1rem;'>{sys_tp_str}</b> <br>{ai_tp_est_html}<br>🛠️ <span style='color:#00bfff; font-weight:bold;'>手動情境推估價 (EPS × 使用者可操作 Cap): <span style='font-size:1.15rem;'>{manual_tp_str}</span> <br>{ai_manual_str}</span><br>🚀 <span style='color:#ff4d4d; font-weight:bold;'>樂觀情境價 (Forward EPS × soft ceiling，高風險情境): <span style='font-size:1.2rem;'>{sys_ext_str}</span> <br>{ai_ext_str}</span><br><div style='background:#2c2c2c; padding:4px 8px; border-radius:4px; margin-top:4px;'><small style='color:#00bfff;'>🐛 [底層運算除錯] EPS: {debug_eps:.2f}｜EPS 年期/來源: {eps_period_note}｜公式倍率: {formula_pe_cap:.1f}x｜手動/可操作倍率: {operable_pe_cap:.1f}x｜樂觀倍率: {extreme_pe_cap_for_calc:.1f}x</small></div>{implied_html}{cap_warning_html}</div>"
+                debug_eps = eff_f_eps if eff_f_eps else (ai_f_eps_calc if ai_f_eps_calc else 0)
+
+                _rows = [
+                    ("🎯 1. 公式合理估值", "系統 EPS × formula cap，非買賣目標", eff_f_eps, formula_pe_cap, sys_target_price_est, "#ffffff"),
+                    ("🤖 2. AI估值", "AI / 法人 EPS × formula cap，需看來源可信度", ai_f_eps_calc, formula_pe_cap, ai_target_price_est, "#FCD34D"),
+                    ("📅 3. FY1年度估值", f"FY1 EPS × formula cap｜{fy1_year_text}", ai_forward_eps_fy1, formula_pe_cap, fy1_formula_target_price, "#93C5FD"),
+                    ("📆 4. FY2第二年度估值", f"FY2 EPS × formula cap｜{fy2_year_text}｜僅供市場先行定價判斷", ai_forward_eps_fy2, formula_pe_cap, fy2_formula_target_price, "#A7F3D0"),
+                    ("🚧 5. FY3第三年度估值", f"FY3 EPS × formula cap｜{fy3_year_text}｜高風險遠期情境", ai_forward_eps_fy3, formula_pe_cap, fy3_formula_target_price, "#FCA5A5"),
+                    ("🛠️ 6. 手動年度情境價", "FY1 EPS × 使用者可操作 Cap", fy1_eps_for_annual, manual_cap_for_calc, fy1_manual_target_price, "#00BFFF"),
+                    ("🚀 7. 樂觀年度情境價", "FY1 EPS × soft ceiling，高風險情境", fy1_eps_for_annual, extreme_pe_cap_for_calc, fy1_optimistic_target_price, "#ff4d4d"),
+                ]
+
+                _valuation_rows_html = ""
+                for _title, _desc, _eps, _cap, _price, _color in _rows:
+                    _valuation_rows_html += (
+                        f"<div style='border-bottom:1px solid #333; padding:6px 0; line-height:1.45;'>"
+                        f"<div style='display:flex; justify-content:space-between; gap:10px;'>"
+                        f"<span style='color:{_color}; font-weight:bold;'>{_title}</span>"
+                        f"<span style='color:{_color}; font-weight:bold; font-size:1.05rem;'>{_fmt_price(_price)}</span>"
+                        f"</div>"
+                        f"<div style='color:#aaa; font-size:0.78rem;'>{_desc}｜EPS: {_fmt_eps(_eps)}｜倍率: {_fmt_cap(_cap)}</div>"
+                        f"</div>"
+                    )
+
+                target_price_html = f"""
+                <div style='color:#aaa; font-size:0.85rem; border-top:1px solid #444; padding-top:8px; margin-top:8px;'>
+                    <div style='font-weight:bold; color:#E5E7EB; margin-bottom:4px;'>📊 估值口徑分層：系統 / AI / FY1 / FY2 / FY3</div>
+                    {_valuation_rows_html}
+                    <div style='background:#111827; color:#E5E7EB; padding:7px 9px; border-radius:6px; margin-top:7px; line-height:1.55;'>
+                        <b>使用規則</b><br>
+                        公式合理估值保留系統 EPS 口徑；AI估值獨立顯示；FY1 是年度主估值參考；FY2 只用於市場先行定價判斷；FY3 為高風險遠期情境，不可直接當買點。
+                    </div>
+                    <div style='background:#2c2c2c; padding:4px 8px; border-radius:4px; margin-top:4px;'>
+                        <small style='color:#00bfff;'>🐛 [底層運算除錯] 系統EPS: {_fmt_eps(eff_f_eps)}｜AI EPS: {_fmt_eps(ai_f_eps_calc)}｜FY1 EPS: {_fmt_eps(ai_forward_eps_fy1)}｜FY2 EPS: {_fmt_eps(ai_forward_eps_fy2)}｜FY3 EPS: {_fmt_eps(ai_forward_eps_fy3)}｜EPS 年期/來源: {eps_period_note}｜公式倍率: {_fmt_cap(formula_pe_cap)}｜手動/可操作倍率: {_fmt_cap(manual_cap_for_calc)}｜樂觀倍率: {_fmt_cap(extreme_pe_cap_for_calc)}</small>
+                    </div>
+                    {implied_html}{cap_warning_html}
+                </div>
+                """
+
 
             # ==========================================
             # 🧭 法人目標價可信度 + 公式估值 / 可操作估值分離
