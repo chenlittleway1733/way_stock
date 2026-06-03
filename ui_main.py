@@ -1627,6 +1627,18 @@ def render_main_page(sidebar_state=None):
             st.markdown(clean_html(dfens_html), unsafe_allow_html=True)
             st.markdown("---")
 
+            # ✅ hotfix：建立「法人目標價面板快照」，後面的打包提示詞只讀這個快照，
+            # 避免提示詞重新抓其他來源造成與面板顯示不同步。
+            target_panel_for_prompt = {
+                "high": ai_hi_val,
+                "mean": ai_me_val,
+                "low": ai_lo_val,
+                "analyst_count": ai_analyst_count,
+                "confidence": locals().get("target_confidence", classify_target_price_confidence(ai_analyst_count)),
+                "source": "法人目標價面板顯示值：AI/法人聯網 target_price_high-target_price_avg-target_price_low" if (ai_hi_val is not None and ai_me_val is not None and ai_lo_val is not None) else ("法人目標價面板顯示值：AI/法人聯網平均目標價" if ai_me_val is not None else "無可用法人目標價"),
+                "rationale": ai_target_rationale,
+            }
+
             analyst_count_display = ai_analyst_count if ai_analyst_count not in (None, "", "null") else "無"
             target_confidence = locals().get("target_confidence", classify_target_price_confidence(ai_analyst_count))
             conf_color = target_confidence.get("color", "#FFD700")
@@ -1814,61 +1826,29 @@ def render_main_page(sidebar_state=None):
             panel_roe = _nullize_text(roe_str)
             panel_de = _nullize_text(de_str)
 
-            # 🚀 法人目標價：提示詞必須跟「法人預估目標價」面板同源。
-            # 面板實際顯示順序是：AI/法人聯網高均低 > AI 單一目標價 > 系統/yfinance 高均低。
-            # 之前提示詞優先抓系統 targetHigh/Mean/Low，會出現面板 3030/2600/2288，提示詞卻 3250/2589.6/2051 的錯位。
-            sys_hi = s_float(info.get('targetHighPrice'))
-            sys_me = s_float(info.get('targetMeanPrice'))
-            sys_lo = s_float(info.get('targetLowPrice'))
-            hi_str = f"{sys_hi:.1f}" if sys_hi is not None else "N/A"
-            me_str = f"{sys_me:.1f}" if sys_me is not None else "N/A"
-            lo_str = f"{sys_lo:.1f}" if sys_lo is not None else "N/A"
-
-            if ai_hi_val is not None and ai_me_val is not None and ai_lo_val is not None:
-                prompt_hi_str = f"{ai_hi_val:.1f}"
-                prompt_me_str = f"{ai_me_val:.1f}"
-                prompt_lo_str = f"{ai_lo_val:.1f}"
-                prompt_target_source = "法人目標價面板顯示值：AI/法人聯網 target_price_high-target_price_avg-target_price_low"
-            elif ai_me_val is not None:
-                prompt_hi_str = "N/A"
-                prompt_me_str = f"{ai_me_val:.1f}"
-                prompt_lo_str = "N/A"
-                prompt_target_source = "法人目標價面板顯示值：AI/法人聯網平均目標價"
-            elif ai_target_price is not None:
-                prompt_hi_str = "N/A"
-                prompt_me_str = f"{ai_target_price:.1f}"
-                prompt_lo_str = "N/A"
-                prompt_target_source = "法人目標價面板顯示值：AI 單一目標價"
-            elif sys_hi is not None and sys_me is not None and sys_lo is not None:
-                prompt_hi_str = f"{sys_hi:.1f}"
-                prompt_me_str = f"{sys_me:.1f}"
-                prompt_lo_str = f"{sys_lo:.1f}"
-                prompt_target_source = "法人目標價面板備援值：系統/yfinance targetHighPrice-targetMeanPrice-targetLowPrice"
-            elif sys_me is not None:
-                prompt_hi_str = "N/A"
-                prompt_me_str = f"{sys_me:.1f}"
-                prompt_lo_str = "N/A"
-                prompt_target_source = "法人目標價面板備援值：系統/yfinance targetMeanPrice"
-            else:
-                prompt_hi_str = prompt_me_str = prompt_lo_str = "N/A"
-                prompt_target_source = "無可用法人目標價"
-
-            # 分析師人數也跟面板同源：面板標題使用 ai_analyst_count；前面已把 AI / 系統 numberOfAnalystOpinions 做過 first_valid 合併。
-            prompt_analyst_count = _first_valid_analyst_count(
-                ai_analyst_count,
-                sys_analyst_count,
-                ai_fin.get('analyst_count') if has_ai_fin_fetch else None,
-                ai_fin.get('target_analyst_count') if has_ai_fin_fetch else None,
-            )
-            prompt_target_confidence = classify_target_price_confidence(prompt_analyst_count)
+            # 🚀 法人目標價：提示詞只讀「法人目標價面板快照」，不再重新抓 yfinance / AI 欄位。
+            # 這可避免畫面顯示 3030/2750/2288、10 位，但打包提示詞卻顯示無資料或另一組目標價。
+            _target_panel = locals().get("target_panel_for_prompt", {})
+            _tp_hi = s_float(_target_panel.get("high")) if isinstance(_target_panel, dict) else None
+            _tp_me = s_float(_target_panel.get("mean")) if isinstance(_target_panel, dict) else None
+            _tp_lo = s_float(_target_panel.get("low")) if isinstance(_target_panel, dict) else None
+            prompt_hi_str = f"{_tp_hi:.1f}" if _tp_hi is not None else "N/A"
+            prompt_me_str = f"{_tp_me:.1f}" if _tp_me is not None else "N/A"
+            prompt_lo_str = f"{_tp_lo:.1f}" if _tp_lo is not None else "N/A"
+            prompt_target_source = _target_panel.get("source", "無可用法人目標價") if isinstance(_target_panel, dict) else "無可用法人目標價"
+            prompt_analyst_count = _first_valid_analyst_count(_target_panel.get("analyst_count") if isinstance(_target_panel, dict) else None)
+            prompt_target_confidence = _target_panel.get("confidence") if isinstance(_target_panel, dict) else classify_target_price_confidence(prompt_analyst_count)
+            if not isinstance(prompt_target_confidence, dict):
+                prompt_target_confidence = classify_target_price_confidence(prompt_analyst_count)
             target_confidence = prompt_target_confidence
+            prompt_target_rationale = _target_panel.get("rationale", "") if isinstance(_target_panel, dict) else ""
 
             ai_source_trace_df_for_prompt = build_ai_source_trace_report(temp_ai_fin) if isinstance(temp_ai_fin, dict) else pd.DataFrame()
             ai_validation_warnings_for_prompt = temp_ai_fin.get("_ai_validation_warnings", []) if isinstance(temp_ai_fin, dict) else []
             ai_validation_status_for_prompt = temp_ai_fin.get("_ai_validation_status", "") if isinstance(temp_ai_fin, dict) else ""
             final_signal_report_for_prompt = final_signal.get("report") if isinstance(final_signal, dict) else None
             valuation_report_for_prompt = valuation_separation.get("report") if isinstance(valuation_separation, dict) else None
-            target_confidence_report_for_prompt = build_target_price_confidence_report(prompt_analyst_count, sys_hi if sys_hi is not None else ai_hi_val, sys_me if sys_me is not None else ai_me_val, sys_lo if sys_lo is not None else ai_lo_val, ai_target_rationale)
+            target_confidence_report_for_prompt = build_target_price_confidence_report(prompt_analyst_count, _tp_hi, _tp_me, _tp_lo, prompt_target_rationale)
             industry_report_for_prompt = build_industry_valuation_model_report(industry_profile)
             dynamic_cap_report_for_prompt = dynamic_cap_pack.get("report") if isinstance(dynamic_cap_pack, dict) else None
 
@@ -2254,8 +2234,8 @@ def render_main_page(sidebar_state=None):
                         lines.append(f"- 目標價資料來源: {_nullize_text(prompt_target_source)}")
                     if _nullize_text(ai_tp_str) != "NULL":
                         lines.append(f"- AI 最新目標價補充: {_nullize_text(ai_tp_str)}")
-                    if _nullize_text(ai_target_rationale) != "NULL":
-                        lines.append(f"- 核心理由: {_nullize_text(ai_target_rationale)}")
+                    if _nullize_text(prompt_target_rationale) != "NULL":
+                        lines.append(f"- 核心理由: {_nullize_text(prompt_target_rationale)}")
                     lines.append("- 同步規則: 以法人目標價面板顯示值為準；若面板無系統值，才回填 AI 目標價；沒有資料的 AI 欄位不輸出 NULL。")
                     return "\n".join(lines) if lines else "無可用法人目標價面板資料，本次不納入法人目標價判斷。"
                 except Exception as e:
@@ -2708,7 +2688,7 @@ def render_main_page(sidebar_state=None):
                     value=selected_prompt_for_copy,
                     height=330,
                     label_visibility="collapsed",
-                    key=f"copy_prompt_textarea_{curr_id}_{'buy' if prompt_mode.startswith('買進決策版') else 'research'}"
+                    key=f"copy_prompt_textarea_{curr_id}_{'buy' if prompt_mode.startswith('買進決策版') else 'research'}_{abs(hash(selected_prompt_for_copy)) % 100000000}"
                 )
             
             st.markdown("---")
@@ -2759,7 +2739,7 @@ def render_main_page(sidebar_state=None):
                     else: st.error("AI 暫時找不到明確的同業數據，或請檢查您的 API Key 額度。")
                 st.markdown("---")
 
-            # 🌊 雙河流圖 (Tabs)  
+            # 🌊 雙河流圖 (Tabs) 
             if df_per_bk is not None and not df_per_bk.empty:
                 st.markdown("### 🌊 估值位階雙河流圖 (P/E & P/B River)")
                 st.markdown("<small style='color:gray;'>*實戰密技：『成長股』看本益比判斷潛力；『景氣循環股』(航運/鋼鐵/面板) 獲利不穩定，必須看淨值比(P/B)河流圖抄底！*</small>", unsafe_allow_html=True)
