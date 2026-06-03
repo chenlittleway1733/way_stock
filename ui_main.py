@@ -2102,40 +2102,188 @@ def render_main_page(sidebar_state=None):
                         pass
                     return _nullize_text(tp_est_str)
 
-            def _prompt_snapshot_audit_core(audit, industry_profile=None, dynamic_cap_pack=None):
-                """第 17-C-9c-hotfix44-1：把單次快照稽核與是否需更新模型的判斷要求打包給外部 AI。"""
+            def _prompt_snapshot_audit_summary(
+                audit,
+                industry_profile=None,
+                dynamic_cap_pack=None,
+                market_implied_pe_val=locals().get('market_implied_pe'),
+                target_avg_implied_pe_val=locals().get('target_avg_implied_pe'),
+                target_high_implied_pe_val=locals().get('target_high_implied_pe'),
+            ):
+                """買進決策版：只放產業模型稽核摘要，避免模型維護資訊干擾交易判斷。"""
                 try:
                     if not isinstance(audit, dict):
-                        return "NULL"
+                        return "- 本次無產業模型稽核資料。"
                     s = audit.get("summary", {}) or {}
                     p = industry_profile or {}
                     dcp = dynamic_cap_pack or {}
-                    lines = [
-                        f"- 稽核結果: {_nullize_text(s.get('audit_label'))}",
-                        f"- 稽核分數: {_nullize_text(s.get('audit_score'))}",
-                        f"- 系統建議動作: {_nullize_text(s.get('action'))}",
-                        f"- 產業模型建置時間 / 版本: {_nullize_text(s.get('model_built_at'))} / {_nullize_text(p.get('model_build_version'))}",
-                        f"- 目前 primary_taxon: {_nullize_text(s.get('primary_taxon'))}",
-                        f"- 目前 hybrid_taxons: {_nullize_text(s.get('hybrid_taxons'))}",
-                        f"- 混合後 base/floor/soft/hard: {_nullize_text(s.get('mixed_caps'))}",
-                        f"- 現價隱含 Forward P/E: {_nullize_text(market_implied_pe if 'market_implied_pe' in locals() else None)}x",
-                        f"- 法人均價隱含 Forward P/E: {_nullize_text(target_avg_implied_pe if 'target_avg_implied_pe' in locals() else None)}x",
-                        f"- 法人高標隱含 Forward P/E: {_nullize_text(target_high_implied_pe if 'target_high_implied_pe' in locals() else None)}x",
-                        f"- 系統 hard ceiling: {_nullize_text(dcp.get('hard_ceiling_cap') if isinstance(dcp, dict) else None)}x",
-                        f"- 正面支持因素: {_nullize_text(s.get('positives'))}",
-                        f"- 風險/反對因素: {_nullize_text(s.get('negatives'))}",
-                        f"- 歷史紀錄狀態: {_nullize_text(s.get('history_note'))}",
-                        "- 請 AI 判斷：這是市場短線過熱、法人目標價過度樂觀、EPS/營收/毛利率尚未落地、hybrid 權重可能偏低、primary_taxon 可能已不符合公司營運型態，或整個產業 base/soft/hard 需要重新校準。",
-                        "- 請 AI 僅能從下列 5 種回答模型更新建議：不建議更新模型 / 暫時觀察 / 建議檢查 hybrid 權重 / 建議檢查 primary_taxon / 建議檢查整個產業倍率。",
-                        "- 重要限制：單次快照不能當成長期重估證據；不可因現價高於 hard ceiling 就直接調高模型；若要正式更新模型，必須說明要改 primary_taxon、hybrid_taxons 或 base/soft/hard，以及依據是 EPS、營收、毛利率、法人共識還是產業結構變化。",
-                    ]
-                    return "\\n".join(lines)
+
+                    def _clean(v, default="無"):
+                        if v is None:
+                            return default
+                        try:
+                            if pd.isna(v):
+                                return default
+                        except Exception:
+                            pass
+                        if isinstance(v, (list, tuple, set)):
+                            vals = [str(x).strip() for x in v if str(x).strip() and str(x).strip().upper() not in {"NULL", "NONE", "N/A"}]
+                            return "、".join(vals) if vals else default
+                        t = str(v).strip()
+                        return default if t == "" or t.upper() in {"NULL", "NONE", "N/A", "—", "[]"} else t
+
+                    def _x(v):
+                        n = s_float(v)
+                        return "無" if n is None else f"{n:.1f}x"
+
+                    def _line(label, value):
+                        value = _clean(value)
+                        return None if value == "無" else f"- {label}: {value}"
+
+                    positives = _clean(s.get('positives'))
+                    negatives = _clean(s.get('negatives'))
+                    lines = []
+                    for item in [
+                        _line("稽核結果", s.get('audit_label')),
+                        _line("稽核分數", s.get('audit_score')),
+                        _line("系統建議動作", s.get('action')),
+                        _line("目前 primary_taxon", s.get('primary_taxon')),
+                    ]:
+                        if item:
+                            lines.append(item)
+
+                    hard = dcp.get('hard_ceiling_cap') if isinstance(dcp, dict) else None
+                    if s_float(hard) is not None:
+                        lines.append(f"- 系統 hard ceiling: {_x(hard)}")
+
+                    implied_parts = []
+                    if s_float(market_implied_pe_val) is not None:
+                        implied_parts.append(f"現價 {_x(market_implied_pe_val)}")
+                    if s_float(target_avg_implied_pe_val) is not None:
+                        implied_parts.append(f"法人均價 {_x(target_avg_implied_pe_val)}")
+                    if s_float(target_high_implied_pe_val) is not None:
+                        implied_parts.append(f"法人高標 {_x(target_high_implied_pe_val)}")
+                    if implied_parts:
+                        lines.append("- 現價 / 法人均價 / 法人高標隱含 Forward P/E: " + " / ".join(implied_parts))
+
+                    lines.append(f"- 正面支持因素: {positives}")
+                    lines.append(f"- 風險/反對因素: {negatives}")
+                    lines.append("- 重要限制: 本區僅供模型是否失準之輔助判斷，不可因現價或法人目標價接近/高於 hard ceiling 就直接調高模型，也不可直接作為買進依據。")
+                    return "\n".join(lines)
+                except Exception as e:
+                    try:
+                        log_exception("PromptPack", "_prompt_snapshot_audit_summary", e)
+                    except Exception:
+                        pass
+                    return "- 產業模型稽核摘要產生失敗。"
+
+            def _prompt_snapshot_audit_core(
+                audit,
+                industry_profile=None,
+                dynamic_cap_pack=None,
+                market_implied_pe_val=locals().get('market_implied_pe'),
+                target_avg_implied_pe_val=locals().get('target_avg_implied_pe'),
+                target_high_implied_pe_val=locals().get('target_high_implied_pe'),
+            ):
+                """研究完整版：完整打包單次快照稽核與是否需更新模型的判斷要求。"""
+                try:
+                    if not isinstance(audit, dict):
+                        return "- 本次無產業模型稽核資料。"
+                    s = audit.get("summary", {}) or {}
+                    p = industry_profile or {}
+                    dcp = dynamic_cap_pack or {}
+
+                    def _clean(v, default="無"):
+                        if v is None:
+                            return default
+                        try:
+                            if pd.isna(v):
+                                return default
+                        except Exception:
+                            pass
+                        if isinstance(v, (list, tuple, set)):
+                            vals = [str(x).strip() for x in v if str(x).strip() and str(x).strip().upper() not in {"NULL", "NONE", "N/A"}]
+                            return "、".join(vals) if vals else default
+                        t = str(v).strip()
+                        return default if t == "" or t.upper() in {"NULL", "NONE", "N/A", "—", "[]"} else t
+
+                    def _x(v):
+                        n = s_float(v)
+                        return "無" if n is None else f"{n:.1f}x"
+
+                    built_at = _clean(s.get('model_built_at'))
+                    version = _clean(p.get('model_build_version'))
+                    if built_at != "無" and version != "無":
+                        build_text = f"{built_at} / {version}"
+                    elif built_at != "無":
+                        build_text = built_at
+                    elif version != "無":
+                        build_text = version
+                    else:
+                        build_text = "無"
+
+                    lines = []
+                    for label, value in [
+                        ("稽核結果", s.get('audit_label')),
+                        ("稽核分數", s.get('audit_score')),
+                        ("系統建議動作", s.get('action')),
+                        ("產業模型建置時間 / 版本", build_text),
+                        ("目前 primary_taxon", s.get('primary_taxon')),
+                        ("目前 hybrid_taxons", s.get('hybrid_taxons')),
+                        ("混合後 base / floor / soft / hard", s.get('mixed_caps')),
+                    ]:
+                        v = _clean(value)
+                        if v != "無":
+                            lines.append(f"- {label}: {v}")
+
+                    if s_float(market_implied_pe_val) is not None:
+                        lines.append(f"- 現價隱含 Forward P/E: {_x(market_implied_pe_val)}")
+                    if s_float(target_avg_implied_pe_val) is not None:
+                        lines.append(f"- 法人均價隱含 Forward P/E: {_x(target_avg_implied_pe_val)}")
+                    if s_float(target_high_implied_pe_val) is not None:
+                        lines.append(f"- 法人高標隱含 Forward P/E: {_x(target_high_implied_pe_val)}")
+                    hard = dcp.get('hard_ceiling_cap') if isinstance(dcp, dict) else None
+                    if s_float(hard) is not None:
+                        lines.append(f"- 系統 hard ceiling: {_x(hard)}")
+
+                    lines.append(f"- 正面支持因素: {_clean(s.get('positives'))}")
+                    lines.append(f"- 風險/反對因素: {_clean(s.get('negatives'))}")
+                    history_note = _clean(s.get('history_note'))
+                    if history_note != "無":
+                        lines.append(f"- 歷史紀錄狀態: {history_note}")
+                    else:
+                        lines.append("- 歷史紀錄狀態: 目前未啟用歷史紀錄，本表僅為本次快照稽核，不能判斷連續幾次或長期重估。")
+
+                    lines.extend([
+                        "",
+                        "請 AI 判斷這次差異屬於下列哪一類：",
+                        "1. 市場短線過熱",
+                        "2. 法人目標價過度樂觀",
+                        "3. EPS / 營收 / 毛利率尚未落地",
+                        "4. hybrid 權重可能偏低",
+                        "5. primary_taxon 可能已不符合公司營運型態",
+                        "6. 整個產業 base / soft / hard ceiling 可能需要重新校準",
+                        "",
+                        "請 AI 僅能從下列 5 種回答模型更新建議：",
+                        "- 不建議更新模型",
+                        "- 暫時觀察",
+                        "- 建議檢查 hybrid 權重",
+                        "- 建議檢查 primary_taxon",
+                        "- 建議檢查整個產業倍率",
+                        "",
+                        "重要限制：",
+                        "- 單次快照不能當成長期重估證據。",
+                        "- 不可因現價高於 hard ceiling 就直接調高模型。",
+                        "- 若要正式更新模型，必須說明要改 primary_taxon、hybrid_taxons 或 base/soft/hard。",
+                        "- 更新依據必須來自 EPS、營收、毛利率、法人共識或產業結構變化，而不是單純股價上漲。",
+                    ])
+                    return "\n".join(lines)
                 except Exception as e:
                     try:
                         log_exception("PromptPack", "_prompt_snapshot_audit_core", e)
                     except Exception:
                         pass
-                    return "NULL"
+                    return "- 產業模型稽核內容產生失敗。"
 
             def _prompt_eps_adoption_sync_summary(
                 sys_latest_quarter_eps_val=locals().get('sys_latest_quarter_eps'),
@@ -2566,8 +2714,8 @@ def render_main_page(sidebar_state=None):
 【9. Dynamic Cap 2.0 決策摘要】
 {_prompt_dynamic_cap_core(dynamic_cap_pack)}
 
-【10. 產業模型單次快照稽核與更新判斷】
-{_prompt_snapshot_audit_core(snapshot_audit, industry_profile, dynamic_cap_pack)}
+【10. 產業模型稽核摘要】
+{_prompt_snapshot_audit_summary(snapshot_audit, industry_profile, dynamic_cap_pack)}
 
 【11. ETF / 防禦力 / 籌碼摘要】
 - ETF 持有與曝險：
@@ -3062,7 +3210,7 @@ def render_main_page(sidebar_state=None):
                 x_fmt = "%m/%d"
                 rb = [dict(bounds=["sat", "mon"])] 
                 if dt_breaks:
-                    rb.append(dict(values=dt_breaks))  
+                    rb.append(dict(values=dt_breaks)) 
 
             fig_k.update_xaxes(rangebreaks=rb, tickformat=x_fmt, showgrid=True, gridcolor='#333', mirror=True, showline=True, linecolor='#555')
             fig_k.update_layout(height=750, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=10,b=10), template="plotly_dark", hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
