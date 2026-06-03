@@ -2755,6 +2755,122 @@ def render_main_page(sidebar_state=None):
                     return "\n".join(lines)
                 except Exception:
                     return "NULL"
+
+
+
+
+            def _prompt_model_gap_trigger_conditions():
+                """研究完整版專用：市場價/法人價/系統估值落差過大時，啟動模型落差診斷。"""
+                return """本區只放在研究完整版；用途是讓外部 AI 在市場價、法人價、系統估值差距過大時，先做模型落差診斷，再給研究結論。
+
+若符合下列任一條件，請啟動模型落差診斷：
+- 現價高於系統可操作區間高標 20% 以上。
+- 現價高於 FY1 公式估值 30% 以上。
+- 法人平均目標價與系統可操作區間中值差距超過 30%。
+- 法人最高目標價與最低目標價差距超過平均目標價 60%。
+- 現價用 FY1 EPS 看高於 hard ceiling，但用 FY2 / FY3 EPS 看可解釋。
+
+請 AI 逐項判斷落差可能來源：
+1. 市場是否已提前反映 FY2 / FY3 EPS。
+2. primary_taxon 是否可能已不符合市場定價邏輯。
+3. hybrid 權重是否可能不足。
+4. 是否只是市場題材或短線過熱。
+5. 法人目標價是否分歧過大，導致平均目標價可信度下降。
+
+請 AI 最後只能從下列 5 種模型診斷結論選一種：
+- 模型暫不需調整，市場短線過熱。
+- 模型暫不需調整，但市場正在提前反映 FY2/FY3。
+- 建議檢查 hybrid 權重。
+- 建議檢查 primary_taxon。
+- 建議檢查整個產業倍率。
+
+重要限制：
+- 不可因股價高於模型價就直接調高模型。
+- 不可因單一法人高標就調高模型。
+- FY2 只能解釋市場先行定價，不等於買點。
+- FY3 只作高風險遠期情境，不可作一般買進依據。
+- 若建議調整模型，必須說明是 primary_taxon、hybrid 權重，還是 base / soft / hard ceiling 的問題。"""
+
+            def _prompt_buy_decision_gap_risk_conditions():
+                """買進決策版專用：市場價/法人價/系統估值落差過大時，只提醒買進安全邊際，不做模型庫回饋。"""
+                return """本區只放在買進決策版；用途是讓外部 AI 在判斷是否買進前，先檢查市場價、法人目標價、系統可操作估值與 FY1/FY2/FY3 估值是否落差過大。
+
+若符合下列任一條件，請啟動買進風險檢查：
+- 現價高於系統可操作區間高標 20% 以上。
+- 現價高於 FY1 公式估值 30% 以上。
+- 現價只能用 FY2 / FY3 EPS 才能解釋。
+- 法人平均目標價與系統可操作區間中值差距超過 30%。
+- 法人最高目標價與最低目標價差距超過平均目標價 60%。
+
+請 AI 判斷此落差對「買進安全邊際」的影響：
+1. 現價是否已提前反映 FY2 / FY3 EPS。
+2. 法人高標是否過度樂觀或高低標分歧過大。
+3. 現價是否高於系統可操作區間，導致追價風險偏高。
+4. 若只能用 FY2 / FY3 解釋現價，請說明 EPS / 營收 / 毛利率是否已經落地。
+5. 若差距過大，請明確標示：不宜追價 / 只能觀察 / 需等 EPS 或營收落地後再評估。
+
+重要限制：
+- 本區不是模型庫修正建議，只用於買進風險判斷。
+- FY2 只能解釋市場先行定價，不等於買點。
+- FY3 只作高風險遠期情境，不可作一般買進依據。
+- 法人高標不可直接視為合理買進價。
+- 公式合理價、樂觀情境價、使用者手動壓力測試價都不是系統建議買點。"""
+
+            def _prompt_model_library_feedback_request():
+                """研究完整版專用：請外部 AI 把個案分析回饋成模型庫修正候選，不放入買進決策版。"""
+                try:
+                    primary_taxon = _nullize_text(industry_profile.get('primary_taxon') if isinstance(industry_profile, dict) else 'NULL')
+                    model_label = _nullize_text(industry_profile.get('model_label') if isinstance(industry_profile, dict) else 'NULL')
+                    hybrid_taxons = _nullize_text(industry_profile.get('hybrid_taxons_text') if isinstance(industry_profile, dict) else 'NULL')
+                    mixed_caps = _nullize_text(industry_profile.get('hybrid_mixed_caps_text') if isinstance(industry_profile, dict) else 'NULL')
+                    source = _nullize_text(industry_profile.get('classification_source') if isinstance(industry_profile, dict) else 'NULL')
+                    confidence = _nullize_text(industry_profile.get('classification_confidence') if isinstance(industry_profile, dict) else 'NULL')
+                    hard_cap = _nullize_text(industry_profile.get('hard_ceiling_pe') if isinstance(industry_profile, dict) else 'NULL')
+                    soft_cap = _nullize_text(industry_profile.get('soft_ceiling_pe') if isinstance(industry_profile, dict) else 'NULL')
+
+                    lines = [
+                        "本區只放在研究完整版；目的不是產生買賣建議，而是把本次個案分析整理成模型庫修正候選清單。",
+                        f"- 目前 primary_taxon: {primary_taxon}",
+                        f"- 目前匹配模型: {model_label}",
+                        f"- 目前 hybrid_taxons / 權重: {hybrid_taxons}",
+                        f"- 混合後估值區間: {mixed_caps}",
+                        f"- 分類來源 / 可信度: {source} / {confidence}",
+                        f"- 主模型 soft / hard ceiling: {soft_cap} / {hard_cap}",
+                        "- 可參考落差來源: 現價、法人目標價、系統可操作估值、FY1/FY2/FY3 估值、Dynamic Cap、產業模型單次快照稽核。",
+                        "",
+                        "請 AI 僅能從下列模型庫回饋類型選擇，可複選：",
+                        "- primary_taxon_review：主分類可能需要人工檢查。",
+                        "- hybrid_weight_review：hybrid 權重可能需要人工檢查。",
+                        "- industry_cap_review：整個產業 base / soft / hard ceiling 可能需要檢查。",
+                        "- eps_timing_review：市場可能已提前反映 FY2/FY3 EPS。",
+                        "- target_confidence_review：法人目標價可信度或高低標分歧規則需檢查。",
+                        "- no_model_change：目前不建議調整模型庫。",
+                        "",
+                        "請 AI 輸出以下欄位：",
+                        "- 模型庫回饋類型。",
+                        "- 是否建議立即修改模型庫: 是 / 否 / 觀察。",
+                        "- 建議檢查的檔案: stock_mapping.py / industry_taxonomy.py / dynamic_cap_model.py / 目標價可信度規則。",
+                        "- 具體建議。",
+                        "- 支持證據。",
+                        "- 反對證據。",
+                        "- 需要追蹤的條件。",
+                        "- 信心等級: 高 / 中 / 低。",
+                        "",
+                        "重要限制：",
+                        "- 不可因單次股價上漲就建議調高模型。",
+                        "- 不可因單一法人高標就建議調高模型。",
+                        "- 若建議調整 primary_taxon，必須說明公司營收結構或獲利來源已明顯轉型。",
+                        "- 若建議調整 hybrid 權重，必須說明新成長曲線如何影響 FY1/FY2/FY3 EPS、毛利率或法人目標價。",
+                        "- 若建議調整產業倍率，必須說明是否多檔同產業股票都出現系統性偏差。",
+                        "- AI 回饋只進入模型庫修正候選清單，不可自動覆蓋 stock_mapping.py 或產業倍率。",
+                    ]
+                    return "\n".join(lines)
+                except Exception as e:
+                    try:
+                        log_exception("PromptPack", "_prompt_model_library_feedback_request", e)
+                    except Exception:
+                        pass
+                    return "NULL"
             context_str = f"""
 【0. WAY AI 投資戰情室 2.1 精簡判讀總覽】
 - 股票: {c_name} ({curr_id})
@@ -2852,6 +2968,12 @@ def render_main_page(sidebar_state=None):
 
 【17. 提示詞與面板同步自檢】
 {_prompt_panel_sync_audit()}
+
+【18. 模型落差觸發條件與診斷要求（研究完整版專用）】
+{_prompt_model_gap_trigger_conditions()}
+
+【19. 模型庫回饋建議（研究完整版專用）】
+{_prompt_model_library_feedback_request()}
 """
 
 
@@ -2900,7 +3022,10 @@ def render_main_page(sidebar_state=None):
 - 可操作估值區間低/中/高: {_nullize_text(valuation_separation.get('operable_low') if isinstance(valuation_separation, dict) else 'NULL')} / {_nullize_text(valuation_separation.get('operable_mid') if isinstance(valuation_separation, dict) else 'NULL')} / {_nullize_text(valuation_separation.get('operable_high') if isinstance(valuation_separation, dict) else 'NULL')}
 - 可操作估值提示: {_nullize_text(valuation_separation.get('action_hint') if isinstance(valuation_separation, dict) else 'NULL')}
 
-【8. 產業估值模型】
+【8. 模型落差風險提示（買進決策版專用）】
+{_prompt_buy_decision_gap_risk_conditions()}
+
+【9. 產業估值模型】
 - 產業模型建置時間 / 版本: {_nullize_text(industry_profile.get('model_built_at') if isinstance(industry_profile, dict) else 'NULL')} / {_nullize_text(industry_profile.get('model_build_version') if isinstance(industry_profile, dict) else 'NULL')}
 - 正式/匹配分類: {_nullize_text(industry_profile.get('model_label') if isinstance(industry_profile, dict) else 'NULL')}
 - 分類來源 / 可信度 / 折扣: {_nullize_text(industry_profile.get('classification_source') if isinstance(industry_profile, dict) else 'NULL')} / {_nullize_text(industry_profile.get('classification_confidence') if isinstance(industry_profile, dict) else 'NULL')} / ×{_nullize_text(industry_profile.get('classification_confidence_factor') if isinstance(industry_profile, dict) else 'NULL')}
@@ -2912,13 +3037,13 @@ def render_main_page(sidebar_state=None):
 - 混合產業權重: {_nullize_text(industry_profile.get('hybrid_taxons_text') if isinstance(industry_profile, dict) else 'NULL')}
 - 混合後 base / floor / soft / hard: {_nullize_text(industry_profile.get('hybrid_mixed_caps_text') if isinstance(industry_profile, dict) else 'NULL')}
 
-【9. Dynamic Cap 2.0 決策摘要】
+【10. Dynamic Cap 2.0 決策摘要】
 {_prompt_dynamic_cap_core(dynamic_cap_pack, mode="decision")}
 
-【10. 產業模型稽核摘要】
+【11. 產業模型稽核摘要】
 {_prompt_snapshot_audit_summary(snapshot_audit, industry_profile, dynamic_cap_pack)}
 
-【11. ETF / 防禦力 / 籌碼摘要】
+【12. ETF / 防禦力 / 籌碼摘要】
 - ETF 持有與曝險：
 {_prompt_etf_panel_summary()}
 - 防禦力/財務健康：
@@ -2926,10 +3051,10 @@ def render_main_page(sidebar_state=None):
 - 籌碼/股權結構：
 {_prompt_chip_panel_summary()}
 
-【12. 提示詞與面板同步自檢】
+【13. 提示詞與面板同步自檢】
 {_prompt_panel_sync_audit()}
 
-【13. AI 來源與驗證摘要】
+【14. AI 來源與驗證摘要】
 - AI JSON 驗證: {_nullize_text(ai_validation_status_for_prompt)}；警告: {_nullize_text('；'.join([str(x) for x in ai_validation_warnings_for_prompt[:5]]) if ai_validation_warnings_for_prompt else 'NULL')}
 - 估值採用 AI 欄位來源摘要:
 {_prompt_ai_source_summary(ai_source_trace_df_for_prompt)}
@@ -2948,6 +3073,7 @@ def render_main_page(sidebar_state=None):
 7) 若產業分類來源為 AI 建議或 keyword_fallback，請先檢查分類是否合理；AI 建議分類屬待確認，不可視為正式 stock_mapping.py 分類。
 8) 請閱讀「產業模型單次快照稽核與更新判斷」，判斷是否需人工檢查產業估值模型；但不可把單次快照直接當成必須更新模型。
 9) 請閱讀「Forward EPS 年期分層估值」，判斷市場/法人是否可能已經用 FY2 或 FY3 EPS 定價；若是，請說明這是先行定價還是過度樂觀。
+10) 研究完整版請額外輸出「模型庫回饋建議」：這不是買賣建議，而是協助日後修正 stock_mapping.py、industry_taxonomy.py、dynamic_cap_model.py 或法人目標價可信度規則；AI 回饋只能作為候選清單，不可直接覆蓋模型庫。
 
 任務要求：
 1) 先做「2.1 資料品質盤點」：逐項說明哪些欄位是系統/AI/推估/NULL，並指出最影響結論的 3 個資料風險。
@@ -2962,6 +3088,7 @@ def render_main_page(sidebar_state=None):
    - 倉位建議：保守 / 中性 / 積極三種配置比例。
 6) 三情境目標價：牛市 / 基準 / 熊市，各列目標價區間、假設前提、觸發條件。
 7) 下月追蹤清單：列出 8 個要追蹤的指標與警戒閾值，必須包含月營收 YoY、MoM、毛利率、EPS、法人目標價或 EPS 預估調整。
+8) 模型庫回饋建議：請依【18. 模型庫回饋建議】輸出模型庫修正候選，並明確標示是否只是觀察，不得把模型回饋混成買賣結論。
 
 輸出格式（必須照做）：
 - [投資結論一句話]
@@ -2973,6 +3100,7 @@ def render_main_page(sidebar_state=None):
 - [三情境目標價]
 - [風險與反證]
 - [下月追蹤清單]
+- [模型庫回饋建議｜研究用途，非買賣建議]
 
 以下是系統面板 2.1 精簡打包數據（只保留會影響外部 AI 判斷的採用值、分歧、估值層級、產業模型、Dynamic Cap 與燈號；無資料為 NULL）。若出現數據不合理，可上網查詢並說明不合理原因，但不可忽略系統已標示的分歧與資料品質警告：
 {context_str}
@@ -2991,19 +3119,21 @@ def render_main_page(sidebar_state=None):
 - 若法人目標價分析師人數為 NULL 或少於 3 人，請降低目標價可信度。
 - 若資料品質不足或關鍵欄位異常，請明確說「暫不適合做買進判斷」。
 - 若同一欄位同時列出系統值與 AI 值，請說明採用哪一個，以及是否影響估值可信度。
+- 若觸發「模型落差風險提示」，請優先判斷落差是否會傷害買進安全邊際；但不要在買進決策版提出模型庫修正建議。
 
 請依序回答：
 1. [投資結論一句話]：可買 / 觀望 / 不建議 / 資料異常，並說明是否同意系統最終燈號。
 2. [買進前資料檢查]：檢查月營收公告月份、EPS 口徑、Forward EPS、法人目標價可信度、公式估值是否被樂觀 EPS 放大，並列出最影響買進判斷的 3 個資料風險。
 3. [產業與成長邏輯]：說明產業主線、未來 1～2 年成長動能，以及成長失速條件。
 4. [估值判斷]：分開說明公式合理價、公式極限價、可操作估值區間、法人目標價，並判斷現價低估 / 合理 / 偏高 / 高估。不可只用 PEG 判斷便宜。
-5. [買進策略]：現價可不可以買？給 2～3 個分批買點與理由；若不建議買，說明跌到哪裡或出現什麼條件才可重新評估。
-6. [賣出與風控]：給 2～3 個停利區與 2～3 個停損 / 減碼條件；高題材股需說明拉高是否先收一部分。
-7. [倉位建議]：保守 / 中性 / 積極三種配置比例；資料可信度不足時限制最高倉位。
-8. [三情境目標價]：牛市 / 基準 / 熊市，各列目標價區間、假設前提、觸發條件。
-9. [下月追蹤清單]：列 8 個指標與警戒值，必須包含月營收 YoY、MoM、毛利率、EPS、Forward EPS 或法人 EPS 預估、法人目標價可信度、營益率或 ROE、重要訂單 / 產業事件。
-10. [EPS 年期判斷]：請先用 TTM EPS 判斷目前實際獲利估值，再說明目前股價與法人目標價比較像用 FY1、FY2 還是 FY3 EPS 定價；FY1/FY2/FY3 是預估年度 EPS 序列，不是查詢日後1/2/3年。若用 FY2/FY3 才合理，請說明風險與是否能作為買進依據。
-11. [產業模型是否需更新]：請根據「17-C-9c-hotfix44 單次快照稽核」回答：不建議更新模型 / 暫時觀察 / 建議檢查 hybrid 權重 / 建議檢查 primary_taxon / 建議檢查整個產業倍率。若建議檢查，請說明是市場過熱、法人過度樂觀、EPS/營收尚未落地，還是公司營運型態已改變；不可因單次現價高於 hard ceiling 就直接調高模型。
+5. [模型落差風險]：若現價、法人目標價、系統可操作估值與 FY1/FY2/FY3 估值落差過大，請判斷是否只靠 FY2/FY3 才能解釋現價，以及這是否降低買進安全邊際。
+6. [買進策略]：現價可不可以買？給 2～3 個分批買點與理由；若不建議買，說明跌到哪裡或出現什麼條件才可重新評估。
+7. [賣出與風控]：給 2～3 個停利區與 2～3 個停損 / 減碼條件；高題材股需說明拉高是否先收一部分。
+8. [倉位建議]：保守 / 中性 / 積極三種配置比例；資料可信度不足時限制最高倉位。
+9. [三情境目標價]：牛市 / 基準 / 熊市，各列目標價區間、假設前提、觸發條件。
+10. [下月追蹤清單]：列 8 個指標與警戒值，必須包含月營收 YoY、MoM、毛利率、EPS、Forward EPS 或法人 EPS 預估、法人目標價可信度、營益率或 ROE、重要訂單 / 產業事件。
+11. [EPS 年期判斷]：請先用 TTM EPS 判斷目前實際獲利估值，再說明目前股價與法人目標價比較像用 FY1、FY2 還是 FY3 EPS 定價；FY1/FY2/FY3 是預估年度 EPS 序列，不是查詢日後1/2/3年。若用 FY2/FY3 才合理，請說明風險與是否能作為買進依據。
+12. [產業模型是否需更新]：請根據「17-C-9c-hotfix44 單次快照稽核」回答：不建議更新模型 / 暫時觀察 / 建議檢查 hybrid 權重 / 建議檢查 primary_taxon / 建議檢查整個產業倍率。若建議檢查，請說明是市場過熱、法人過度樂觀、EPS/營收尚未落地，還是公司營運型態已改變；不可因單次現價高於 hard ceiling 就直接調高模型。
 
 以下是 WAY AI 投資戰情室 2.1「買進決策版」系統資料。這不是完整研究資料包，只保留會直接影響買進判斷的採用值、系統值/AI值、分歧、估值層級、產業模型、Dynamic Cap 與燈號。若資料不合理，可上網查證，但不可忽略系統標示的資料品質與分歧警告：
 {decision_context_str}
