@@ -7,6 +7,15 @@ from ui_common import *
 
 def render_main_page(sidebar_state=None):
     """渲染主畫面。"""
+
+    # 17-C-9c-hotfix：此 helper 會在 Forward EPS 區塊與後方提示詞打包區重複使用，
+    # 必須放在 render_main_page 開頭；若放在函式後段，前面先呼叫時會觸發 UnboundLocalError。
+    def _nullize_text(s):
+        s = str(s) if s is not None else ""
+        s = re.sub(r'<[^>]+>', ' ', s)
+        s = s.replace("N/A", "NULL").replace("無資料", "NULL").replace("未捕捉到", "NULL")
+        s = re.sub(r'\s+', ' ', s)
+        return s.strip() if s.strip() else "NULL"
     hi_val = None
     me_val = None
     lo_val = None
@@ -1624,14 +1633,6 @@ def render_main_page(sidebar_state=None):
             st.markdown(clean_html(chip_html), unsafe_allow_html=True)
             st.markdown("---")
             
-            def _nullize_text(s):
-                s = str(s) if s is not None else ""
-                import re
-                s = re.sub(r'<[^>]+>', ' ', s)
-                s = s.replace("N/A", "NULL").replace("無資料", "NULL").replace("未捕捉到", "NULL")
-                s = re.sub(r'\s+', ' ', s)
-                return s.strip() if s.strip() else "NULL"
-
             def _prompt_df(df, max_rows=20):
                 """將 Streamlit 表格壓成可貼給外部 AI 的純文字，避免 2.0 面板資訊沒被打包。"""
                 try:
