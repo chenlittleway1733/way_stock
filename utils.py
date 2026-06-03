@@ -370,7 +370,7 @@ def infer_quality_status(adopted_value, system_value=None, ai_value=None, is_sta
     medium_risk_keywords = ["公告月份未取得", "未取得 FinMind 月營收", "單月 / 累計", "需人工確認", "可信度：中"]
     if any(k in note_text for k in medium_risk_keywords):
         return "⚠️ 中可信/需人工確認"
-    high_risk_keywords = ["校驗失敗", "不合理", "已排除", "NULL", "過舊", "錯置", "幻覺"]
+    high_risk_keywords = ["校驗失敗", "不合理", "已排除", "NULL", "過舊", "錯置", "幻覺", "分歧", "需人工確認"]
     if any(k in note_text for k in high_risk_keywords):
         return "⚠️ 已校正/需留意"
     if system_value is not None and ai_value is not None:
@@ -416,6 +416,28 @@ def normalize_financial_ratio(val, default=None):
     # Yahoo / AI / 不同 API 有時會把百分比以 31.5 而非 0.315 回傳
     if abs(v) > 1.5 and abs(v) <= 100:
         return v / 100.0
+    return v
+
+
+def normalize_growth_ratio(val, default=None):
+    """
+    17-C-9d-hotfix：營收 YoY / 成長率專用正規化。
+
+    一般比率 normalize_financial_ratio 會把 7.3014 視為 7.3014% 並轉成 0.073014，
+    但 AI prompt 已規定「730.14% 應填 7.3014」。因此成長率需要獨立處理：
+    - 0.35 代表 35%
+    - 5.20 代表 520%
+    - 7.3014 代表 730.14%
+    - 35 或 730.14 這種百分比數字才除以 100
+    """
+    v = s_float(val, default)
+    if v is None:
+        return default
+    av = abs(v)
+    # 傳統百分比數字：35 = 35%，730.14 = 730.14%。
+    if av > 10:
+        return v / 100.0
+    # 0.35、5.20、7.3014 視為已經是小數倍率。
     return v
 
 
@@ -537,6 +559,38 @@ def build_revenue_month_notice(actual_month, today=None):
     }
 
 
+def detect_yoy_scale_mismatch(system_yoy, ai_yoy):
+    """
+    17-C-9d-hotfix：偵測 AI YoY 百分比縮放錯位。
+
+    system_yoy / ai_yoy 均應為小數格式：
+    - 717.33% = 7.1733
+    - 7.30% = 0.073
+
+    目的：避免新聞寫「年增 730.14%」時，AI 誤回 0.073 或 0.073014，
+    導致畫面顯示 7.30% / 7.3014%，進而污染買進決策版。
+    """
+    sys_v = s_float(system_yoy)
+    ai_v = s_float(ai_yoy)
+    if sys_v is None or ai_v is None:
+        return False
+
+    sys_abs = abs(sys_v)
+    ai_abs = abs(ai_v)
+
+    # 情境 1：系統月營收為極端高成長（>100%），AI 卻小於 20%，高度疑似二次縮放。
+    if sys_abs >= 1.0 and ai_abs <= 0.20 and abs(sys_abs - ai_abs) >= 0.50:
+        return True
+
+    # 情境 2：AI 剛好接近系統值 / 100，例如 7.17 被錯成 0.0717。
+    if sys_abs >= 1.0 and ai_abs > 0:
+        ratio = sys_abs / ai_abs
+        if 80 <= ratio <= 120:
+            return True
+
+    return False
+
+
 def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_rev_df=None, stock_id="", stock_name=""):
     """
     財務資料品質閘門：
@@ -553,16 +607,28 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
     warnings = []
     label = f"{stock_name} ({stock_id})" if stock_name and stock_id else (stock_name or stock_id or "目前標的")
 
-    # v1.24 欄位相容：rev_growth/revenue_yoy、mom/revenue_mom 新舊欄位可互通。
-    if ai_norm.get("revenue_yoy") is None and ai_norm.get("rev_growth") is not None:
-        ai_norm["revenue_yoy"] = ai_norm.get("rev_growth")
-    if ai_norm.get("rev_growth") is None and ai_norm.get("revenue_yoy") is not None:
-        ai_norm["rev_growth"] = ai_norm.get("revenue_yoy")
+    # v1.24/2.1 欄位相容：
+    # monthly_revenue_yoy/monthly_revenue_mom 為最新公告月份單月營收；
+    # rev_growth/revenue_yoy/yoy 舊欄位只作相容，不可混用累計 YoY、獲利 YoY 或 CAGR。
+    if ai_norm.get("monthly_revenue_yoy") is None:
+        ai_norm["monthly_revenue_yoy"] = ai_norm.get("revenue_yoy") if ai_norm.get("revenue_yoy") is not None else ai_norm.get("rev_growth")
+    if ai_norm.get("monthly_revenue_mom") is None and ai_norm.get("revenue_mom") is not None:
+        ai_norm["monthly_revenue_mom"] = ai_norm.get("revenue_mom")
+    if ai_norm.get("revenue_yoy") is None and ai_norm.get("monthly_revenue_yoy") is not None:
+        ai_norm["revenue_yoy"] = ai_norm.get("monthly_revenue_yoy")
+    if ai_norm.get("rev_growth") is None and ai_norm.get("monthly_revenue_yoy") is not None:
+        ai_norm["rev_growth"] = ai_norm.get("monthly_revenue_yoy")
+    if ai_norm.get("revenue_mom") is None and ai_norm.get("monthly_revenue_mom") is not None:
+        ai_norm["revenue_mom"] = ai_norm.get("monthly_revenue_mom")
 
     # 統一百分比欄位尺度；D/E 需獨立正規化，避免 2.69 倍被誤判成 2.69%。
-    for key in ["gross_margin", "operating_margin", "rev_growth", "revenue_yoy", "revenue_mom", "earnings_cagr", "eps_growth_yoy"]:
+    # YoY / 成長率使用 normalize_growth_ratio，避免 520% 正確小數 5.20 被二次縮小成 5.20%。
+    for key in ["gross_margin", "operating_margin", "revenue_mom", "monthly_revenue_mom"]:
         corrected[key] = normalize_financial_ratio(corrected.get(key))
         ai_norm[key] = normalize_financial_ratio(ai_norm.get(key))
+    for key in ["rev_growth", "revenue_yoy", "monthly_revenue_yoy", "earnings_growth_yoy", "earnings_cagr", "cagr", "eps_growth_yoy"]:
+        corrected[key] = normalize_growth_ratio(corrected.get(key))
+        ai_norm[key] = normalize_growth_ratio(ai_norm.get(key))
     corrected["debt_to_equity"] = normalize_debt_to_equity(corrected.get("debt_to_equity"))
     ai_norm["debt_to_equity"] = normalize_debt_to_equity(ai_norm.get("debt_to_equity"))
 
@@ -616,13 +682,30 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
     except Exception:
         pass
 
-    # AI YoY 也做合理範圍防呆；極端值多半是抓到錯欄或摘要幻覺
+    # AI YoY 也做合理範圍防呆；極端值多半是抓到錯欄或摘要幻覺。
+    # 注意：記憶體低基期可能出現 500%～700% 以上 YoY，因此合理上限放到 1000%。
     ai_yoy = ai_norm.get("rev_growth")
     if ai_yoy is not None and not (-1.0 <= ai_yoy <= 10.0):
         warnings.append(
-            f"{label} 的 AI 營收 YoY={to_val_str(ai_yoy, 'pct')} 超出合理範圍，已設為 NULL。"
+            f"{label} 的 AI 營收 YoY={to_val_str(ai_yoy, 'pct')} 超出 -100%～1000% 安全範圍，已設為 NULL。"
         )
         ai_norm["rev_growth"] = None
+        ai_norm["revenue_yoy"] = None
+        ai_norm["monthly_revenue_yoy"] = None
+        ai_yoy = None
+
+    # 17-C-9d-hotfix：YoY 極端成長率百分比縮放錯位防呆。
+    # 例：系統月營收 717.33%，AI 回 7.30%，代表 AI 可能將 730.14% 誤轉成 0.073。
+    sys_yoy_for_scale_guard = corrected.get("rev_growth")
+    if detect_yoy_scale_mismatch(sys_yoy_for_scale_guard, ai_yoy):
+        warnings.append(
+            f"{label} 的 AI 營收 YoY={to_val_str(ai_yoy, 'pct')} 與系統公告月營收 YoY={to_val_str(sys_yoy_for_scale_guard, 'pct')} 差距過大，"
+            "疑似百分比縮放錯位；已排除 AI YoY，月營收判斷採用系統公告月營收，AI YoY 不得作為買進依據。"
+        )
+        ai_norm["rev_growth"] = None
+        ai_norm["revenue_yoy"] = None
+        ai_norm["monthly_revenue_yoy"] = None
+        ai_norm["revenue_yoy_scale_mismatch"] = True
 
     # D/E：系統值與 AI 值雙層防呆。D/E > 800% 直接視為高風險異常值，不進估值模型。
     def debt_to_equity_is_valid(v):
@@ -752,11 +835,28 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
     if data.get("forward_eps") is None:
         data["forward_eps"] = data.get("forward_eps_consensus") or data.get("forward_eps_ai") or data.get("forward_eps_system")
 
-    # 百分比/比率欄位標準化。AI 常把 25.5% 寫成 25.5，這裡轉為 0.255。
-    ratio_fields = ["gross_margin", "operating_margin", "roe", "yoy", "mom", "dividend_yield"]
+    # 百分比/比率欄位標準化。
+    # 毛利率/ROE 等一般百分比仍用 normalize_financial_ratio；
+    # YoY / 成長率用 normalize_growth_ratio，避免 520% 正確小數 5.20 被二次縮放。
+    ratio_fields = ["gross_margin", "operating_margin", "roe", "monthly_revenue_mom", "mom", "dividend_yield"]
+    growth_fields = ["monthly_revenue_yoy", "earnings_growth_yoy", "cagr", "yoy"]
     for field in ratio_fields:
         if field in data:
             data[field] = normalize_financial_ratio(data.get(field))
+    for field in growth_fields:
+        if field in data:
+            data[field] = normalize_growth_ratio(data.get(field))
+
+    # 17-C-9d-hotfix：新舊 YoY/MoM 欄位相容。
+    # monthly_revenue_yoy 才代表最新公告月份單月營收 YoY；legacy yoy 僅相容舊程式。
+    if data.get("monthly_revenue_yoy") is None and data.get("yoy") is not None:
+        data["monthly_revenue_yoy"] = data.get("yoy")
+    if data.get("yoy") is None and data.get("monthly_revenue_yoy") is not None:
+        data["yoy"] = data.get("monthly_revenue_yoy")
+    if data.get("monthly_revenue_mom") is None and data.get("mom") is not None:
+        data["monthly_revenue_mom"] = data.get("mom")
+    if data.get("mom") is None and data.get("monthly_revenue_mom") is not None:
+        data["mom"] = data.get("monthly_revenue_mom")
 
     if "debt_to_equity" in data:
         data["debt_to_equity"] = normalize_debt_to_equity(data.get("debt_to_equity"))
@@ -794,6 +894,12 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
     roe = data.get("roe")
     if roe is not None and not (-1.0 <= roe <= 1.0):
         null_field("roe", f"ROE={roe:.2%} 超出 -100%～100%")
+
+    monthly_yoy = data.get("monthly_revenue_yoy")
+    if monthly_yoy is not None and not (-1.0 <= monthly_yoy <= 10.0):
+        null_field("monthly_revenue_yoy", f"單月營收 YoY={monthly_yoy:.2%} 超出 -100%～1000% 安全範圍")
+        if data.get("yoy") == monthly_yoy:
+            data["yoy"] = None
 
     yoy = data.get("yoy")
     if yoy is not None and not (-1.0 <= yoy <= 10.0):
