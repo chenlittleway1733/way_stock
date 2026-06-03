@@ -363,7 +363,13 @@ def infer_quality_status(adopted_value, system_value=None, ai_value=None, is_sta
     if adopted_value is None:
         return "❌ 缺資料"
     if is_stale:
+        # 若是 AI 補齊但公告月份未取得，不能顯示為高可信 / 完全可用。
+        if any(k in note_text for k in ["公告月份未取得", "未取得 FinMind 月營收", "單月 / 累計", "需人工確認", "可信度：中"]):
+            return "⚠️ 中可信/需人工確認"
         return "⚠️ 可能過期"
+    medium_risk_keywords = ["公告月份未取得", "未取得 FinMind 月營收", "單月 / 累計", "需人工確認", "可信度：中"]
+    if any(k in note_text for k in medium_risk_keywords):
+        return "⚠️ 中可信/需人工確認"
     high_risk_keywords = ["校驗失敗", "不合理", "已排除", "NULL", "過舊", "錯置", "幻覺"]
     if any(k in note_text for k in high_risk_keywords):
         return "⚠️ 已校正/需留意"
