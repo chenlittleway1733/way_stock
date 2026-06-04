@@ -335,12 +335,12 @@ def render_main_page(sidebar_state=None):
                 st.markdown("#### 💼 財務基本面與獲利基準微調")
             with col_fin_btn:
                 if st.button("🪄 啟動 AI 全方位校對與補齊財報", disabled=not st.session_state.api_key, use_container_width=True, help="點此讓 AI 上網搜尋最新財報與估值指標，並與現有資料進行比對"):
-                    with st.spinner("AI 正在聯網為您強行抓取最新財報數據，請稍候...（Pro Only 最多重試 3 次，約需 30-90 秒）"):
+                    with st.spinner("AI 正在執行 2.2 兩段式財報校對：Pass A 搜尋取材、Pass B JSON 整理，請稍候...（Pass A 最多 2 次；Pass B 最多 2 次）"):
                         selected_model = get_selected_model_id()
                         fetched_data = get_financials_from_ai(c_name, curr_id, st.session_state.api_key, selected_model)
                     
                         if isinstance(fetched_data, dict) and "error" not in fetched_data:
-                            core_fin_keys = ["pe", "trailing_eps", "ttm_eps", "latest_quarter_eps", "forward_eps", "forward_eps_ai", "forward_eps_consensus", "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3", "pb", "gross_margin", "operating_margin", "roe", "yoy", "target_price", "mom", "dividend_yield"]
+                            core_fin_keys = ["pe", "trailing_eps", "ttm_eps", "latest_quarter_eps", "forward_eps", "forward_eps_ai", "forward_eps_consensus", "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3", "pb", "gross_margin", "gross_margin_percent", "operating_margin", "operating_margin_percent", "roe", "roe_percent", "yoy", "monthly_revenue_yoy_percent", "monthly_revenue_mom_percent", "accumulated_revenue_yoy_percent", "target_price", "target_price_avg", "mom", "dividend_yield", "dividend_yield_percent"]
                             has_effective_fin_data = any(fetched_data.get(k) not in (None, "", "null") for k in core_fin_keys)
                             if not has_effective_fin_data:
                                 st.warning("⚠️ AI 本次有回應，但未抓到可用財報欄位（可能是來源暫無資料或回傳皆為 null）。請稍後重試或切換標的。")

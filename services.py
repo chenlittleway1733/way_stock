@@ -26,7 +26,7 @@ from google.genai import types
 # 從 utils 引入需要的工具
 from utils import s_float, log_data_health, log_exception, validate_ai_financial_json
 
-# 2.2：Gemini response_schema 結構化輸出。
+# 2.2：兩段式 JSON mime；Pass A 搜尋取材，Pass B 無搜尋 JSON 整理。
 # 百分比類欄位全部用 *_percent，直接填「百分比數字」：730.14% -> 730.14。
 # 系統內部再統一轉成 ratio，避免 Gemini/程式二次縮放造成 730% 變 7.30%。
 FINANCIAL_RESPONSE_SCHEMA = {
@@ -1024,11 +1024,12 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     - trailing_eps 與 forward_eps 為向下相容 legacy 欄位，trailing_eps 可同 ttm_eps，forward_eps 可同 forward_eps_consensus 或 forward_eps_ai。
 
     必須嚴格回傳包含上述財務欄位的 JSON 格式。
-    【2.2 結構化輸出與百分比欄位硬性規則】
-    - 本函式已啟用 Gemini response_schema；請只依 schema 欄位輸出 JSON，不要自行新增 legacy 百分比欄位。
+    【2.2 兩段式 JSON mime 與百分比欄位硬性規則】
+    - 本函式採兩段式：Pass A 使用 Google Search 搜尋取材；Pass B 關閉搜尋，只根據 Pass A 來源整理 JSON。
+    - 請只使用下列正式欄位輸出 JSON，不要自行新增 legacy 百分比欄位。
     - 所有百分比類欄位一律使用 *_percent 欄位，直接填「百分比數字」，不可填小數比率。
       例：730.14% -> monthly_revenue_yoy_percent=730.14；8.55% -> monthly_revenue_mom_percent=8.55；67.90% -> gross_margin_percent=67.90；17.95% -> roe_percent=17.95；0.34% -> dividend_yield_percent=0.34。
-    - 不要輸出 yoy、mom、gross_margin、operating_margin、roe、dividend_yield 這些 legacy 百分比欄位；若 schema 未列出的欄位請省略。_sources 來源物件的 key 也必須使用 *_percent 欄位名，不可使用 yoy / mom / gross_margin 等 legacy key。
+    - 不要輸出 yoy、mom、gross_margin、operating_margin、roe、dividend_yield 這些 legacy 百分比欄位；若非正式欄位請省略。_sources 來源物件的 key 也必須使用 *_percent 欄位名，不可使用 yoy / mom / gross_margin 等 legacy key。
     - monthly_revenue_yoy_percent 只能填最新公告月份「單月營收 YoY」；若只找到累計 YoY，請填 accumulated_revenue_yoy_percent，不可混用。
     - 若不確定是單月 YoY 或累計 YoY，monthly_revenue_yoy_percent 請填 null。
     - 請盡量附 revenue_month 與 revenue_source_quote，例如「2026年5月合併營收276.70億元，年增730.14%，月增8.55%」。
@@ -1048,7 +1049,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     {{"pe": 15.2, "latest_quarter_eps": 1.35, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin_percent": 25.5, "operating_margin_percent": 12.3, "roe_percent": 15.0, "monthly_revenue_yoy_percent": 35.0, "monthly_revenue_mom_percent": 1.5, "accumulated_revenue_yoy_percent": null, "earnings_growth_yoy_percent": null, "cagr_percent": null, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "dividend_yield_percent": 3.2, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
     絕對不要輸出 markdown 標記或其他文字。"""
 
-    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、最新公告月份單月營收 YoY / MoM、累計營收 YoY、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。請務必確認並標示出 EPS 對應年度、月營收公告月份、資料發布日期與來源！所有百分比欄位請依 response_schema 的 *_percent 欄位填百分比數字，例如 730.14% 填 730.14，不要填 7.3014 或 0.073014。不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
+    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、最新公告月份單月營收 YoY / MoM、累計營收 YoY、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。請務必確認並標示出 EPS 對應年度、月營收公告月份、資料發布日期與來源！所有百分比欄位請使用 *_percent 欄位填百分比數字，例如 730.14% 填 730.14，不要填 7.3014 或 0.073014。不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
 
     def _make_config(search_enabled=True, schema_enabled=True):
         kwargs = {
@@ -1080,9 +1081,10 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
 
     # 2.2-B：兩段式 AI 財報回收。
     # Pass A：Gemini Pro + Google Search 只負責搜尋與保留原文/來源。
-    # Pass B：關閉 Google Search，用 response_schema 從 Pass A 原文抽取結構化 JSON。
+    # Pass B：關閉 Google Search，用 JSON mime 從 Pass A 原文整理結構化 JSON；不再強用 response_schema。
     candidate_model = "gemini-3.1-pro-preview"
-    retry_delays = [0, 3, 8]
+    search_retry_delays = [0, 3]
+    extract_retry_delays = [0, 1]
     attempts = []
     used_model = candidate_model
     used_search = True
@@ -1121,7 +1123,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
 
     search_response = None
     search_text = None
-    for idx, delay_sec in enumerate(retry_delays, start=1):
+    for idx, delay_sec in enumerate(search_retry_delays, start=1):
         if delay_sec > 0:
             time.sleep(delay_sec)
         try:
@@ -1172,7 +1174,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
         return {
             "error": (
                 "Gemini 3 Pro Preview（付費版）聯網財報搜尋取材失敗。"
-                f"系統已用同一付費模型重試 {len(attempts)} 次，仍未成功；"
+                f"系統已用同一付費模型重試 Pass A {len(attempts)} 次，仍未成功；"
                 "已禁止降級到 2.5 Pro / 2.5 Flash / 離線保底，以避免不準數據進入估值模型。"
             ),
             "last_error": str(last_error)[:500] if last_error else None,
@@ -1187,7 +1189,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
         search_parsed["source_urls"] = grounding_links
 
     extract_prompt_text = f"""你現在只做結構化資料抽取，不可上網搜尋，不可引入新資料。
-請只根據下方「搜尋取材 JSON / 原文片段」抽取台股 {stock_name} ({stock_id}) 的財報欄位，並嚴格符合 response_schema。
+請只根據下方「搜尋取材 JSON / 原文片段」抽取台股 {stock_name} ({stock_id}) 的財報欄位，並整理成正式 JSON。
 
 【百分比欄位硬性規則】
 - 所有百分比欄位必須使用 *_percent，直接填百分比數字。
@@ -1201,77 +1203,72 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
 【搜尋取材 JSON / 原文片段】
 {json.dumps(search_parsed, ensure_ascii=False, indent=2)}
 
-請輸出符合 response_schema 的 JSON。"""
+請只輸出 JSON，不要輸出 markdown 或其他文字。"""
 
     extract_response = None
     extract_text = None
-    schema_error = None
-    try:
-        extract_response = client.models.generate_content(
-            model=candidate_model,
-            contents=extract_prompt_text,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                response_mime_type="application/json",
-                response_schema=FINANCIAL_RESPONSE_SCHEMA
-            )
-        )
-        extract_text = extract_response.text
-        used_response_schema = True
-        attempts.append({
-            "phase": "B-schema-extract",
-            "attempt": 1,
-            "model": candidate_model,
-            "search_enabled": False,
-            "response_schema_enabled": True,
-            "ok": True,
-            "reason": "2.2 兩段式 Pass B schema 結構化抽取成功"
-        })
-    except Exception as e:
-        schema_error = str(e)
-        used_response_schema = False
-        fallback_reason = "2.2 兩段式 Pass B response_schema 不相容或失敗，已退回無搜尋 JSON mime 抽取；後端仍執行單位防呆。"
-        attempts.append({
-            "phase": "B-schema-extract",
-            "attempt": 1,
-            "model": candidate_model,
-            "search_enabled": False,
-            "response_schema_enabled": True,
-            "ok": False,
-            "error": schema_error[:500],
-            "reason": "response_schema 抽取失敗，改用 JSON mime 抽取"
-        })
+    extract_error = None
+
+    # 2.2 正式策略：Pass B 不再強用 response_schema，改用無搜尋 JSON mime 整理。
+    # 原因：目前 Gemini 3.1 Pro Preview + Google Search / schema 組合容易不相容；
+    # 兩段式的重點是「先找來源，再整理 JSON」，並由後端守門封存 legacy 欄位。
+    for idx, delay_sec in enumerate(extract_retry_delays, start=1):
+        if delay_sec > 0:
+            time.sleep(delay_sec)
         try:
             extract_response = client.models.generate_content(
                 model=candidate_model,
                 contents=extract_prompt_text,
                 config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
+                    system_instruction=(
+                        "你是財經資料結構化整理助手。不可上網搜尋，不可新增 Pass A 沒有的資料。"
+                        "請只根據使用者提供的搜尋取材 JSON / 原文片段整理成 JSON。"
+                        "所有百分比欄位必須使用 *_percent，並直接填百分比數字；legacy 欄位一律不要輸出。"
+                    ),
                     response_mime_type="application/json"
                 )
             )
             extract_text = extract_response.text
             attempts.append({
                 "phase": "B-json-extract",
-                "attempt": 1,
+                "attempt": idx,
                 "model": candidate_model,
                 "search_enabled": False,
                 "response_schema_enabled": False,
+                "delay_before_retry_sec": delay_sec,
                 "ok": True,
-                "reason": "2.2 兩段式 Pass B 無搜尋 JSON mime 抽取成功"
+                "reason": "2.2 兩段式 Pass B 無搜尋 JSON mime 整理成功"
             })
-        except Exception as e2:
+            break
+        except Exception as e:
+            extract_error = str(e)
             attempts.append({
                 "phase": "B-json-extract",
-                "attempt": 1,
+                "attempt": idx,
                 "model": candidate_model,
                 "search_enabled": False,
                 "response_schema_enabled": False,
+                "delay_before_retry_sec": delay_sec,
                 "ok": False,
-                "error": str(e2)[:500],
-                "reason": "JSON mime 抽取也失敗，改用 Pass A 搜尋 JSON 後端守門"
+                "error": extract_error[:500],
+                "reason": "2.2 兩段式 Pass B 無搜尋 JSON mime 整理失敗；快速重試"
             })
-            extract_text = json.dumps(search_parsed, ensure_ascii=False)
+            if _is_non_retryable_error(extract_error):
+                break
+
+    if not extract_text:
+        attempts.append({
+            "phase": "B-json-extract",
+            "attempt": "fallback",
+            "model": candidate_model,
+            "search_enabled": False,
+            "response_schema_enabled": False,
+            "ok": False,
+            "error": str(extract_error)[:500] if extract_error else None,
+            "reason": "Pass B 失敗，改用 Pass A 搜尋 JSON 後端守門"
+        })
+        fallback_reason = "2.2 兩段式：Pass B JSON mime 整理失敗，已改用 Pass A 搜尋資料由後端守門處理。"
+        extract_text = json.dumps(search_parsed, ensure_ascii=False)
 
     parsed, parse_error = _parse_json_from_text(extract_text)
     if not isinstance(parsed, dict):
@@ -1301,20 +1298,20 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     parsed = _normalize_ai_source_metadata(parsed)
     parsed["model_used"] = used_model
     parsed["ai_search_enabled"] = bool(used_search)
-    parsed["response_schema_enabled"] = bool(used_response_schema)
+    parsed["response_schema_enabled"] = False
     parsed["fallback_reason"] = fallback_reason or "無"
     parsed["attempts"] = attempts
-    parsed["retry_policy"] = "2.2 兩段式：Pass A gemini-3.1-pro-preview + Google Search；Pass B 同模型關閉搜尋 + response_schema；不降級。"
+    parsed["retry_policy"] = "2.2 兩段式 JSON mime：Pass A 同模型 + Google Search 最多 2 次；Pass B 同模型關閉搜尋 JSON 整理最多 2 次；不降級。"
     parsed["query_payload"] = json.dumps({
         "stock": f"{stock_name} ({stock_id})",
         "target_year": target_year,
         "model_used": used_model,
-        "mode": "2.2 two-pass search_then_schema_extract",
+        "mode": "2.2 two-pass search_then_json_extract",
         "pass_a_google_search_enabled": True,
         "pass_b_google_search_enabled": False,
-        "response_schema_enabled": bool(used_response_schema),
+        "response_schema_enabled": False,
         "fallback_reason": fallback_reason or "無",
-        "retry_policy": "Pass A delays 0s, 3s, 8s; Pass B schema then JSON mime fallback; no model downgrade.",
+        "retry_policy": "Pass A delays 0s, 3s; Pass B JSON mime delays 0s, 1s; no model downgrade.",
         "search_prompt": search_prompt_text,
         "extract_prompt": extract_prompt_text,
     }, ensure_ascii=False, indent=2)
