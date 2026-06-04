@@ -578,12 +578,16 @@ def render_main_page(sidebar_state=None):
                 "rev_growth": rev_growth,
                 "debt_to_equity": sys_de,
             }
-            ai_vals_for_check = {
+            # 2.2-hotfix：資料品質閘門必須保留 AI 原始 *_percent 欄位。
+            # 若只把已轉成 ratio 的 rev_growth/gross_margin 傳進 validate_and_correct_financial_metrics()，
+            # canonicalize_percent_fields() 會把它視為 legacy 欄位而封存，導致 UI 顯示「AI 找不到數據」。
+            ai_vals_for_check = dict(ai_fin) if isinstance(ai_fin, dict) else {}
+            ai_vals_for_check.update({
                 "gross_margin": ai_gm,
                 "operating_margin": ai_om,
                 "rev_growth": ai_yoy,
                 "debt_to_equity": ai_de,
-            }
+            })
             corrected_sys, corrected_ai, dq_warnings = validate_and_correct_financial_metrics(
                 sys_vals_for_check,
                 ai_vals_for_check,
