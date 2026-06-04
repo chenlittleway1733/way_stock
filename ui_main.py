@@ -82,7 +82,21 @@ def render_main_page(sidebar_state=None):
             with cols[idx]: st.button(f"{name}\n({code})", on_click=reset_all_states_on_stock_change, args=(code,), key=f"w_{code}", use_container_width=True)
         st.markdown("---")
 
-    curr_id = st.session_state.selected_stock
+    curr_id = str(st.session_state.get("selected_stock", "") or "").strip()
+    if not curr_id:
+        st.markdown(
+            """
+            <div style='margin-top:2.5rem; max-width:820px; padding:1.4rem 1.6rem; border:1px solid rgba(128,128,128,0.25); border-radius:14px; background:rgba(128,128,128,0.06);'>
+                <div style='font-size:1.35rem; font-weight:800; margin-bottom:0.55rem;'>🔎 請先輸入股票代號或使用左側下拉選股查詢</div>
+                <div style='font-size:1.02rem; line-height:1.8; opacity:0.82;'>
+                    可在左側「輸入台股代號」欄位輸入，例如 <b>2330</b>、<b>3037</b>、<b>2454</b>，輸入後請按 <b style='color:#ff8c00;'>Enter</b> 確認送出；也可以從「快速選股名單」下拉選擇股票。
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
     if curr_id:
         # 🚀 絕對防呆宣告：避免因任何例外導致變數未定義而觸發 NameError
         ctx_pe, ctx_fpe, ctx_pb, ctx_peg = "N/A", "N/A", "N/A", "N/A"
@@ -513,7 +527,8 @@ def render_main_page(sidebar_state=None):
             ai_forward_eps_fy_basis = ai_fin.get('forward_eps_fy_basis') if has_ai_fin_fetch else None
             ai_t_eps = ai_ttm_eps
             ai_f_eps_calc = pick_first_number(ai_forward_eps_fy1, ai_forward_eps_consensus, ai_forward_eps_ai) if has_ai_fin_fetch else None
-            ai_yoy = s_float(ai_fin.get('yoy')) if has_ai_fin_fetch else None
+            # 17-C-10-hotfix：AI 月營收 YoY 優先讀取精準欄位；legacy yoy 僅相容舊版。
+            ai_yoy = pick_first_number(ai_fin.get('monthly_revenue_yoy'), ai_fin.get('monthly_yoy'), ai_fin.get('revenue_yoy'), ai_fin.get('yoy')) if has_ai_fin_fetch else None
             ai_gm = s_float(ai_fin.get('gross_margin')) if has_ai_fin_fetch else None
             ai_om = s_float(ai_fin.get('operating_margin')) if has_ai_fin_fetch else None
             ai_roe = s_float(ai_fin.get('roe')) if has_ai_fin_fetch else None
@@ -550,7 +565,7 @@ def render_main_page(sidebar_state=None):
                 ai_fin.get('target_analyst_count') if has_ai_fin_fetch else None,
                 sys_analyst_count,
             )
-            ai_mom = normalize_financial_ratio(ai_fin.get('mom')) if has_ai_fin_fetch else None
+            ai_mom = normalize_growth_ratio(pick_first_number(ai_fin.get('monthly_revenue_mom'), ai_fin.get('monthly_mom'), ai_fin.get('revenue_mom'), ai_fin.get('mom'))) if has_ai_fin_fetch else None
             if ai_mom is not None: 
                 latest_mom_val = ai_mom * 100
 
@@ -961,7 +976,7 @@ def render_main_page(sidebar_state=None):
                 {"field": "Forward EPS－FY1", "system_source": "不使用系統", "system_value": None, "ai_source": _safe_ai_src("forward_eps_fy1"), "ai_source_url": _safe_ai_url("forward_eps_fy1"), "ai_value": _fy1_eps_safe, "adopted_value": _fy1_eps_safe, "adopted_source": "AI/法人FY1" if _fy1_eps_safe is not None else "無可用資料", "period": _fy_year_display_safe(_fy1_year_safe), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY1 一年預估估值用"},
                 {"field": "Forward EPS－FY2", "system_source": "不使用系統", "system_value": None, "ai_source": _safe_ai_src("forward_eps_fy2"), "ai_source_url": _safe_ai_url("forward_eps_fy2"), "ai_value": _fy2_eps_safe, "adopted_value": _fy2_eps_safe, "adopted_source": "AI/法人FY2" if _fy2_eps_safe is not None else "無可用資料", "period": _fy_year_display_safe(_fy2_year_safe), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY2 第二年預估估值用，不直接當買點"},
                 {"field": "Forward EPS－FY3", "system_source": "不使用系統", "system_value": None, "ai_source": _safe_ai_src("forward_eps_fy3"), "ai_source_url": _safe_ai_url("forward_eps_fy3"), "ai_value": _fy3_eps_safe, "adopted_value": _fy3_eps_safe, "adopted_source": "AI/法人FY3" if _fy3_eps_safe is not None else "無可用資料", "period": _fy_year_display_safe(_fy3_year_safe), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY3 第三年預估/高風險情境，不作買點"},
-                {"field": "營收 YoY", "system_source": "FinMind 月營收優先；yfinance 備援", "system_value": rev_growth, "ai_source": _ai_src("yoy"), "ai_source_url": _ai_url("yoy"), "ai_value": ai_yoy, "adopted_value": eff_rg, "adopted_source": _adopt_src(rev_growth, ai_yoy, "FinMind/yfinance", "AI補齊"), "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale, "notes": latest_rev_notice or ("月營收可能不是最新公告月份" if rev_is_stale else "")},
+                {"field": "營收 YoY", "system_source": "FinMind 月營收優先；yfinance 備援", "system_value": rev_growth, "ai_source": _ai_src("monthly_revenue_yoy") if isinstance(temp_ai_fin, dict) and temp_ai_fin.get("monthly_revenue_yoy") is not None else _ai_src("yoy"), "ai_source_url": _ai_url("monthly_revenue_yoy") if isinstance(temp_ai_fin, dict) and temp_ai_fin.get("monthly_revenue_yoy") is not None else _ai_url("yoy"), "ai_value": ai_yoy, "adopted_value": eff_rg, "adopted_source": "系統公告月營收優先 / AI YoY 已降權" if any(("YoY" in str(w) and ("縮放錯位" in str(w) or "極端值" in str(w))) for w in dq_warnings) else _adopt_src(rev_growth, ai_yoy, "FinMind/yfinance", "AI補齊"), "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale, "notes": (latest_rev_notice + "；" if latest_rev_notice else "") + ("AI YoY 與系統公告月營收差距過大或系統 YoY 屬極端值，月營收判斷以系統公告資料為主，仍需人工確認公告月份與低基期原因。" if any(("YoY" in str(w) and ("縮放錯位" in str(w) or "極端值" in str(w))) for w in dq_warnings) else ("月營收可能不是最新公告月份" if rev_is_stale else ""))},
                 {"field": "營收 MoM", "system_source": "FinMind 月營收", "system_value": (latest_mom_val / 100.0) if latest_mom_val is not None else None, "ai_source": _ai_src("mom"), "ai_source_url": _ai_url("mom"), "ai_value": ai_mom, "adopted_value": (latest_mom_val / 100.0) if latest_mom_val is not None else ai_mom, "adopted_source": "FinMind 月營收/AI覆蓋", "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale},
                 {"field": "毛利率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": gross_margin, "ai_source": _ai_src("gross_margin"), "ai_source_url": _ai_url("gross_margin"), "ai_value": ai_gm, "adopted_value": eff_gm, "adopted_source": _adopt_src(gross_margin, ai_gm), "period": ai_period_text if gross_margin is None and ai_gm is not None else "系統最新可得", "fmt": "pct", "notes": dq_note_text if "毛利率" in dq_note_text else ""},
                 {"field": "營益率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": op_margin, "ai_source": _ai_src("operating_margin"), "ai_source_url": _ai_url("operating_margin"), "ai_value": ai_om, "adopted_value": eff_om, "adopted_source": _adopt_src(op_margin, ai_om), "period": ai_period_text if op_margin is None and ai_om is not None else "系統最新可得", "fmt": "pct", "notes": dq_note_text if "營益率" in dq_note_text else ""},

@@ -686,10 +686,55 @@ def normalize_financial_ratio(val, default=None):
     v = s_float(val, default)
     if v is None:
         return default
-    # Yahoo / AI / 不同 API 有時會把百分比以 31.5 而非 0.315 回傳
+    # Yahoo / AI / 不同 API 有時會把百分比以 31.5 而非 0.315 回傳。
+    # 注意：此函式只適合毛利率、營益率、ROE 等一般比例，不適合 YoY 極端成長率。
     if abs(v) > 1.5 and abs(v) <= 100:
         return v / 100.0
     return v
+
+
+def normalize_growth_ratio(val, default=None):
+    """將營收/獲利成長率統一成小數格式，並保留 100% 以上極端成長。
+
+    設計理由：
+    - 一般百分比：52% 可由來源回傳 52，也可能回傳 0.52。
+    - 極端 YoY：520% 正確小數是 5.20，730.14% 正確小數是 7.3014。
+    - 舊版 normalize_financial_ratio 會把 7.3014 再除以 100 變 0.073014，
+      導致南亞科這類低基期反轉股被誤顯示成 7.30%。
+
+    規則：
+    - |v| <= 10：視為已是小數倍率，保留，例如 5.20 = 520%。
+    - 10 < |v| <= 1000：視為百分比數字，除以 100，例如 520 -> 5.20。
+    """
+    v = s_float(val, default)
+    if v is None:
+        return default
+    av = abs(v)
+    if av > 10 and av <= 1000:
+        return v / 100.0
+    return v
+
+
+def detect_yoy_scale_mismatch(system_yoy, ai_yoy):
+    """偵測 AI 是否把 500%/700% 等極端 YoY 二次縮放成 5%/7%。
+
+    system_yoy / ai_yoy 均為小數格式，例如：
+    - 717.33% = 7.1733
+    - 7.30% = 0.073
+    """
+    sys_v = s_float(system_yoy)
+    ai_v = s_float(ai_yoy)
+    if sys_v is None or ai_v is None:
+        return False
+    sys_abs, ai_abs = abs(sys_v), abs(ai_v)
+    if sys_abs < 1.0 or ai_abs <= 0:
+        return False
+    # 系統為 100% 以上極端成長，AI 卻小於 20%，高度疑似二次縮放。
+    if ai_abs <= 0.20 and abs(sys_abs - ai_abs) >= 0.50:
+        return True
+    # AI 值大約是系統值的 1/100，例如 7.17 被錯成 0.0717。
+    ratio = sys_abs / ai_abs
+    return 80 <= ratio <= 120
 
 
 def normalize_debt_to_equity(val, default=None):
@@ -833,9 +878,13 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
         ai_norm["rev_growth"] = ai_norm.get("revenue_yoy")
 
     # 統一百分比欄位尺度；D/E 需獨立正規化，避免 2.69 倍被誤判成 2.69%。
-    for key in ["gross_margin", "operating_margin", "rev_growth", "revenue_yoy", "revenue_mom", "earnings_cagr", "eps_growth_yoy"]:
+    # 毛利率/營益率/ROE 屬一般比例；YoY/MoM/CAGR 可能超過 100%，需保留 5.20=520% 這種正確口徑。
+    for key in ["gross_margin", "operating_margin"]:
         corrected[key] = normalize_financial_ratio(corrected.get(key))
         ai_norm[key] = normalize_financial_ratio(ai_norm.get(key))
+    for key in ["rev_growth", "revenue_yoy", "revenue_mom", "earnings_cagr", "eps_growth_yoy"]:
+        corrected[key] = normalize_growth_ratio(corrected.get(key))
+        ai_norm[key] = normalize_growth_ratio(ai_norm.get(key))
     corrected["debt_to_equity"] = normalize_debt_to_equity(corrected.get("debt_to_equity"))
     ai_norm["debt_to_equity"] = normalize_debt_to_equity(ai_norm.get("debt_to_equity"))
 
@@ -896,6 +945,27 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
             f"{label} 的 AI 營收 YoY={to_val_str(ai_yoy, 'pct')} 超出合理範圍，已設為 NULL。"
         )
         ai_norm["rev_growth"] = None
+        ai_norm["revenue_yoy"] = None
+
+    # 17-C-10-hotfix：YoY 極端成長率百分比縮放錯位防呆。
+    # 例：系統月營收 717.33%，AI 若回 7.30%，代表 AI 很可能把 730% 二次縮放成 7.30%。
+    sys_yoy_for_mismatch = corrected.get("rev_growth")
+    ai_yoy_for_mismatch = ai_norm.get("rev_growth")
+    if detect_yoy_scale_mismatch(sys_yoy_for_mismatch, ai_yoy_for_mismatch):
+        warnings.append(
+            f"{label} 的 AI 營收 YoY={to_val_str(ai_yoy_for_mismatch, 'pct')} 與系統月營收 YoY={to_val_str(sys_yoy_for_mismatch, 'pct')} 差距過大，疑似百分比縮放錯位；已排除 AI YoY，月營收判斷採用系統公告月營收，AI YoY 不得作為買進依據。"
+        )
+        ai_norm["rev_growth"] = None
+        ai_norm["revenue_yoy"] = None
+        ai_norm["yoy_scale_mismatch"] = True
+
+    # 系統值也可能極端；不是判錯，但需提醒人工確認公告月份與低基期。
+    sys_yoy_extreme = corrected.get("rev_growth")
+    if sys_yoy_extreme is not None and abs(sys_yoy_extreme) >= 3.0:
+        warnings.append(
+            f"{label} 的系統月營收 YoY={to_val_str(sys_yoy_extreme, 'pct')} 屬 300% 以上極端值；月營收判斷仍以系統公告資料為主，但建議人工確認公告月份、低基期原因與同月份新聞。"
+        )
+        corrected["extreme_yoy_needs_review"] = True
 
     # D/E：系統值與 AI 值雙層防呆。D/E > 800% 直接視為高風險異常值，不進估值模型。
     def debt_to_equity_is_valid(v):
