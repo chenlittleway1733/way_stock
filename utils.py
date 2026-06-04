@@ -205,7 +205,9 @@ def build_ai_source_trace_report(ai_fin):
     rows = []
     legacy_percent_keys = set(LEGACY_PERCENT_SOURCE_KEY_MAP.keys())
     for key, meta in trace.items():
-        if key in legacy_percent_keys and LEGACY_PERCENT_SOURCE_KEY_MAP.get(key) in trace:
+        # 2.2 data-safety：正式來源追蹤不顯示 legacy 百分比欄位；
+        # 若 canonical *_percent 在 trace 或 top-level 中存在，legacy 只留 debug，不進主來源表。
+        if key in legacy_percent_keys and (LEGACY_PERCENT_SOURCE_KEY_MAP.get(key) in trace or ai_fin.get(LEGACY_PERCENT_SOURCE_KEY_MAP.get(key)) not in (None, "", "null", "None")):
             continue
         if isinstance(meta, str):
             meta = {"source": meta}
@@ -578,11 +580,14 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
     warnings = []
     label = f"{stock_name} ({stock_id})" if stock_name and stock_id else (stock_name or stock_id or "目前標的")
 
-    # v1.24 欄位相容：rev_growth/revenue_yoy、mom/revenue_mom 新舊欄位可互通。
-    if ai_norm.get("revenue_yoy") is None and ai_norm.get("rev_growth") is not None:
-        ai_norm["revenue_yoy"] = ai_norm.get("rev_growth")
-    if ai_norm.get("rev_growth") is None and ai_norm.get("revenue_yoy") is not None:
-        ai_norm["rev_growth"] = ai_norm.get("revenue_yoy")
+    # 2.2 data-safety：AI 營收成長正式值只可由 *_percent 轉出的 monthly_revenue_yoy / monthly_revenue_mom 進入校驗。
+    # 不再用 revenue_yoy / rev_growth / yoy / mom 等 AI legacy 欄位互通補值。
+    if ai_norm.get("rev_growth") is None and ai_norm.get("monthly_revenue_yoy") is not None:
+        ai_norm["rev_growth"] = ai_norm.get("monthly_revenue_yoy")
+    if ai_norm.get("revenue_yoy") is None and ai_norm.get("monthly_revenue_yoy") is not None:
+        ai_norm["revenue_yoy"] = ai_norm.get("monthly_revenue_yoy")
+    if ai_norm.get("revenue_mom") is None and ai_norm.get("monthly_revenue_mom") is not None:
+        ai_norm["revenue_mom"] = ai_norm.get("monthly_revenue_mom")
 
     # 統一百分比欄位尺度；D/E 需獨立正規化，避免 2.69 倍被誤判成 2.69%。
     # 2.2：AI 若已由 *_percent 轉成內部 ratio，不可二次 normalize。
@@ -783,32 +788,46 @@ def canonicalize_percent_fields(data):
                         out[pct_key] = mv
                         warnings.append(f"2.2採用層：已由來源追蹤回填 {pct_key}={mv}。")
 
-    # 先封存 legacy 營收欄位的「原始值」，但不要動到稍後由 *_percent 產生的正式欄位。
-    raw_legacy = dict(out.get("_raw_legacy_percent_fields") or {})
-    revenue_legacy_keys = ["yoy", "revenue_yoy", "rev_growth", "monthly_revenue_yoy", "mom", "revenue_mom", "monthly_revenue_mom"]
-    for legacy_key in revenue_legacy_keys:
-        if legacy_key in out and out.get(legacy_key) not in (None, "", "null", "None"):
-            raw_legacy[legacy_key] = out.get(legacy_key)
-            out[legacy_key] = None
-            warnings.append(f"2.2提醒：AI 回傳 legacy 營收百分比欄位 {legacy_key}，已封存，不進正式值；請改用 *_percent。")
-
-    # *_percent -> 內部 ratio；這一步必須在封存 legacy 後執行，避免轉出的 monthly_revenue_yoy 又被封存。
+    # 2.2 data-safety：先計算 *_percent 對應的正式 ratio，作為後續判斷基準。
+    canonical_ratios = {}
     for pct_key, ratio_key in mapping.items():
         if pct_key in out and out.get(pct_key) not in (None, "", "null", "None"):
-            ratio_val = percent_number_to_ratio(out.get(pct_key))
-            out[ratio_key] = ratio_val
+            canonical_ratios[ratio_key] = percent_number_to_ratio(out.get(pct_key))
+
+    # 封存 AI 原始 legacy 營收欄位；若該值只是由 *_percent 轉出的內部同步值，則靜默清理，不列警告。
+    raw_legacy = dict(out.get("_raw_legacy_percent_fields") or {})
+    revenue_legacy_keys = ["yoy", "revenue_yoy", "rev_growth", "monthly_revenue_yoy", "mom", "revenue_mom", "monthly_revenue_mom"]
+    legacy_to_ratio = {
+        "yoy": "monthly_revenue_yoy", "revenue_yoy": "monthly_revenue_yoy", "rev_growth": "monthly_revenue_yoy", "monthly_revenue_yoy": "monthly_revenue_yoy",
+        "mom": "monthly_revenue_mom", "revenue_mom": "monthly_revenue_mom", "monthly_revenue_mom": "monthly_revenue_mom",
+    }
+    archived_keys = []
+    for legacy_key in revenue_legacy_keys:
+        if legacy_key in out and out.get(legacy_key) not in (None, "", "null", "None"):
+            legacy_val = out.get(legacy_key)
+            legacy_num = s_float(legacy_val)
+            canon_val = canonical_ratios.get(legacy_to_ratio.get(legacy_key))
+            # 若與正式 *_percent 轉出的 ratio 相同，視為內部同步殘值，直接清掉，不當成 AI 原始資料。
+            if canon_val is not None and legacy_num is not None and abs(legacy_num - canon_val) <= 1e-9:
+                out[legacy_key] = None
+                continue
+            raw_legacy[legacy_key] = legacy_val
+            out[legacy_key] = None
+            archived_keys.append(legacy_key)
+    if archived_keys:
+        warnings.append("2.2資料安全：AI 回傳 legacy 營收百分比欄位（" + " / ".join(archived_keys) + "）已封存，不進正式值；正式採用 *_percent 欄位。")
+
+    # *_percent -> 內部 ratio。這些 ratio 只供程式內部計算，不應作為 AI 原始欄位輸出到提示詞。
+    for ratio_key, ratio_val in canonical_ratios.items():
+        out[ratio_key] = ratio_val
+    if canonical_ratios:
+        out["_canonical_percent_ratios"] = dict(canonical_ratios)
 
     if raw_legacy:
         out["_raw_legacy_percent_fields"] = raw_legacy
 
-    # 舊 UI / Dynamic Cap 欄位同步：只由正式 *_percent 轉出的 ratio 同步回 legacy 顯示欄位。
-    if out.get("monthly_revenue_yoy") is not None:
-        out["revenue_yoy"] = out.get("monthly_revenue_yoy")
-        out["rev_growth"] = out.get("monthly_revenue_yoy")
-        out["yoy"] = out.get("monthly_revenue_yoy")
-    if out.get("monthly_revenue_mom") is not None:
-        out["revenue_mom"] = out.get("monthly_revenue_mom")
-        out["mom"] = out.get("monthly_revenue_mom")
+    # 2.2 data-safety：不再把正式值同步回 yoy / revenue_yoy / rev_growth / mom 等 legacy 欄位。
+    # 舊欄位最多只存在於 _raw_legacy_percent_fields 作 debug，不可成為正式採用值。
     if out.get("cagr") is not None and out.get("earnings_cagr") is None:
         out["earnings_cagr"] = out.get("cagr")
     if out.get("earnings_growth_yoy") is not None and out.get("eps_growth_yoy") is None:

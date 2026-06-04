@@ -5,7 +5,7 @@ import re
 """
 from ui_common import *
 # 2.2-hotfix：ui_main 直接呼叫 canonicalize_percent_fields；避免經由 ui_common 星號匯入時漏載造成 NameError。
-from utils import canonicalize_percent_fields
+from utils import canonicalize_percent_fields, percent_number_to_ratio
 
 def render_main_page(sidebar_state=None):
     """渲染主畫面。"""
@@ -528,12 +528,19 @@ def render_main_page(sidebar_state=None):
             ai_forward_eps_fy_basis = ai_fin.get('forward_eps_fy_basis') if has_ai_fin_fetch else None
             ai_t_eps = ai_ttm_eps
             ai_f_eps_calc = pick_first_number(ai_forward_eps_fy1, ai_forward_eps_consensus, ai_forward_eps_ai) if has_ai_fin_fetch else None
-            ai_yoy = pick_first_number(ai_fin.get('monthly_revenue_yoy'), ai_fin.get('revenue_yoy'), ai_fin.get('rev_growth'), ai_fin.get('yoy')) if has_ai_fin_fetch else None
-            ai_gm = pick_first_number(ai_fin.get('gross_margin')) if has_ai_fin_fetch else None
-            ai_om = pick_first_number(ai_fin.get('operating_margin')) if has_ai_fin_fetch else None
-            ai_roe = pick_first_number(ai_fin.get('roe')) if has_ai_fin_fetch else None
+            # 2.2 data-safety：AI 百分比正式資料只讀 *_percent 欄位。
+            # 不再退回 yoy / revenue_yoy / rev_growth / gross_margin / roe 等 legacy 欄位，避免錯誤資料進入決策。
+            def _ai_percent_ratio(pct_key):
+                if not has_ai_fin_fetch or not isinstance(ai_fin, dict):
+                    return None
+                return percent_number_to_ratio(ai_fin.get(pct_key)) if ai_fin.get(pct_key) not in (None, "", "null", "None") else None
+
+            ai_yoy = _ai_percent_ratio('monthly_revenue_yoy_percent')
+            ai_gm = _ai_percent_ratio('gross_margin_percent')
+            ai_om = _ai_percent_ratio('operating_margin_percent')
+            ai_roe = _ai_percent_ratio('roe_percent')
             ai_de = s_float(ai_fin.get('debt_to_equity')) if has_ai_fin_fetch else None
-            ai_dy = pick_first_number(ai_fin.get('dividend_yield')) if has_ai_fin_fetch else None
+            ai_dy = _ai_percent_ratio('dividend_yield_percent')
             
             # 接取剛增加的三項防禦/主力籌碼指標
             ai_fcf = s_float(ai_fin.get('free_cash_flow')) if has_ai_fin_fetch else None
@@ -565,8 +572,8 @@ def render_main_page(sidebar_state=None):
                 ai_fin.get('target_analyst_count') if has_ai_fin_fetch else None,
                 sys_analyst_count,
             )
-            ai_mom = pick_first_number(ai_fin.get('monthly_revenue_mom'), ai_fin.get('revenue_mom'), ai_fin.get('mom')) if has_ai_fin_fetch else None
-            if ai_mom is not None: 
+            ai_mom = _ai_percent_ratio('monthly_revenue_mom_percent')
+            if ai_mom is not None:
                 latest_mom_val = ai_mom * 100
 
             # ==========================================
@@ -581,11 +588,11 @@ def render_main_page(sidebar_state=None):
             # 2.2-hotfix：資料品質閘門必須保留 AI 原始 *_percent 欄位。
             # 若只把已轉成 ratio 的 rev_growth/gross_margin 傳進 validate_and_correct_financial_metrics()，
             # canonicalize_percent_fields() 會把它視為 legacy 欄位而封存，導致 UI 顯示「AI 找不到數據」。
+            # 2.2 data-safety：資料品質閘門只接收 AI 原始正式欄位與非百分比欄位。
+            # 不再人工塞入 gross_margin / operating_margin / rev_growth 等 legacy 欄位；
+            # 若 *_percent 缺值，AI 值即為 NULL，不退回 legacy。
             ai_vals_for_check = dict(ai_fin) if isinstance(ai_fin, dict) else {}
             ai_vals_for_check.update({
-                "gross_margin": ai_gm,
-                "operating_margin": ai_om,
-                "rev_growth": ai_yoy,
                 "debt_to_equity": ai_de,
             })
             corrected_sys, corrected_ai, dq_warnings = validate_and_correct_financial_metrics(
@@ -601,9 +608,9 @@ def render_main_page(sidebar_state=None):
             op_margin = corrected_sys.get("operating_margin")
             rev_growth = corrected_sys.get("rev_growth")
             sys_de = corrected_sys.get("debt_to_equity")
-            ai_gm = corrected_ai.get("gross_margin")
-            ai_om = corrected_ai.get("operating_margin")
-            ai_yoy = corrected_ai.get("rev_growth")
+            ai_gm = _ai_percent_ratio('gross_margin_percent')
+            ai_om = _ai_percent_ratio('operating_margin_percent')
+            ai_yoy = _ai_percent_ratio('monthly_revenue_yoy_percent')
             ai_de = corrected_ai.get("debt_to_equity")
 
             # 明確宣告「顯示層專用」變數，避免日後維護時誤拿校驗前欄位組 Markdown。
@@ -970,7 +977,7 @@ def render_main_page(sidebar_state=None):
                 {"field": "現價", "system_source": "Yahoo/yfinance 即時或延遲行情", "system_value": curr_p, "ai_source": "不使用AI", "ai_value": None, "adopted_value": curr_p, "adopted_source": "系統行情", "period": "即時/延遲", "fmt": "price"},
                 {"field": "P/E", "system_source": "yfinance；異常時 FinMind PER 備援", "system_value": pe_ratio, "ai_source": _ai_src("pe"), "ai_source_url": _ai_url("pe"), "ai_value": ai_pe, "adopted_value": eff_pe, "adopted_source": _adopt_src(pe_ratio, ai_pe), "period": ai_period_text if pe_ratio is None and ai_pe is not None else "系統最新可得", "fmt": "x"},
                 {"field": "Forward P/E", "system_source": "yfinance forwardPE 或 EPS 反推", "system_value": sys_forward_pe, "ai_source": _ai_src("forward_eps"), "ai_source_url": _ai_url("forward_eps"), "ai_value": ai_fpe, "adopted_value": eff_forward_pe, "adopted_source": _adopt_src(sys_forward_pe, ai_fpe), "period": ai_period_text if sys_forward_pe is None and ai_fpe is not None else "系統/反推", "fmt": "x"},
-                {"field": "PEG", "system_source": "Forward P/E ÷ 預估成長率", "system_value": orig_peg, "ai_source": _ai_src("yoy"), "ai_source_url": _ai_url("yoy"), "ai_value": ai_peg, "adopted_value": None if eff_peg == -999 else eff_peg, "adopted_source": "系統優先/AI備援", "period": "推估值", "fmt": "x", "notes": "成長率為負時 PEG 無意義" if eff_peg == -999 else ""},
+                {"field": "PEG", "system_source": "Forward P/E ÷ 預估成長率", "system_value": orig_peg, "ai_source": _ai_src("monthly_revenue_yoy_percent"), "ai_source_url": _ai_url("monthly_revenue_yoy_percent"), "ai_value": ai_peg, "adopted_value": None if eff_peg == -999 else eff_peg, "adopted_source": "系統優先/AI備援", "period": "推估值", "fmt": "x", "notes": "成長率為負時 PEG 無意義" if eff_peg == -999 else ""},
                 {"field": "P/B", "system_source": "yfinance；異常時 FinMind PBR 備援", "system_value": pb_ratio, "ai_source": _ai_src("pb"), "ai_source_url": _ai_url("pb"), "ai_value": ai_pb, "adopted_value": eff_pb, "adopted_source": _adopt_src(pb_ratio, ai_pb), "period": ai_period_text if pb_ratio is None and ai_pb is not None else "系統最新可得", "fmt": "x"},
                 {"field": "最新單季 EPS", "system_source": "系統未穩定提供，避免用 TTM 冒充", "system_value": sys_latest_quarter_eps, "ai_source": _ai_src("latest_quarter_eps"), "ai_source_url": _ai_url("latest_quarter_eps"), "ai_value": ai_latest_quarter_eps, "adopted_value": ai_latest_quarter_eps, "adopted_source": "AI補齊" if ai_latest_quarter_eps is not None else "無可用資料", "period": ai_period_text, "fmt": "num", "notes": "判斷最新獲利動能"},
                 {"field": "TTM EPS", "system_source": "yfinance trailingEps；必要時用 現價÷P/E 反推", "system_value": sys_ttm_eps, "ai_source": _ai_src("ttm_eps"), "ai_source_url": _ai_url("ttm_eps"), "ai_value": ai_ttm_eps, "adopted_value": eff_t_eps, "adopted_source": _adopt_src(sys_ttm_eps, ai_ttm_eps), "period": ai_period_text if sys_ttm_eps is None and ai_ttm_eps is not None else "系統/反推", "fmt": "num", "notes": "用於歷史 P/E"},
@@ -980,11 +987,11 @@ def render_main_page(sidebar_state=None):
                 {"field": "Forward EPS－FY1", "system_source": "不使用系統", "system_value": None, "ai_source": _safe_ai_src("forward_eps_fy1"), "ai_source_url": _safe_ai_url("forward_eps_fy1"), "ai_value": _fy1_eps_safe, "adopted_value": _fy1_eps_safe, "adopted_source": "AI/法人FY1" if _fy1_eps_safe is not None else "無可用資料", "period": _fy_year_display_safe(_fy1_year_safe), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY1 一年預估估值用"},
                 {"field": "Forward EPS－FY2", "system_source": "不使用系統", "system_value": None, "ai_source": _safe_ai_src("forward_eps_fy2"), "ai_source_url": _safe_ai_url("forward_eps_fy2"), "ai_value": _fy2_eps_safe, "adopted_value": _fy2_eps_safe, "adopted_source": "AI/法人FY2" if _fy2_eps_safe is not None else "無可用資料", "period": _fy_year_display_safe(_fy2_year_safe), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY2 第二年預估估值用，不直接當買點"},
                 {"field": "Forward EPS－FY3", "system_source": "不使用系統", "system_value": None, "ai_source": _safe_ai_src("forward_eps_fy3"), "ai_source_url": _safe_ai_url("forward_eps_fy3"), "ai_value": _fy3_eps_safe, "adopted_value": _fy3_eps_safe, "adopted_source": "AI/法人FY3" if _fy3_eps_safe is not None else "無可用資料", "period": _fy_year_display_safe(_fy3_year_safe), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY3 第三年預估/高風險情境，不作買點"},
-                {"field": "營收 YoY", "system_source": "FinMind 月營收優先；yfinance 備援", "system_value": rev_growth, "ai_source": _ai_src("yoy"), "ai_source_url": _ai_url("yoy"), "ai_value": ai_yoy, "adopted_value": eff_rg, "adopted_source": _adopt_src(rev_growth, ai_yoy, "FinMind/yfinance", "AI補齊"), "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale, "notes": latest_rev_notice or ("月營收可能不是最新公告月份" if rev_is_stale else "")},
-                {"field": "營收 MoM", "system_source": "FinMind 月營收", "system_value": (latest_mom_val / 100.0) if latest_mom_val is not None else None, "ai_source": _ai_src("mom"), "ai_source_url": _ai_url("mom"), "ai_value": ai_mom, "adopted_value": (latest_mom_val / 100.0) if latest_mom_val is not None else ai_mom, "adopted_source": "FinMind 月營收/AI覆蓋", "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale},
-                {"field": "毛利率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": gross_margin, "ai_source": _ai_src("gross_margin"), "ai_source_url": _ai_url("gross_margin"), "ai_value": ai_gm, "adopted_value": eff_gm, "adopted_source": _adopt_src(gross_margin, ai_gm), "period": ai_period_text if gross_margin is None and ai_gm is not None else "系統最新可得", "fmt": "pct", "notes": dq_note_text if "毛利率" in dq_note_text else ""},
-                {"field": "營益率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": op_margin, "ai_source": _ai_src("operating_margin"), "ai_source_url": _ai_url("operating_margin"), "ai_value": ai_om, "adopted_value": eff_om, "adopted_source": _adopt_src(op_margin, ai_om), "period": ai_period_text if op_margin is None and ai_om is not None else "系統最新可得", "fmt": "pct", "notes": dq_note_text if "營益率" in dq_note_text else ""},
-                {"field": "ROE", "system_source": "yfinance；或用 P/B÷P/E 校正", "system_value": roe, "ai_source": _ai_src("roe"), "ai_source_url": _ai_url("roe"), "ai_value": ai_roe, "adopted_value": eff_roe, "adopted_source": _adopt_src(roe, ai_roe, "系統/恆等式校正", "AI補齊"), "period": ai_period_text if roe is None and ai_roe is not None else "系統/校正", "fmt": "pct"},
+                {"field": "營收 YoY", "system_source": "FinMind 月營收優先；yfinance 備援", "system_value": rev_growth, "ai_source": _ai_src("monthly_revenue_yoy_percent"), "ai_source_url": _ai_url("monthly_revenue_yoy_percent"), "ai_value": ai_yoy, "adopted_value": eff_rg, "adopted_source": _adopt_src(rev_growth, ai_yoy, "FinMind/yfinance", "AI補齊"), "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale, "notes": latest_rev_notice or ("月營收可能不是最新公告月份" if rev_is_stale else "")},
+                {"field": "營收 MoM", "system_source": "FinMind 月營收", "system_value": (latest_mom_val / 100.0) if latest_mom_val is not None else None, "ai_source": _ai_src("monthly_revenue_mom_percent"), "ai_source_url": _ai_url("monthly_revenue_mom_percent"), "ai_value": ai_mom, "adopted_value": (latest_mom_val / 100.0) if latest_mom_val is not None else ai_mom, "adopted_source": "FinMind 月營收/AI覆蓋", "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale},
+                {"field": "毛利率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": gross_margin, "ai_source": _ai_src("gross_margin_percent"), "ai_source_url": _ai_url("gross_margin_percent"), "ai_value": ai_gm, "adopted_value": eff_gm, "adopted_source": _adopt_src(gross_margin, ai_gm), "period": ai_period_text if gross_margin is None and ai_gm is not None else "系統最新可得", "fmt": "pct", "notes": dq_note_text if "毛利率" in dq_note_text else ""},
+                {"field": "營益率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": op_margin, "ai_source": _ai_src("operating_margin_percent"), "ai_source_url": _ai_url("operating_margin_percent"), "ai_value": ai_om, "adopted_value": eff_om, "adopted_source": _adopt_src(op_margin, ai_om), "period": ai_period_text if op_margin is None and ai_om is not None else "系統最新可得", "fmt": "pct", "notes": dq_note_text if "營益率" in dq_note_text else ""},
+                {"field": "ROE", "system_source": "yfinance；或用 P/B÷P/E 校正", "system_value": roe, "ai_source": _ai_src("roe_percent"), "ai_source_url": _ai_url("roe_percent"), "ai_value": ai_roe, "adopted_value": eff_roe, "adopted_source": _adopt_src(roe, ai_roe, "系統/恆等式校正", "AI補齊"), "period": ai_period_text if roe is None and ai_roe is not None else "系統/校正", "fmt": "pct"},
                 {"field": "D/E", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": sys_de, "ai_source": _ai_src("debt_to_equity"), "ai_source_url": _ai_url("debt_to_equity"), "ai_value": ai_de, "adopted_value": eff_de, "adopted_source": _adopt_src(sys_de, ai_de), "period": ai_period_text if sys_de is None and ai_de is not None else "系統最新可得", "fmt": "x", "notes": dq_note_text if "D/E" in dq_note_text or "債" in dq_note_text else ""},
             ]
             dq_report_df = build_financial_quality_report(quality_rows)
