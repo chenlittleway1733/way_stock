@@ -1078,77 +1078,214 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
         ]
         return any(k in t for k in fatal_keywords)
 
-    # Pro Only：只用付費版高階模型 + Google Search；不降級。
+    # 2.2-B：兩段式 AI 財報回收。
+    # Pass A：Gemini Pro + Google Search 只負責搜尋與保留原文/來源。
+    # Pass B：關閉 Google Search，用 response_schema 從 Pass A 原文抽取結構化 JSON。
     candidate_model = "gemini-3.1-pro-preview"
     retry_delays = [0, 3, 8]
     attempts = []
-    response = None
-    text = None
     used_model = candidate_model
     used_search = True
-    used_response_schema = True
+    used_response_schema = False
     fallback_reason = ""
     last_error = None
 
+    def _parse_json_from_text(raw_text):
+        if not raw_text:
+            return None, "empty"
+        clean = re.sub(r"```json\n?|```", "", str(raw_text)).strip()
+        s_idx = clean.find('{')
+        e_idx = clean.rfind('}')
+        if s_idx == -1 or e_idx == -1 or e_idx <= s_idx:
+            return None, "no-json-object"
+        try:
+            return json.loads(clean[s_idx:e_idx+1]), None
+        except Exception as e:
+            return None, str(e)[:200]
+
+    def _get_grounding_links(resp):
+        links = []
+        try:
+            if resp and resp.candidates and resp.candidates[0].grounding_metadata:
+                for chunk in resp.candidates[0].grounding_metadata.grounding_chunks:
+                    if getattr(chunk, "web", None) and getattr(chunk.web, "uri", None):
+                        links.append(chunk.web.uri)
+        except Exception as e:
+            log_exception("Gemini", "financial_search:grounding_metadata", e)
+        return list(dict.fromkeys(links))
+
+    search_prompt_text = f"""請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、最新公告月份單月營收 YoY / MoM、累計營收 YoY、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。
+請務必保留可查證的原文片段與資料發布日期，尤其是月營收原文，例如「2026年5月合併營收276.70億元，年增730.14%，月增8.55%」。
+本步驟只負責搜尋取材與來源彙整，不要自行縮放百分比，不要把 730.14% 改寫成 7.30%。
+請回傳 JSON，欄位可包含：search_summary、revenue_source_quote、source_urls、published_date、data_period、candidate_values、_sources。不要查詢 ETF 持股。"""
+
+    search_response = None
+    search_text = None
     for idx, delay_sec in enumerate(retry_delays, start=1):
         if delay_sec > 0:
             time.sleep(delay_sec)
-
         try:
-            response = client.models.generate_content(
+            search_response = client.models.generate_content(
                 model=candidate_model,
-                contents=prompt_text,
-                config=_make_config(search_enabled=True, schema_enabled=used_response_schema)
+                contents=search_prompt_text,
+                config=types.GenerateContentConfig(
+                    system_instruction=(
+                        "你是財經資料搜尋助手。請使用 Google Search 取得最新、可查證的台股財報與法人資料。"
+                        "此步驟只做搜尋取材與來源整理；百分比請保留原文百分比數字，不要轉小數。"
+                    ),
+                    response_mime_type="application/json",
+                    tools=[{"google_search": {}}]
+                )
             )
-            text = response.text
+            search_text = search_response.text
             log_data_health("Gemini", True, 200)
             attempts.append({
+                "phase": "A-search",
                 "attempt": idx,
                 "model": candidate_model,
                 "search_enabled": True,
+                "response_schema_enabled": False,
                 "delay_before_retry_sec": delay_sec,
                 "ok": True,
-                "reason": ("Pro Only 同模型聯網重試成功" if idx > 1 else "Pro Only 付費版高階模型聯網成功") + ("；response_schema=on" if used_response_schema else "；response_schema=off/fallback")
+                "reason": "2.2 兩段式 Pass A 搜尋取材成功"
             })
             break
         except Exception as e:
             err_msg = str(e)
             last_error = err_msg
-            if ("response_schema" in err_msg.lower() or "schema" in err_msg.lower()) and ("unsupported" in err_msg.lower() or "invalid" in err_msg.lower() or "400" in err_msg.lower()):
-                used_response_schema = False
-                fallback_reason = "Gemini response_schema 與目前模型/搜尋工具組合不相容，已退回 JSON mime；後端仍執行 2.2 單位防呆。"
-            log_data_health("Gemini", False, f"ERR:{candidate_model}:search:try{idx}")
+            log_data_health("Gemini", False, f"ERR:{candidate_model}:search-pass:try{idx}")
             attempts.append({
+                "phase": "A-search",
                 "attempt": idx,
                 "model": candidate_model,
                 "search_enabled": True,
+                "response_schema_enabled": False,
                 "delay_before_retry_sec": delay_sec,
                 "ok": False,
                 "error": err_msg[:500],
-                "reason": "Pro Only 付費版高階模型聯網失敗；不降級，只重試同模型"
+                "reason": "2.2 兩段式 Pass A 搜尋取材失敗；不降級，只重試同模型"
             })
             if _is_non_retryable_error(err_msg):
                 break
 
-    if response is None or text is None:
+    if search_response is None or not search_text:
         return {
             "error": (
-                "Gemini 3 Pro Preview（付費版）聯網財報校對失敗。"
+                "Gemini 3 Pro Preview（付費版）聯網財報搜尋取材失敗。"
                 f"系統已用同一付費模型重試 {len(attempts)} 次，仍未成功；"
-                "已禁止降級到 2.5 Pro / 2.5 Flash / 離線保底，以避免不準數據進入極限高空價。"
-                "請稍後再試，或檢查 API 權限、配額與模型可用狀態。"
+                "已禁止降級到 2.5 Pro / 2.5 Flash / 離線保底，以避免不準數據進入估值模型。"
             ),
             "last_error": str(last_error)[:500] if last_error else None,
-            "attempts": attempts
+            "attempts": attempts,
         }
 
-    if not text:
-        return {
-            "error": "Gemini 3 Pro Preview（付費版）回傳內容為空；系統不降級，請稍後重試。",
-            "attempts": attempts
-        }
+    search_parsed, search_parse_error = _parse_json_from_text(search_text)
+    if not isinstance(search_parsed, dict):
+        search_parsed = {"search_summary": str(search_text)[:4000], "parse_error": search_parse_error}
+    grounding_links = _get_grounding_links(search_response)
+    if grounding_links and not search_parsed.get("source_urls"):
+        search_parsed["source_urls"] = grounding_links
 
-    marker_match = re.search(r"\[TARGET_PRICE:\s*([^,\]]+)\s*,\s*([^,\]]+)\s*,\s*([^\]]+)\]", text)
+    extract_prompt_text = f"""你現在只做結構化資料抽取，不可上網搜尋，不可引入新資料。
+請只根據下方「搜尋取材 JSON / 原文片段」抽取台股 {stock_name} ({stock_id}) 的財報欄位，並嚴格符合 response_schema。
+
+【百分比欄位硬性規則】
+- 所有百分比欄位必須使用 *_percent，直接填百分比數字。
+- 730.14% 必須填 monthly_revenue_yoy_percent=730.14，不可填 7.3014 或 0.073014。
+- 8.55% 必須填 monthly_revenue_mom_percent=8.55，不可填 0.0855。
+- 67.90% 必須填 gross_margin_percent=67.90。
+- 若只找到累計營收年增率，請填 accumulated_revenue_yoy_percent，不可混入 monthly_revenue_yoy_percent。
+- 若無法確認單月 YoY，monthly_revenue_yoy_percent 請填 null。
+- 不要輸出 yoy、mom、gross_margin、operating_margin、roe、dividend_yield 等 legacy 百分比欄位。
+
+【搜尋取材 JSON / 原文片段】
+{json.dumps(search_parsed, ensure_ascii=False, indent=2)}
+
+請輸出符合 response_schema 的 JSON。"""
+
+    extract_response = None
+    extract_text = None
+    schema_error = None
+    try:
+        extract_response = client.models.generate_content(
+            model=candidate_model,
+            contents=extract_prompt_text,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                response_mime_type="application/json",
+                response_schema=FINANCIAL_RESPONSE_SCHEMA
+            )
+        )
+        extract_text = extract_response.text
+        used_response_schema = True
+        attempts.append({
+            "phase": "B-schema-extract",
+            "attempt": 1,
+            "model": candidate_model,
+            "search_enabled": False,
+            "response_schema_enabled": True,
+            "ok": True,
+            "reason": "2.2 兩段式 Pass B schema 結構化抽取成功"
+        })
+    except Exception as e:
+        schema_error = str(e)
+        used_response_schema = False
+        fallback_reason = "2.2 兩段式 Pass B response_schema 不相容或失敗，已退回無搜尋 JSON mime 抽取；後端仍執行單位防呆。"
+        attempts.append({
+            "phase": "B-schema-extract",
+            "attempt": 1,
+            "model": candidate_model,
+            "search_enabled": False,
+            "response_schema_enabled": True,
+            "ok": False,
+            "error": schema_error[:500],
+            "reason": "response_schema 抽取失敗，改用 JSON mime 抽取"
+        })
+        try:
+            extract_response = client.models.generate_content(
+                model=candidate_model,
+                contents=extract_prompt_text,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json"
+                )
+            )
+            extract_text = extract_response.text
+            attempts.append({
+                "phase": "B-json-extract",
+                "attempt": 1,
+                "model": candidate_model,
+                "search_enabled": False,
+                "response_schema_enabled": False,
+                "ok": True,
+                "reason": "2.2 兩段式 Pass B 無搜尋 JSON mime 抽取成功"
+            })
+        except Exception as e2:
+            attempts.append({
+                "phase": "B-json-extract",
+                "attempt": 1,
+                "model": candidate_model,
+                "search_enabled": False,
+                "response_schema_enabled": False,
+                "ok": False,
+                "error": str(e2)[:500],
+                "reason": "JSON mime 抽取也失敗，改用 Pass A 搜尋 JSON 後端守門"
+            })
+            extract_text = json.dumps(search_parsed, ensure_ascii=False)
+
+    parsed, parse_error = _parse_json_from_text(extract_text)
+    if not isinstance(parsed, dict):
+        parsed = dict(search_parsed)
+        fallback_reason = (fallback_reason + "；" if fallback_reason else "") + f"Pass B JSON 解析失敗({parse_error})，改用 Pass A 搜尋 JSON 後端守門。"
+
+    # 把 Pass A 可查證資訊帶入 Pass B 結果，方便回收層從原文 quote 擷取 730.14% 等百分比。
+    for carry_key in ["revenue_source_quote", "source_urls", "published_date", "data_period"]:
+        if parsed.get(carry_key) in (None, "", [], {}, "null", "None") and search_parsed.get(carry_key) not in (None, "", [], {}, "null", "None"):
+            parsed[carry_key] = search_parsed.get(carry_key)
+    parsed["_search_pass_raw"] = search_parsed
+    parsed["_two_pass_mode"] = True
+
+    marker_match = re.search(r"\[TARGET_PRICE:\s*([^,\]]+)\s*,\s*([^,\]]+)\s*,\s*([^\]]+)\]", str(extract_text or search_text))
     marker_data = {}
     if marker_match:
         marker_data = {
@@ -1157,46 +1294,31 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
             "target_price_low": s_float(marker_match.group(3).replace("無", "")),
         }
 
-    s_idx = text.find('{')
-    e_idx = text.rfind('}')
-    if s_idx != -1 and e_idx != -1:
-        clean_text = text[s_idx:e_idx+1]
-        try:
-            parsed = json.loads(clean_text)
-            if isinstance(parsed, dict):
-                parsed = _strict_ai_percent_json_guard(parsed)
-                parsed.update({k: v for k, v in marker_data.items() if v is not None and parsed.get(k) is None})
-                parsed = _normalize_ai_source_metadata(parsed)
-                parsed = validate_ai_financial_json(parsed, stock_id=stock_id, stock_name=stock_name)
-                parsed = _normalize_ai_source_metadata(parsed)
-                parsed["model_used"] = used_model
-                parsed["ai_search_enabled"] = bool(used_search)
-                parsed["response_schema_enabled"] = bool(used_response_schema)
-                parsed["fallback_reason"] = fallback_reason
-                parsed["attempts"] = attempts
-                parsed["retry_policy"] = "Pro Only：gemini-3.1-pro-preview + Google Search；最多 3 次；不降級。"
-                parsed["query_payload"] = json.dumps({
-                    "stock": f"{stock_name} ({stock_id})",
-                    "target_year": target_year,
-                    "model_used": used_model,
-                    "google_search_enabled": bool(used_search),
-                    "fallback_reason": fallback_reason or "無",
-                    "retry_policy": "Pro Only same-model retry: delays 0s, 3s, 8s; no downgrade.",
-                    "prompt": prompt_text,
-                }, ensure_ascii=False, indent=2)
-            return parsed
-        except json.JSONDecodeError:
-            return {
-                "error": "AI 回傳的格式不正確，無法解析 JSON 資料。系統不降級，請稍後重試。",
-                "raw_text_preview": text[:500],
-                "attempts": attempts
-            }
-    else:
-        return {
-            "error": "AI 回傳的格式不正確，無法萃取 JSON 資料。系統不降級，請稍後重試。",
-            "raw_text_preview": text[:500],
-            "attempts": attempts
-        }
+    parsed = _strict_ai_percent_json_guard(parsed)
+    parsed.update({k: v for k, v in marker_data.items() if v is not None and parsed.get(k) is None})
+    parsed = _normalize_ai_source_metadata(parsed)
+    parsed = validate_ai_financial_json(parsed, stock_id=stock_id, stock_name=stock_name)
+    parsed = _normalize_ai_source_metadata(parsed)
+    parsed["model_used"] = used_model
+    parsed["ai_search_enabled"] = bool(used_search)
+    parsed["response_schema_enabled"] = bool(used_response_schema)
+    parsed["fallback_reason"] = fallback_reason or "無"
+    parsed["attempts"] = attempts
+    parsed["retry_policy"] = "2.2 兩段式：Pass A gemini-3.1-pro-preview + Google Search；Pass B 同模型關閉搜尋 + response_schema；不降級。"
+    parsed["query_payload"] = json.dumps({
+        "stock": f"{stock_name} ({stock_id})",
+        "target_year": target_year,
+        "model_used": used_model,
+        "mode": "2.2 two-pass search_then_schema_extract",
+        "pass_a_google_search_enabled": True,
+        "pass_b_google_search_enabled": False,
+        "response_schema_enabled": bool(used_response_schema),
+        "fallback_reason": fallback_reason or "無",
+        "retry_policy": "Pass A delays 0s, 3s, 8s; Pass B schema then JSON mime fallback; no model downgrade.",
+        "search_prompt": search_prompt_text,
+        "extract_prompt": extract_prompt_text,
+    }, ensure_ascii=False, indent=2)
+    return parsed
 
 @st.cache_data(ttl=86400)
 def get_peers_from_ai(stock_name, stock_id, api_key):
