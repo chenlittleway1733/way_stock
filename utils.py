@@ -242,6 +242,12 @@ def build_divergence_warnings(
     ai_de=None,
     system_pb=None,
     ai_pb=None,
+    system_ttm_eps=None,
+    ai_ttm_eps=None,
+    system_pe=None,
+    ai_pe=None,
+    fy1_eps=None,
+    fy2_eps=None,
     stock_id="",
     stock_name="",
 ):
@@ -277,6 +283,46 @@ def build_divergence_warnings(
             format_quality_value(ai_forward_eps, "num"),
             _fmt_gap_pct(eps_gap),
             "請優先確認 Forward EPS 是單一券商、AI 推估，還是多家法人共識；可操作估值應採較保守 EPS。",
+        )
+
+    # 1b) TTM EPS 分歧：TTM 是歷史 P/E 分母，分歧過大時不得標示為交叉驗證。
+    ttm_gap = _relative_gap(system_ttm_eps, ai_ttm_eps, "min")
+    if ttm_gap is not None and ttm_gap > 0.30:
+        add(
+            "TTM EPS 分歧",
+            f"{label} 的 TTM EPS 系統值與 AI 值差距過大，歷史 P/E 與實際獲利支撐度可信度下降。",
+            "danger" if ttm_gap > 1.00 else "warning",
+            format_quality_value(system_ttm_eps, "num"),
+            format_quality_value(ai_ttm_eps, "num"),
+            _fmt_gap_pct(ttm_gap),
+            "請分開解讀 TTM EPS 與 FY1/FY2 Forward EPS；循環股不可用遠期 EPS 直接覆蓋 TTM 風險。",
+        )
+
+    # 1c) P/E 口徑分歧：通常來自 TTM EPS 分母不同，不能視為系統+AI交叉。
+    pe_gap = _relative_gap(system_pe, ai_pe, "min")
+    if pe_gap is not None and pe_gap > 0.30:
+        add(
+            "P/E 口徑分歧",
+            f"{label} 的歷史 P/E 系統值與 AI 值差距過大，可能來自 TTM EPS 期間或分母不同。",
+            "warning",
+            format_quality_value(system_pe, "x"),
+            format_quality_value(ai_pe, "x"),
+            _fmt_gap_pct(pe_gap),
+            "P/E 分歧未釐清前不可視為交叉驗證；循環股應優先看 P/B 週期模型與報價/毛利率落地。",
+        )
+
+    # 1d) FY2 遠期 EPS 跳升：只可解釋市場先行定價，不可直接作買點。
+    fy1 = s_float(fy1_eps)
+    fy2 = s_float(fy2_eps)
+    if fy1 is not None and fy2 is not None and fy1 > 0 and fy2 / fy1 > 1.50:
+        add(
+            "FY2 EPS 遠期跳升",
+            f"{label} 的 FY2 EPS 較 FY1 EPS 跳升超過 50%，屬高成長遠期預估。",
+            "warning",
+            format_quality_value(fy1, "num"),
+            format_quality_value(fy2, "num"),
+            f"FY2/FY1={fy2/fy1:.2f}x",
+            "FY2 只能用來解釋市場先行定價，不可直接作為買點；需等待營收、毛利率與 EPS 逐季落地。",
         )
 
     # 2) YoY 分歧：系統 YoY 與 AI YoY 差距 > 20 個百分點
@@ -364,7 +410,11 @@ def infer_quality_status(adopted_value, system_value=None, ai_value=None, is_sta
         return "❌ 缺資料"
     if is_stale:
         return "⚠️ 可能過期"
-    high_risk_keywords = ["校驗失敗", "不合理", "已排除", "NULL", "過舊", "錯置", "幻覺"]
+    high_risk_keywords = [
+        "校驗失敗", "不合理", "已排除", "NULL", "過舊", "錯置", "幻覺",
+        "分歧", "差距過大", "可信度下降", "需人工確認", "遠期預估",
+        "不可直接當買點", "不可視為交叉", "極端值", "已降權", "口徑",
+    ]
     if any(k in note_text for k in high_risk_keywords):
         return "⚠️ 已校正/需留意"
     if system_value is not None and ai_value is not None:
@@ -412,6 +462,41 @@ def normalize_financial_ratio(val, default=None):
         return v / 100.0
     return v
 
+
+
+def normalize_growth_ratio(val, default=None):
+    """將營收/獲利成長率統一成小數格式，但避免 520% / 730% 被二次縮小。
+
+    規則：
+    - 0.073 = 7.3%
+    - 5.20 = 520%
+    - 7.3014 = 730.14%
+    - 35 這類通常代表 35%，轉成 0.35
+    """
+    v = s_float(val, default)
+    if v is None:
+        return default
+    av = abs(v)
+    if av <= 10:
+        return v
+    if av <= 1000:
+        return v / 100.0
+    return v
+
+def detect_yoy_scale_mismatch(system_yoy, ai_yoy):
+    """偵測 AI 是否把 520% / 730% 等極端 YoY 錯縮成 5.20% / 7.30%。"""
+    sy = s_float(system_yoy)
+    ay = s_float(ai_yoy)
+    if sy is None or ay is None or ay == 0:
+        return False
+    sys_abs = abs(sy)
+    ai_abs = abs(ay)
+    if sys_abs >= 1.0 and ai_abs <= 0.20 and abs(sys_abs - ai_abs) >= 0.50:
+        return True
+    ratio = sys_abs / ai_abs if ai_abs > 0 else None
+    if sys_abs >= 1.0 and ratio is not None and 80 <= ratio <= 120:
+        return True
+    return False
 
 def normalize_debt_to_equity(val, default=None):
     """將 D/E 統一成「倍數」：0.608=60.8%；2.69=269%；132.1=132.1%。
@@ -610,13 +695,28 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
     except Exception:
         pass
 
-    # AI YoY 也做合理範圍防呆；極端值多半是抓到錯欄或摘要幻覺
-    ai_yoy = ai_norm.get("rev_growth")
+    # AI YoY 也做合理範圍與百分比縮放錯位防呆。
+    ai_yoy = normalize_growth_ratio(ai_norm.get("rev_growth"))
+    ai_norm["rev_growth"] = ai_yoy
+    sys_yoy_for_check = corrected.get("rev_growth")
     if ai_yoy is not None and not (-1.0 <= ai_yoy <= 10.0):
         warnings.append(
             f"{label} 的 AI 營收 YoY={to_val_str(ai_yoy, 'pct')} 超出合理範圍，已設為 NULL。"
         )
         ai_norm["rev_growth"] = None
+        ai_yoy = None
+    elif detect_yoy_scale_mismatch(sys_yoy_for_check, ai_yoy):
+        warnings.append(
+            f"{label} 的 AI 營收 YoY={to_val_str(ai_yoy, 'pct')} 與系統月營收 YoY={to_val_str(sys_yoy_for_check, 'pct')} 差距過大，疑似百分比縮放錯位；已排除 AI YoY，月營收判斷採用系統公告月營收。"
+        )
+        ai_norm["rev_growth"] = None
+        ai_norm["revenue_yoy_scale_mismatch"] = True
+        ai_yoy = None
+
+    if sys_yoy_for_check is not None and abs(sys_yoy_for_check) >= 3.0:
+        warnings.append(
+            f"{label} 的系統月營收 YoY={to_val_str(sys_yoy_for_check, 'pct')} 屬 300% 以上極端值；月營收判斷仍以系統公告資料為主，但建議人工確認公告月份、低基期原因與同月份新聞。"
+        )
 
     # D/E：系統值與 AI 值雙層防呆。D/E > 800% 直接視為高風險異常值，不進估值模型。
     def debt_to_equity_is_valid(v):
@@ -2001,202 +2101,3 @@ def build_forward_eps_tiered_valuation_report(
     }
     return {"summary": summary, "report": report}
 
-
-
-# ==========================================
-# 1.2 技術面摘要模型（第 17-C-10 / Stage 1）
-# ==========================================
-def build_technical_summary(hist_df, timeframe="日線", lookback=120):
-    """依 K 線資料產生給畫面與提示詞共用的技術面摘要。
-    - 不靠 AI 看圖猜，直接由 OHLCV 計算 5/10/20/60MA、KD、量能、支撐壓力與追價風險。
-    - 技術面只輔助進出場節奏，不覆蓋基本面、資料品質、Dynamic Cap 與系統燈號。
-    """
-    try:
-        if hist_df is None or getattr(hist_df, "empty", True):
-            return {"available": False, "summary_text": "NULL", "error": "無 K 線資料，無法產生技術面摘要。"}
-
-        df = hist_df.copy().tail(max(int(lookback), 80))
-        for col in ["Open", "High", "Low", "Close", "Volume"]:
-            if col not in df.columns:
-                df[col] = 0.0
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        if df["Close"].dropna().empty:
-            return {"available": False, "summary_text": "NULL", "error": "Close 欄位無有效資料。"}
-
-        df["MA5"] = df["Close"].rolling(5).mean()
-        df["MA10"] = df["Close"].rolling(10).mean()
-        df["MA20"] = df["Close"].rolling(20).mean()
-        df["MA60"] = df["Close"].rolling(60).mean()
-        df["Vol_MA5"] = df["Volume"].rolling(5).mean()
-        df["Vol_MA20"] = df["Volume"].rolling(20).mean()
-
-        h9 = df["High"].rolling(9).max()
-        l9 = df["Low"].rolling(9).min()
-        denom = (h9 - l9).replace(0, pd.NA)
-        rsv = ((df["Close"] - l9) / denom * 100).fillna(50)
-        k_vals, d_vals = [50.0], [50.0]
-        for v in rsv:
-            try:
-                vv = float(v)
-            except Exception:
-                vv = 50.0
-            k_vals.append(k_vals[-1] * (2/3) + vv * (1/3))
-            d_vals.append(d_vals[-1] * (2/3) + k_vals[-1] * (1/3))
-        df["K"] = k_vals[1:]
-        df["D"] = d_vals[1:]
-
-        last = df.iloc[-1]
-        close = s_float(last.get("Close"))
-        ma5 = s_float(last.get("MA5"))
-        ma10 = s_float(last.get("MA10"))
-        ma20 = s_float(last.get("MA20"))
-        ma60 = s_float(last.get("MA60"))
-        k = s_float(last.get("K"), 50.0)
-        d = s_float(last.get("D"), 50.0)
-        vol = s_float(last.get("Volume"), 0.0)
-        vol5 = s_float(last.get("Vol_MA5"), 0.0)
-        vol20 = s_float(last.get("Vol_MA20"), 0.0)
-
-        if close is None:
-            return {"available": False, "summary_text": "NULL", "error": "最新收盤價無效。"}
-
-        def _fmt(v, digits=2):
-            return "NULL" if v is None else f"{v:.{digits}f}"
-
-        above = []
-        below = []
-        for label, val in [("5MA", ma5), ("10MA", ma10), ("20MA", ma20), ("60MA", ma60)]:
-            if val is None:
-                continue
-            (above if close >= val else below).append(label)
-
-        if all(v is not None for v in [ma5, ma10, ma20, ma60]) and close > ma5 > ma10 > ma20 > ma60:
-            ma_structure = "強多頭排列（收盤價 > 5MA > 10MA > 20MA > 60MA）"
-        elif all(v is not None for v in [ma5, ma10, ma20, ma60]) and close < ma5 < ma10 < ma20 < ma60:
-            ma_structure = "空頭排列（收盤價 < 5MA < 10MA < 20MA < 60MA）"
-        elif ma20 is not None and close >= ma20:
-            ma_structure = "中期偏多 / 均線未完全多頭排列"
-        else:
-            ma_structure = "中期偏弱或區間震盪"
-
-        ma5_gap = ((close - ma5) / ma5) if ma5 else None
-        ma20_gap = ((close - ma20) / ma20) if ma20 else None
-
-        recent10 = df.tail(10).copy()
-        along5_days = 0
-        along10_days = 0
-        try:
-            along5_days = int((recent10["Close"] >= recent10["MA5"]).sum())
-            along10_days = int((recent10["Close"] >= recent10["MA10"]).sum())
-        except Exception:
-            pass
-        if along5_days >= 8:
-            along_text = f"近10日有 {along5_days} 日收在 5MA 之上，屬沿 5MA 強勢上攻"
-        elif along10_days >= 8:
-            along_text = f"近10日有 {along10_days} 日收在 10MA 之上，屬沿 10MA 墊高"
-        else:
-            along_text = f"近10日收在 5MA 之上 {along5_days} 日、10MA 之上 {along10_days} 日，沿線強度普通"
-
-        if ma20_gap is not None and ma20_gap > 0.15:
-            gap_text = f"距 5MA={ma5_gap*100:.2f}%；距 20MA={ma20_gap*100:.2f}%；短線乖離過大，追價風險高"
-        elif ma20_gap is not None and ma20_gap < -0.08:
-            gap_text = f"距 5MA={ma5_gap*100:.2f}%；距 20MA={ma20_gap*100:.2f}%；跌破中線，技術面偏弱"
-        else:
-            gap_text = f"距 5MA={_fmt(ma5_gap*100 if ma5_gap is not None else None)}%；距 20MA={_fmt(ma20_gap*100 if ma20_gap is not None else None)}%；乖離尚可控"
-
-        if k >= 80 and d >= 70:
-            kd_zone = "KD 高檔區"
-        elif k <= 25 and d <= 30:
-            kd_zone = "KD 低檔區"
-        else:
-            kd_zone = "KD 中性區"
-        kd_cross = "KD 偏多 / K 值在 D 值上方" if k >= d else "KD 偏弱 / K 值在 D 值下方"
-
-        vol_ratio = (vol / vol20) if vol20 and vol20 > 0 else None
-        vol5_ratio = (vol5 / vol20) if vol5 and vol20 and vol20 > 0 else None
-        if vol_ratio is None:
-            vol_text = "量能資料不足"
-        elif vol_ratio >= 2:
-            vol_text = f"單日爆量（約 {vol_ratio:.2f} 倍 20 日均量）；需觀察是否高檔換手或賣壓"
-        elif vol_ratio >= 1.2:
-            vol_text = f"量能放大（約 {vol_ratio:.2f} 倍 20 日均量）；若價漲量增則偏多"
-        elif vol_ratio <= 0.75:
-            vol_text = f"量縮（約 {vol_ratio:.2f} 倍 20 日均量）；拉回量縮較健康"
-        else:
-            vol_text = f"量能接近均量（約 {vol_ratio:.2f} 倍 20 日均量）"
-        if vol5_ratio is not None:
-            vol_text += f"；5日均量/20日均量={vol5_ratio:.2f}x"
-
-        recent20 = df.tail(20)
-        recent60 = df.tail(60)
-        high20 = s_float(recent20["High"].max())
-        low20 = s_float(recent20["Low"].min())
-        high60 = s_float(recent60["High"].max())
-        low60 = s_float(recent60["Low"].min())
-        supports = []
-        for label, val in [("5MA", ma5), ("10MA", ma10), ("20MA", ma20), ("60MA", ma60), ("20日低點", low20)]:
-            if val is not None and val < close:
-                supports.append(f"{label} {_fmt(val)}")
-        resistances = []
-        for label, val in [("20日高點", high20), ("60日高點", high60)]:
-            if val is not None:
-                resistances.append(f"{label} {_fmt(val)}")
-
-        # 簡化洗盤 / 出貨初判
-        high_pressure = False
-        try:
-            recent_vol_max_idx = recent20["Volume"].idxmax()
-            max_vol_row = recent20.loc[recent_vol_max_idx]
-            max_vol = s_float(max_vol_row.get("Volume"), 0)
-            max_vol_ma20 = s_float(max_vol_row.get("Vol_MA20"), 0)
-            high_pressure = bool(max_vol_ma20 and max_vol > max_vol_ma20 * 1.8 and close < s_float(max_vol_row.get("Low"), close))
-        except Exception:
-            high_pressure = False
-
-        if high_pressure:
-            wash_text = "高檔爆量後未收復，偏出貨或高檔換手風險，需等重新站回爆量K高點"
-            pressure_text = "出現高檔爆量失守訊號，需留意賣壓"
-        elif close >= (ma10 or close) and (ma20_gap is not None and ma20_gap > 0):
-            wash_text = "偏多整理 / 洗盤後續攻機率較高，但仍需量縮拉回與守均線確認"
-            pressure_text = "未見明確高檔賣壓訊號"
-        else:
-            wash_text = "方向未明或偏弱，需觀察是否重新站回 10MA / 20MA"
-            pressure_text = "壓力以上方均線或近期高點為主"
-
-        if ma20_gap is not None and ma20_gap > 0.15:
-            buy_rhythm = f"不宜追高，優先等回測 5MA {_fmt(ma5)} / 10MA {_fmt(ma10)}；若失守 10MA 再看 20MA {_fmt(ma20)}"
-            tech_conclusion = "趨勢偏多但短線偏熱，買進安全邊際下降"
-        elif close >= (ma20 or close):
-            buy_rhythm = f"可等回測 10MA {_fmt(ma10)} 或 20MA {_fmt(ma20)} 有守再分批"
-            tech_conclusion = "技術面偏多，可輔助分批進場，但仍需服從估值與系統燈號"
-        else:
-            buy_rhythm = f"等待站回 20MA {_fmt(ma20)}，否則以觀望或反彈減碼為主"
-            tech_conclusion = "技術面偏弱或整理，暫不支持追價"
-
-        lines = [
-            f"- 技術週期/資料範圍: {timeframe} / 近 {min(len(df), int(lookback))} 根 K 線",
-            f"- 收盤價與均線: 收盤={_fmt(close)}；5MA={_fmt(ma5)}；10MA={_fmt(ma10)}；20MA={_fmt(ma20)}；60MA={_fmt(ma60)}",
-            f"- 均線結構: {ma_structure}；站上 {', '.join(above) if above else '無主要均線'}；跌破 {', '.join(below) if below else '無主要均線'}",
-            f"- 沿線上攻: {along_text}",
-            f"- 乖離與追價風險: {gap_text}",
-            f"- KD 狀態: K={_fmt(k,1)}；D={_fmt(d,1)}；{kd_zone}；{kd_cross}",
-            f"- 量價結構: {vol_text}",
-            f"- 支撐平台: {', '.join(supports[:4]) if supports else 'NULL'}",
-            f"- 賣壓/壓力區: {', '.join(resistances[:3]) if resistances else 'NULL'}；{pressure_text}",
-            f"- 洗盤或出貨初判: {wash_text}",
-            f"- 回測買點節奏: {buy_rhythm}",
-            f"- 技術面結論: {tech_conclusion}",
-            "- 使用限制: 技術面只輔助進出場節奏、追價風險、支撐壓力與停損停利，不可覆蓋月營收、EPS、資料品質、Dynamic Cap、可操作估值區間與系統最終燈號。",
-        ]
-        return {"available": True, "summary_text": "\n".join(lines), "data": {
-            "close": close, "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma60": ma60,
-            "k": k, "d": d, "ma5_gap": ma5_gap, "ma20_gap": ma20_gap,
-            "support": supports[:4], "resistance": resistances[:3], "conclusion": tech_conclusion,
-        }}
-    except Exception as e:
-        try:
-            log_exception("TechnicalSummary", "build_technical_summary", e)
-        except Exception:
-            pass
-        return {"available": False, "summary_text": "NULL", "error": str(e)[:160]}
