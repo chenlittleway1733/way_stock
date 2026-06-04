@@ -935,6 +935,92 @@ def _range_numbers_from_text(text, patterns):
     return (None, None)
 
 
+def _candidate_values_dict(parsed, search_parsed=None):
+    """Return merged candidate_values from Pass B and Pass A."""
+    merged = {}
+    for src in (search_parsed, parsed):
+        if isinstance(src, dict) and isinstance(src.get("candidate_values"), dict):
+            merged.update(src.get("candidate_values") or {})
+    return merged
+
+
+def _candidate_text(cv, *keys):
+    if not isinstance(cv, dict):
+        return ""
+    vals = []
+    for k in keys:
+        v = cv.get(k)
+        if v not in (None, "", "null", "None"):
+            vals.append(str(v))
+    return "；".join(vals)
+
+
+def _extract_eps_from_candidate_text(text, default_year=None):
+    """Extract EPS from candidate text without mistaking the year for EPS.
+
+    Examples:
+    - '2026年 EPS 預估中位數 46.04 元 (最高 61.5)' -> 46.04
+    - '2027年 EPS 預估約 56.4 元至 91.75 元' -> 56.4 (保守採低標)
+    """
+    if not text:
+        return None
+    t = str(text).replace(",", "")
+    # Prefer explicitly labelled median / consensus values.
+    pats = [
+        r"(?:中位數|均值|平均|共識)[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*元?",
+        r"EPS[^0-9\-+]{0,30}(?:預估|上看|達|為|約)?[^0-9\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*元?",
+    ]
+    for pat in pats:
+        m = re.search(pat, t, flags=re.IGNORECASE)
+        if m:
+            v = s_float(m.group(1))
+            if v is not None and 0 < v < 1000 and (default_year is None or abs(v - default_year) > 20):
+                return v
+    # Remove years before taking ranges/numbers.
+    t2 = re.sub(r"20\d{2}\s*年?", " ", t)
+    nums = [s_float(x) for x in re.findall(r"[\-+]?\d+(?:\.\d+)?", t2)]
+    nums = [x for x in nums if x is not None and 0 < x < 1000 and (default_year is None or abs(x - default_year) > 20)]
+    if nums:
+        # EPS ranges use conservative low value.
+        return min(nums) if any(sep in t for sep in ["至", "~", "-", "到"]) else nums[0]
+    return None
+
+
+def _extract_price_range_from_candidate_text(text):
+    if not text:
+        return (None, None)
+    t = str(text).replace(",", "")
+    # Prefer phrases explicitly mentioning target price / 目標價.
+    lo, hi = _range_numbers_from_text(t, [
+        r"(?:目標價|target_price|latest_target_price)[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)\s*元?\s*(?:至|~|到|-)\s*([\-+]?\d+(?:\.\d+)?)\s*元?",
+        r"介於\s*([\-+]?\d+(?:\.\d+)?)\s*元?\s*(?:至|~|到|-)\s*([\-+]?\d+(?:\.\d+)?)\s*元?",
+    ])
+    if lo is not None and hi is not None:
+        return lo, hi
+    # Fallback: collect price-like numbers, exclude years and percentages.
+    t2 = re.sub(r"20\d{2}", " ", t)
+    nums = [s_float(x) for x in re.findall(r"[\-+]?\d+(?:\.\d+)?(?=\s*元)", t2)]
+    nums = [x for x in nums if x is not None and 10 <= x <= 10000]
+    if len(nums) >= 2:
+        return min(nums), max(nums)
+    if len(nums) == 1:
+        return nums[0], nums[0]
+    return (None, None)
+
+
+def _extract_analyst_count_from_text(text):
+    if not text:
+        return None
+    t = str(text)
+    for pat in [r"([0-9]{1,3})\s*(?:位|家)?\s*(?:分析師|法人|券商)", r"(?:分析師|法人|券商)[^0-9]{0,12}([0-9]{1,3})\s*(?:位|家)?"]:
+        m = re.search(pat, t, flags=re.IGNORECASE)
+        if m:
+            n = s_float(m.group(1))
+            if n is not None and 0 < n <= 100:
+                return int(n)
+    return None
+
+
 def _harvest_candidate_values_into_top_level(parsed, search_parsed=None):
     """2.2 data-safety fallback.
 
@@ -994,24 +1080,25 @@ def _harvest_candidate_values_into_top_level(parsed, search_parsed=None):
         r"(?:完整年度|全年|年度)\s*EPS[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)",
     ]))
 
+    cv = _candidate_values_dict(parsed, search_parsed)
     fy_map = [
-        ("forward_eps_fy1", "forward_eps_fy1_year", [r"FY1_EPS[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)", r"eps_fy1[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)", r"2026\s*年\s*EPS[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)"]),
-        ("forward_eps_fy2", "forward_eps_fy2_year", [r"FY2_EPS[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)", r"eps_fy2[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)", r"2027\s*年\s*EPS[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)"]),
-        ("forward_eps_fy3", "forward_eps_fy3_year", [r"FY3_EPS[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)", r"eps_fy3[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)", r"2028\s*年\s*EPS[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)"]),
+        ("forward_eps_fy1", "forward_eps_fy1_year", 2026, ["forward_eps_fy1", "FY1_EPS", "eps_fy1", "fy1_eps"], [r"forward_eps_fy1[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)", r"FY1_EPS[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)", r"eps_fy1[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)", r"2026\s*年\s*EPS[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)"]),
+        ("forward_eps_fy2", "forward_eps_fy2_year", 2027, ["forward_eps_fy2", "FY2_EPS", "eps_fy2", "fy2_eps"], [r"forward_eps_fy2[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)", r"FY2_EPS[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)", r"eps_fy2[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)", r"2027\s*年\s*EPS[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)"]),
+        ("forward_eps_fy3", "forward_eps_fy3_year", 2028, ["forward_eps_fy3", "FY3_EPS", "eps_fy3", "fy3_eps"], [r"forward_eps_fy3[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)", r"FY3_EPS[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)", r"eps_fy3[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)", r"2028\s*年\s*EPS[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)"]),
     ]
-    for eps_key, year_key, patterns in fy_map:
-        val = _first_number_from_text(text, patterns)
+    for eps_key, year_key, default_year, cv_keys, patterns in fy_map:
+        cv_text = _candidate_text(cv, *cv_keys)
+        val = _extract_eps_from_candidate_text(cv_text, default_year=default_year) if cv_text else None
+        if val is None:
+            val = _extract_eps_from_candidate_text(text, default_year=default_year)
+        if val is None:
+            val = _first_number_from_text(text, patterns)
+            # Avoid accidentally using year as EPS.
+            if val is not None and abs(float(val) - float(default_year)) <= 20:
+                val = None
         set_if_missing(eps_key, val, f"2.2回收層：已由候選值/原文回填 {eps_key}。" if val is not None else "")
         if out.get(eps_key) not in (None, "", "null", "None") and out.get(year_key) in (None, "", "null", "None"):
-            y = _first_number_from_text(" ".join(patterns), [r"(20\d{2})"])
-            if y is None:
-                if eps_key.endswith("fy1"):
-                    y = 2026
-                elif eps_key.endswith("fy2"):
-                    y = 2027
-                elif eps_key.endswith("fy3"):
-                    y = 2028
-            out[year_key] = int(y) if y is not None else None
+            out[year_key] = int(default_year)
     if out.get("forward_eps_consensus") in (None, "", "null", "None") and out.get("forward_eps_fy1") not in (None, "", "null", "None"):
         out["forward_eps_consensus"] = out.get("forward_eps_fy1")
     if out.get("forward_eps") in (None, "", "null", "None") and out.get("forward_eps_consensus") not in (None, "", "null", "None"):
@@ -1031,14 +1118,25 @@ def _harvest_candidate_values_into_top_level(parsed, search_parsed=None):
         r"複合成長率[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)\s*[%％]",
     ]))
 
-    lo, hi = _range_numbers_from_text(text, [
-        r"latest_target_price[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*元?\s*(?:至|~|-|到)\s*([\-+]?\d+(?:\.\d+)?)\s*元?",
-        r"目標價[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*元?\s*(?:至|~|-|到)\s*([\-+]?\d+(?:\.\d+)?)\s*元?",
-    ])
-    set_if_missing("target_price_low", lo)
-    set_if_missing("target_price_high", hi)
+    target_text = _candidate_text(cv, "latest_target_price", "target_price", "target_price_range", "broker_target_price") or text
+    lo, hi = _extract_price_range_from_candidate_text(target_text)
+    if lo is None or hi is None:
+        lo, hi = _range_numbers_from_text(text, [
+            r"latest_target_price[^0-9\-+]{0,60}([\-+]?\d+(?:\.\d+)?)\s*元?\s*(?:至|~|-|到)\s*([\-+]?\d+(?:\.\d+)?)\s*元?",
+            r"目標價[^0-9\-+]{0,60}([\-+]?\d+(?:\.\d+)?)\s*元?\s*(?:至|~|-|到)\s*([\-+]?\d+(?:\.\d+)?)\s*元?",
+        ])
+    set_if_missing("target_price_low", lo, "2.2回收層：已由候選值/原文回填 target_price_low。" if lo is not None else "")
+    set_if_missing("target_price_high", hi, "2.2回收層：已由候選值/原文回填 target_price_high。" if hi is not None else "")
+    if out.get("target_price_avg") in (None, "", "null", "None") and lo is not None and hi is not None:
+        out["target_price_avg"] = round((float(lo) + float(hi)) / 2.0, 2)
+        warnings.append("2.2回收層：目標價只有高低區間，已用區間中點暫作 target_price_avg。")
     if out.get("target_price") in (None, "", "null", "None") and out.get("target_price_avg") not in (None, "", "null", "None"):
         out["target_price"] = out.get("target_price_avg")
+    if out.get("target_price_analyst_count") in (None, "", "null", "None"):
+        cnt = _extract_analyst_count_from_text(text)
+        if cnt is not None:
+            out["target_price_analyst_count"] = cnt
+            warnings.append("2.2回收層：已由候選值/原文回填 target_price_analyst_count。")
 
     if out.get("forward_eps_fy_source_note") in (None, "", "null", "None"):
         # Keep source note concise; do not feed it into numeric decisions.
@@ -1299,6 +1397,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     search_prompt_text = f"""請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、最新公告月份單月營收 YoY / MoM、累計營收 YoY、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。
 請務必保留可查證的原文片段與資料發布日期，尤其是月營收原文，例如「2026年5月合併營收276.70億元，年增730.14%，月增8.55%」。
 本步驟只負責搜尋取材與來源彙整，不要自行縮放百分比，不要把 730.14% 改寫成 7.30%。
+請在 candidate_values 盡量列出：monthly_revenue_yoy、monthly_revenue_mom、cumulative_revenue_yoy、latest_quarter_eps、gross_margin、operating_margin、FY1_EPS、FY2_EPS、FY3_EPS、future_3y_cagr、latest_target_price、target_price_analyst_count、target_price_rationale、free_cash_flow、current_ratio。
 請回傳 JSON，欄位可包含：search_summary、revenue_source_quote、source_urls、published_date、data_period、candidate_values、_sources。不要查詢 ETF 持股。"""
 
     search_response = None
