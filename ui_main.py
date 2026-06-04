@@ -2755,6 +2755,21 @@ def render_main_page(sidebar_state=None):
                 except Exception:
                     return "- 技術面摘要: NULL"
 
+            def _prompt_technical_chart_guide():
+                """第二階段：若使用者另外附上技術線圖，外部 AI 應如何輔助判讀。"""
+                return """若另外附上本系統輸出的技術線圖（含 K 線、5/10/20/60MA、成交量、外資/投信/自營商、KD），請只用它輔助判斷以下 10 點：
+1. 是否沿 5MA / 10MA 強勢上攻。
+2. 是否有高檔賣壓區（前高、整數關卡、爆量上影線、量增不漲）。
+3. 是否有明顯支撐平台（5MA / 10MA / 20MA / 60MA / 前波平台）。
+4. 是洗盤後續攻，還是出貨轉弱。
+5. 是否短線乖離過大，不宜追高。
+6. 是否適合等回測 5MA / 10MA / 20MA。
+7. 量價結構是否健康（價漲量增、拉回量縮、爆量換手）。
+8. 法人籌碼是否配合線型。
+9. 關鍵停損 / 減碼位置在哪裡。
+10. 技術面是否支持系統買進結論。
+重要限制：技術線圖只能輔助進出場節奏、支撐壓力、追價風險、停損停利與洗盤/出貨判斷；不可覆蓋月營收公告月份、EPS 口徑、資料品質、Dynamic Cap、可操作估值區間與最終操作燈號。"""
+
             def _prompt_panel_sync_audit():
                 """提示詞與畫面面板同步自檢。"""
                 try:
@@ -2771,7 +2786,9 @@ def render_main_page(sidebar_state=None):
                     lines = []
                     for name, ok in checks:
                         lines.append(f"- {name}: {'已同步' if ok else '可能缺值/需人工確認'}")
-                    lines.append(f"- 技術面摘要（日線）: {'已同步' if isinstance(technical_summary_pack, dict) and technical_summary_pack.get('available') else '可能缺值/需人工確認'}；本階段打包純文字摘要，技術線圖圖片尚未打包。")
+                    lines.append(f"- 技術面摘要（日線）: {'已同步' if isinstance(technical_summary_pack, dict) and technical_summary_pack.get('available') else '可能缺值/需人工確認'}；已同步到提示詞。")
+                    lines.append("- 技術線圖輸出（第二階段）: 已提供圖表下載與外部 AI 輔助判讀指引；若需圖片版可用瀏覽器圖表工具列下載 PNG，或使用下方 HTML/PNG 匯出。")
+                    lines.append("- 技術線圖輔助規則: 已同步；若另附圖，外部 AI 應依 10 點規則輔助判讀，不可覆蓋基本面與估值結論。")
                     lines.append("- 產業同業PK/估值河流圖: 屬互動視覺輔助，研究完整版以產業模型、Dynamic Cap、估值區間摘要為主，未塞完整圖表資料。")
                     return "\n".join(lines)
                 except Exception:
@@ -2998,6 +3015,9 @@ def render_main_page(sidebar_state=None):
 
 【20. 技術面與進出場節奏（日線摘要，第一階段）】
 {_prompt_technical_summary()}
+
+【21. 技術線圖輔助判讀重點（第二階段，若另附圖）】
+{_prompt_technical_chart_guide()}
 """
 
 
@@ -3085,6 +3105,9 @@ def render_main_page(sidebar_state=None):
 
 【15. 技術面與進出場節奏（日線摘要，第一階段）】
 {_prompt_technical_summary()}
+
+【16. 技術線圖輔助判讀重點（第二階段，若另附圖）】
+{_prompt_technical_chart_guide()}
 """
 
 
@@ -3148,6 +3171,7 @@ def render_main_page(sidebar_state=None):
 - 若同一欄位同時列出系統值與 AI 值，請說明採用哪一個，以及是否影響估值可信度。
 - 若觸發「模型落差風險提示」，請優先判斷落差是否會傷害買進安全邊際；但不要在買進決策版提出模型庫修正建議。
 - 若系統附有「技術面與進出場節奏」摘要，請只用來判斷追價風險、支撐壓力、回測買點、停損停利與短線節奏，不可覆蓋月營收、EPS、資料品質、Dynamic Cap、可操作估值區間與最終燈號。
+- 若另外附上本系統輸出的技術線圖，請依【16. 技術線圖輔助判讀重點】輔助判斷沿線上攻、賣壓區、支撐平台、洗盤/出貨、量價與回測買點；技術圖只影響進出場節奏，不可改寫基本面結論。
 
 請依序回答：
 1. [投資結論一句話]：可買 / 觀望 / 不建議 / 資料異常，並說明是否同意系統最終燈號。
@@ -3177,6 +3201,7 @@ def render_main_page(sidebar_state=None):
                 )
                 selected_prompt_for_copy = buy_decision_prompt_for_copy if prompt_mode.startswith("買進決策版") else research_prompt_for_copy
                 st.caption("買進決策版只保留會影響是否買進的採用值、系統/AI差異、估值層級、產業模型、Dynamic Cap 與燈號；研究完整版保留較完整資料品質與來源摘要。")
+                st.caption("第二階段已加入『技術線圖輸出』：若要讓外部 AI 一起判讀線型、賣壓、支撐與洗盤，可先在下方技術分析區匯出技術圖，再與本提示詞一起提供給外部 AI。")
 
                 # 用 json.dumps 包裝提示詞，避免換行、引號或特殊符號造成 JavaScript 失效。
                 safe_prompt_js = json.dumps(selected_prompt_for_copy, ensure_ascii=False)
@@ -3579,6 +3604,78 @@ def render_main_page(sidebar_state=None):
 
             fig_k.update_xaxes(rangebreaks=rb, tickformat=x_fmt, showgrid=True, gridcolor='#333', mirror=True, showline=True, linecolor='#555')
             fig_k.update_layout(height=750, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=10,b=10), template="plotly_dark", hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
-            st.plotly_chart(fig_k, use_container_width=True)
+            st.plotly_chart(
+                fig_k,
+                use_container_width=True,
+                config={
+                    "displaylogo": False,
+                    "modeBarButtonsToAdd": ["drawline", "eraseshape"],
+                    "toImageButtonOptions": {
+                        "format": "png",
+                        "filename": f"{curr_id}_{chart_tf}_technical_chart",
+                        "height": 900,
+                        "width": 1600,
+                        "scale": 2,
+                    },
+                },
+            )
+
+            chart_export_filename = f"{curr_id}_{chart_tf}_technical_chart"
+            chart_html_data = fig_k.to_html(full_html=True, include_plotlyjs='cdn')
+            chart_png_bytes = None
+            chart_png_error = None
+            try:
+                chart_png_bytes = fig_k.to_image(format="png", scale=2, width=1600, height=900)
+            except Exception as e:
+                chart_png_error = str(e)[:140]
+
+            tech_chart_attach_guide = f"""【技術線圖附件使用說明】
+若你把 {chart_export_filename}.png 或 HTML 圖檔一起附給外部 AI，請要求它只用技術線圖輔助判斷：
+1. 是否沿 5MA / 10MA 強勢上攻。
+2. 是否有高檔賣壓區。
+3. 是否有明顯支撐平台。
+4. 是洗盤後續攻，還是出貨轉弱。
+5. 是否短線乖離過大，不宜追高。
+6. 是否適合等回測 5MA / 10MA / 20MA。
+7. 量價結構是否健康。
+8. 法人籌碼是否配合線型。
+9. 關鍵停損 / 減碼位置在哪裡。
+10. 技術面是否支持系統買進結論。
+重要限制：技術線圖只輔助進出場節奏，不可覆蓋月營收、EPS、資料品質、Dynamic Cap、可操作估值區間與最終操作燈號。"""
+
+            with st.expander("🖼️ 技術圖輸出（第二階段）", expanded=False):
+                st.caption("用途：把目前畫面中的技術線圖輸出給 Gemini / ChatGPT 等外部 AI，輔助判斷沿 5MA/10MA 上攻、賣壓、支撐、洗盤/出貨與回測買點。")
+                st.caption("畫面上方 Plotly 圖表工具列也可直接下載 PNG；若部署環境支援伺服器端圖片匯出，下面也可直接下載 PNG。")
+                cexp1, cexp2 = st.columns(2)
+                with cexp1:
+                    st.download_button(
+                        "⬇️ 下載技術圖 HTML",
+                        data=chart_html_data,
+                        file_name=f"{chart_export_filename}.html",
+                        mime="text/html",
+                        use_container_width=True,
+                        key=f"download_tech_chart_html_{curr_id}_{chart_tf}",
+                    )
+                with cexp2:
+                    if chart_png_bytes is not None:
+                        st.download_button(
+                            "⬇️ 下載技術圖 PNG",
+                            data=chart_png_bytes,
+                            file_name=f"{chart_export_filename}.png",
+                            mime="image/png",
+                            use_container_width=True,
+                            key=f"download_tech_chart_png_{curr_id}_{chart_tf}",
+                        )
+                    else:
+                        st.info("本環境目前未啟用伺服器端 PNG 匯出；可先用圖表右上工具列下載 PNG，或下載 HTML 後再截圖 / 附檔。")
+                        if chart_png_error:
+                            st.caption(f"PNG 匯出備註：{chart_png_error}")
+
+                st.text_area(
+                    "附圖給外部 AI 時可一起貼上的技術圖說明",
+                    value=tech_chart_attach_guide,
+                    height=220,
+                    key=f"tech_chart_attach_guide_{curr_id}_{chart_tf}",
+                )
         else:
             st.error(f"找不到代號 {curr_id} 的資料，請確認代號是否正確或重新整理。")
