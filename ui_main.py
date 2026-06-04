@@ -3013,11 +3013,6 @@ def render_main_page(sidebar_state=None):
 【19. 模型庫回饋建議（研究完整版專用）】
 {_prompt_model_library_feedback_request()}
 
-【20. 技術面與進出場節奏（日線摘要，第一階段）】
-{_prompt_technical_summary()}
-
-【21. 技術線圖輔助判讀重點（第二階段，若另附圖）】
-{_prompt_technical_chart_guide()}
 """
 
 
@@ -3103,11 +3098,6 @@ def render_main_page(sidebar_state=None):
 - 估值採用 AI 欄位來源摘要:
 {_prompt_ai_source_summary(ai_source_trace_df_for_prompt)}
 
-【15. 技術面與進出場節奏（日線摘要，第一階段）】
-{_prompt_technical_summary()}
-
-【16. 技術線圖輔助判讀重點（第二階段，若另附圖）】
-{_prompt_technical_chart_guide()}
 """
 
 
@@ -3191,6 +3181,30 @@ def render_main_page(sidebar_state=None):
 {decision_context_str}
 """
             
+            def _build_technical_pack_appendix(mode, prompt_kind="buy"):
+                """第三階段：依使用者選項，把技術面摘要 / 技術線圖輔助規則附加到提示詞。"""
+                try:
+                    mode = str(mode or "不加入技術面")
+                    is_research = str(prompt_kind).startswith("research")
+                    summary_no = "20" if is_research else "15"
+                    chart_no = "21" if is_research else "16"
+                    parts = []
+                    if "技術面摘要" in mode:
+                        parts.append(f"""
+
+【{summary_no}. 技術面與進出場節奏（日線摘要，選配）】
+{_prompt_technical_summary()}
+""")
+                    if "技術線圖" in mode:
+                        parts.append(f"""
+
+【{chart_no}. 技術線圖輔助判讀重點（選配；需另附技術圖）】
+{_prompt_technical_chart_guide()}
+""")
+                    return "".join(parts)
+                except Exception:
+                    return ""
+
             # 第 17-C-2：打包提示詞分成「買進決策版 / 研究完整版」
             with st.expander("📋 點此複製【打包提示詞】至 Gemini Advanced 或 ChatGPT 發問", expanded=True):
                 prompt_mode = st.radio(
@@ -3199,9 +3213,26 @@ def render_main_page(sidebar_state=None):
                     horizontal=True,
                     key=f"prompt_pack_mode_{curr_id}",
                 )
+                st.markdown("#### 🧭 技術面打包選項")
+                technical_pack_mode = st.radio(
+                    "選擇是否把技術面加入目前提示詞",
+                    ["不加入技術面", "加入技術面摘要", "加入技術面摘要 + 技術線圖輔助規則"],
+                    index=1,
+                    horizontal=True,
+                    key=f"technical_pack_mode_{curr_id}_{'buy' if prompt_mode.startswith('買進決策版') else 'research'}",
+                )
                 selected_prompt_for_copy = buy_decision_prompt_for_copy if prompt_mode.startswith("買進決策版") else research_prompt_for_copy
+                selected_prompt_for_copy += _build_technical_pack_appendix(
+                    technical_pack_mode,
+                    prompt_kind="buy" if prompt_mode.startswith("買進決策版") else "research",
+                )
                 st.caption("買進決策版只保留會影響是否買進的採用值、系統/AI差異、估值層級、產業模型、Dynamic Cap 與燈號；研究完整版保留較完整資料品質與來源摘要。")
-                st.caption("第二階段已加入『技術線圖輸出』：若要讓外部 AI 一起判讀線型、賣壓、支撐與洗盤，可先在下方技術分析區匯出技術圖，再與本提示詞一起提供給外部 AI。")
+                if technical_pack_mode == "不加入技術面":
+                    st.caption("目前提示詞不加入技術面，適合純基本面 / 估值判斷。")
+                elif technical_pack_mode == "加入技術面摘要":
+                    st.caption("目前提示詞會加入【技術面摘要】，用來輔助追價風險、支撐壓力、回測買點與停損停利。")
+                else:
+                    st.caption("目前提示詞會加入【技術面摘要 + 技術線圖輔助規則】；請在下方技術分析區匯出技術圖，並與提示詞一起提供給外部 AI。")
 
                 # 用 json.dumps 包裝提示詞，避免換行、引號或特殊符號造成 JavaScript 失效。
                 safe_prompt_js = json.dumps(selected_prompt_for_copy, ensure_ascii=False)
