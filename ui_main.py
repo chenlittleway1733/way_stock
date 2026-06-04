@@ -4,6 +4,8 @@ import re
 包含個股儀表板、AI 分析、財務資料、圖表、ETF 曝險等主要畫面。
 """
 from ui_common import *
+# 2.2-hotfix：ui_main 直接呼叫 canonicalize_percent_fields；避免經由 ui_common 星號匯入時漏載造成 NameError。
+from utils import canonicalize_percent_fields
 
 def render_main_page(sidebar_state=None):
     """渲染主畫面。"""
