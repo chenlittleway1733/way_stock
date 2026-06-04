@@ -875,6 +875,186 @@ def _extract_percent_from_text(text, patterns):
     return None
 
 
+def _flatten_text_values(obj, max_len=12000):
+    """Collect compact text from a nested JSON-like object for deterministic fallback extraction."""
+    parts = []
+    def walk(x):
+        if len("；".join(parts)) > max_len:
+            return
+        if isinstance(x, dict):
+            for k, v in x.items():
+                if k in {"prompt", "extract_prompt", "search_prompt", "query_payload"}:
+                    continue
+                if isinstance(v, (dict, list)):
+                    walk(v)
+                elif v is not None:
+                    t = str(v).strip()
+                    if t and t.lower() not in {"null", "none"}:
+                        parts.append(f"{k}: {t}")
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+        elif x is not None:
+            t = str(x).strip()
+            if t:
+                parts.append(t)
+    walk(obj)
+    return "；".join(parts)[:max_len]
+
+
+def _first_number_from_text(text, patterns):
+    if not text:
+        return None
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if not m:
+            continue
+        for g in m.groups():
+            if g is None:
+                continue
+            val = s_float(str(g).replace(",", ""))
+            if val is not None:
+                return val
+    return None
+
+
+def _range_numbers_from_text(text, patterns):
+    if not text:
+        return (None, None)
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if not m:
+            continue
+        nums = []
+        for g in m.groups():
+            val = s_float(str(g).replace(",", "")) if g is not None else None
+            if val is not None:
+                nums.append(val)
+        if len(nums) >= 2:
+            return (min(nums), max(nums))
+    return (None, None)
+
+
+def _harvest_candidate_values_into_top_level(parsed, search_parsed=None):
+    """2.2 data-safety fallback.
+
+    Pass B sometimes extracts correct values into candidate_values / source trace, but does not
+    place them on top-level fields consumed by UI and valuation.  This function promotes only
+    explicit, field-specific values from Pass A / Pass B text to canonical top-level fields.
+
+    It never promotes legacy yoy/mom fields; percent values are promoted only to *_percent.
+    """
+    if not isinstance(parsed, dict):
+        return parsed
+    out = dict(parsed)
+    combined = {
+        "parsed": parsed,
+        "search_pass": search_parsed if isinstance(search_parsed, dict) else {},
+    }
+    text = _flatten_text_values(combined)
+    warnings = list(out.get("_ai_validation_warnings") or [])
+
+    def set_if_missing(key, val, note=""):
+        if val is None:
+            return
+        if out.get(key) in (None, "", "null", "None"):
+            out[key] = val
+            if note:
+                warnings.append(note)
+
+    # Revenue percent fields from explicit monthly/cumulative revenue text.
+    set_if_missing("monthly_revenue_yoy_percent", _first_number_from_text(text, [
+        r"monthly_revenue_yoy[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%?",
+        r"revenue_yoy[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%",
+        r"年增[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*[%％]",
+    ]), "2.2回收層：已由候選值/原文回填 monthly_revenue_yoy_percent。")
+    set_if_missing("monthly_revenue_mom_percent", _first_number_from_text(text, [
+        r"monthly_revenue_mom[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%?",
+        r"revenue_mom[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%",
+        r"月增[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*[%％]",
+    ]), "2.2回收層：已由候選值/原文回填 monthly_revenue_mom_percent。")
+    set_if_missing("accumulated_revenue_yoy_percent", _first_number_from_text(text, [
+        r"cumulative_revenue_yoy[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%?",
+        r"accumulated_revenue_yoy[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%?",
+        r"(?:累計|前\s*\d+\s*月)[^%％]{0,60}年增[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*[%％]",
+    ]), "2.2回收層：已由候選值/原文回填 accumulated_revenue_yoy_percent。")
+
+    # Latest quarter and TTM/annual/forward EPS.
+    set_if_missing("latest_quarter_eps", _first_number_from_text(text, [
+        r"latest_quarter_eps[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)",
+        r"最新單季\s*EPS[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)",
+        r"(?:單季|每股稅後純益|EPS)[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*元",
+    ]), "2.2回收層：已由候選值/原文回填 latest_quarter_eps。")
+    set_if_missing("ttm_eps", _first_number_from_text(text, [
+        r"ttm_eps[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)",
+        r"近四季[^0-9\-+]{0,20}EPS[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)",
+    ]))
+    set_if_missing("fiscal_year_eps", _first_number_from_text(text, [
+        r"fiscal_year_eps[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)",
+        r"(?:完整年度|全年|年度)\s*EPS[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)",
+    ]))
+
+    fy_map = [
+        ("forward_eps_fy1", "forward_eps_fy1_year", [r"FY1_EPS[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)", r"eps_fy1[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)", r"2026\s*年\s*EPS[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)"]),
+        ("forward_eps_fy2", "forward_eps_fy2_year", [r"FY2_EPS[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)", r"eps_fy2[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)", r"2027\s*年\s*EPS[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)"]),
+        ("forward_eps_fy3", "forward_eps_fy3_year", [r"FY3_EPS[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)", r"eps_fy3[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)", r"2028\s*年\s*EPS[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)"]),
+    ]
+    for eps_key, year_key, patterns in fy_map:
+        val = _first_number_from_text(text, patterns)
+        set_if_missing(eps_key, val, f"2.2回收層：已由候選值/原文回填 {eps_key}。" if val is not None else "")
+        if out.get(eps_key) not in (None, "", "null", "None") and out.get(year_key) in (None, "", "null", "None"):
+            y = _first_number_from_text(" ".join(patterns), [r"(20\d{2})"])
+            if y is None:
+                if eps_key.endswith("fy1"):
+                    y = 2026
+                elif eps_key.endswith("fy2"):
+                    y = 2027
+                elif eps_key.endswith("fy3"):
+                    y = 2028
+            out[year_key] = int(y) if y is not None else None
+    if out.get("forward_eps_consensus") in (None, "", "null", "None") and out.get("forward_eps_fy1") not in (None, "", "null", "None"):
+        out["forward_eps_consensus"] = out.get("forward_eps_fy1")
+    if out.get("forward_eps") in (None, "", "null", "None") and out.get("forward_eps_consensus") not in (None, "", "null", "None"):
+        out["forward_eps"] = out.get("forward_eps_consensus")
+
+    # Margins / CAGR / target price from explicit candidate text.
+    set_if_missing("gross_margin_percent", _first_number_from_text(text, [
+        r"gross_margin_percent[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%?",
+        r"毛利率[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*[%％]",
+    ]), "2.2回收層：已由候選值/原文回填 gross_margin_percent。")
+    set_if_missing("operating_margin_percent", _first_number_from_text(text, [
+        r"operating_margin_percent[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%?",
+        r"營益率[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*[%％]",
+    ]))
+    set_if_missing("cagr_percent", _first_number_from_text(text, [
+        r"(?:future_3y_cagr|eps_cagr|CAGR)[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)\s*%",
+        r"複合成長率[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)\s*[%％]",
+    ]))
+
+    lo, hi = _range_numbers_from_text(text, [
+        r"latest_target_price[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*元?\s*(?:至|~|-|到)\s*([\-+]?\d+(?:\.\d+)?)\s*元?",
+        r"目標價[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*元?\s*(?:至|~|-|到)\s*([\-+]?\d+(?:\.\d+)?)\s*元?",
+    ])
+    set_if_missing("target_price_low", lo)
+    set_if_missing("target_price_high", hi)
+    if out.get("target_price") in (None, "", "null", "None") and out.get("target_price_avg") not in (None, "", "null", "None"):
+        out["target_price"] = out.get("target_price_avg")
+
+    if out.get("forward_eps_fy_source_note") in (None, "", "null", "None"):
+        # Keep source note concise; do not feed it into numeric decisions.
+        cv = None
+        if isinstance(search_parsed, dict):
+            cv = search_parsed.get("candidate_values")
+        if isinstance(cv, dict):
+            out["forward_eps_fy_source_note"] = "；".join([str(cv.get(k)) for k in ["eps_fy1", "eps_fy2", "eps_fy3"] if cv.get(k)])[:300] or None
+    if out.get("forward_eps_fy_basis") in (None, "", "null", "None") and out.get("forward_eps_fy1") not in (None, "", "null", "None"):
+        out["forward_eps_fy_basis"] = "Pass A 搜尋候選值 / AI JSON 整理"
+
+    if warnings:
+        out["_ai_validation_warnings"] = list(dict.fromkeys(warnings))
+    return out
+
+
 def _strict_ai_percent_json_guard(parsed):
     """2.2：AI JSON 回收層百分比欄位守門。
 
@@ -1291,6 +1471,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
             "target_price_low": s_float(marker_match.group(3).replace("無", "")),
         }
 
+    parsed = _harvest_candidate_values_into_top_level(parsed, search_parsed)
     parsed = _strict_ai_percent_json_guard(parsed)
     parsed.update({k: v for k, v in marker_data.items() if v is not None and parsed.get(k) is None})
     parsed = _normalize_ai_source_metadata(parsed)
