@@ -82,7 +82,31 @@ def render_main_page(sidebar_state=None):
             with cols[idx]: st.button(f"{name}\n({code})", on_click=reset_all_states_on_stock_change, args=(code,), key=f"w_{code}", use_container_width=True)
         st.markdown("---")
 
-    curr_id = st.session_state.selected_stock
+    curr_id = str(st.session_state.get("selected_stock", "") or "").strip()
+    if not curr_id:
+        st.markdown(
+            """
+            <div style="
+                margin-top: 2.5rem;
+                padding: 1.4rem 1.6rem;
+                border: 1px solid rgba(128,128,128,0.28);
+                border-radius: 14px;
+                background: rgba(128,128,128,0.06);
+                max-width: 820px;
+            ">
+                <div style="font-size:1.35rem; font-weight:800; margin-bottom:0.55rem;">
+                    🔎 請先輸入股票代號或使用左側下拉選股查詢
+                </div>
+                <div style="font-size:1.02rem; line-height:1.8; color:rgba(100,100,100,0.95);">
+                    可在左側「輸入台股代號」欄位輸入，例如 <b>2330</b>、<b>3037</b>、<b>2454</b>，
+                    輸入後請按 <b style="color:#ff8c00;">Enter</b> 確認送出；也可以從「快速選股名單」下拉選擇股票。
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
     if curr_id:
         # 🚀 絕對防呆宣告：避免因任何例外導致變數未定義而觸發 NameError
         ctx_pe, ctx_fpe, ctx_pb, ctx_peg = "N/A", "N/A", "N/A", "N/A"
@@ -735,12 +759,6 @@ def render_main_page(sidebar_state=None):
                 ai_de=ai_de,
                 system_pb=pb_ratio,
                 ai_pb=ai_pb,
-                system_ttm_eps=sys_ttm_eps,
-                ai_ttm_eps=ai_ttm_eps,
-                system_pe=pe_ratio,
-                ai_pe=ai_pe,
-                fy1_eps=ai_forward_eps_fy1,
-                fy2_eps=ai_forward_eps_fy2,
                 stock_id=curr_id,
                 stock_name=c_name,
             )
@@ -748,7 +766,7 @@ def render_main_page(sidebar_state=None):
             # EPS 拆欄報告：顯示每一種 EPS 口徑，不再用「目前 EPS」混稱。
             eps_rows = [
                 {"field": "最新單季 EPS", "definition": "最新已公告季度 EPS；用來判斷短期獲利動能", "system_value": sys_latest_quarter_eps, "ai_value": ai_latest_quarter_eps, "adopted_value": ai_latest_quarter_eps, "source": "AI補齊" if ai_latest_quarter_eps is not None else "未取得", "period": ai_period_val or raw_ai_period or "需查最新財報", "notes": "系統資料源未穩定提供單季 EPS，避免用 TTM 代替。"},
-                {"field": "TTM EPS", "definition": "近四季 EPS 合計；用於歷史 P/E", "system_value": sys_ttm_eps, "ai_value": ai_ttm_eps, "adopted_value": sys_ttm_eps if sys_ttm_eps is not None else ai_ttm_eps, "source": "系統優先" if sys_ttm_eps is not None else ("AI補齊" if ai_ttm_eps is not None else "未取得"), "period": "yfinance trailingEps / 現價÷P/E 反推" if sys_ttm_eps is not None else (raw_ai_period or "AI未揭露"), "notes": "原 trailing_eps 口徑統一視為 TTM EPS；若系統與 AI 差距過大，請以分歧警告與資料品質表為準。"},
+                {"field": "TTM EPS", "definition": "近四季 EPS 合計；用於歷史 P/E", "system_value": sys_ttm_eps, "ai_value": ai_ttm_eps, "adopted_value": sys_ttm_eps if sys_ttm_eps is not None else ai_ttm_eps, "source": "系統優先" if sys_ttm_eps is not None else ("AI補齊" if ai_ttm_eps is not None else "未取得"), "period": "yfinance trailingEps / 現價÷P/E 反推" if sys_ttm_eps is not None else (raw_ai_period or "AI未揭露"), "notes": "原 trailing_eps 口徑統一視為 TTM EPS。"},
                 {"field": "完整年度 EPS", "definition": "最近完整會計年度 EPS；用來看年度基準", "system_value": sys_fiscal_year_eps, "ai_value": ai_fiscal_year_eps, "adopted_value": ai_fiscal_year_eps, "source": "AI補齊" if ai_fiscal_year_eps is not None else "未取得", "period": raw_ai_period or "需查年報", "notes": "不得用 TTM EPS 直接冒充完整年度 EPS。"},
                 {"field": "Forward EPS－系統", "definition": "yfinance forwardEps；缺值時由 TTM EPS × 成長率推估", "system_value": sys_forward_eps_system, "ai_value": None, "adopted_value": sys_forward_eps_system, "source": "系統/反推" if sys_forward_eps_system is not None else "未取得", "period": "forwardEps 或 earningsGrowth 推估", "notes": "用於系統 Forward P/E 與公式估值。"},
                 {"field": "Forward EPS－AI", "definition": "AI 從新聞/券商報告抓取或推估的 Forward EPS", "system_value": None, "ai_value": ai_forward_eps_ai, "adopted_value": ai_forward_eps_ai, "source": "AI補齊" if ai_forward_eps_ai is not None else "未取得", "period": raw_ai_period or "AI未揭露", "notes": "與法人共識 EPS 分開，避免單一來源誤當共識。"},
@@ -953,69 +971,19 @@ def render_main_page(sidebar_state=None):
                 except Exception:
                     return "年期未明"
 
-            def _rel_gap_for_quality(a, b, denominator="min"):
-                try:
-                    if a is None or b is None:
-                        return None
-                    aa, bb = float(a), float(b)
-                    bases = [abs(x) for x in [aa, bb] if abs(x) > 1e-12]
-                    if not bases:
-                        return None
-                    if denominator == "max":
-                        base = max(bases)
-                    elif denominator == "avg":
-                        base = sum(bases) / len(bases)
-                    else:
-                        base = min(bases)
-                    return abs(aa - bb) / base if base > 1e-12 else None
-                except Exception:
-                    return None
-
-            _ttm_eps_gap_q = _rel_gap_for_quality(sys_ttm_eps, ai_ttm_eps, "min")
-            _pe_gap_q = _rel_gap_for_quality(pe_ratio, ai_pe, "min")
-            _fy2_jump_q = None
-            try:
-                if _fy1_eps_safe is not None and _fy2_eps_safe is not None and float(_fy1_eps_safe) > 0:
-                    _fy2_jump_q = float(_fy2_eps_safe) / float(_fy1_eps_safe)
-            except Exception:
-                _fy2_jump_q = None
-
-            _ttm_eps_quality_note = ""
-            if _ttm_eps_gap_q is not None and _ttm_eps_gap_q > 0.30:
-                _ttm_eps_quality_note = (
-                    f"TTM EPS 系統值與 AI 值差距過大（系統 {format_quality_value(sys_ttm_eps, 'num')} vs "
-                    f"AI {format_quality_value(ai_ttm_eps, 'num')}，差距 {_ttm_eps_gap_q*100:.1f}%）；"
-                    "歷史 P/E 與實際獲利支撐度可信度下降，循環股請分開看 TTM 與 FY1/FY2。"
-                )
-
-            _pe_quality_note = ""
-            if _pe_gap_q is not None and _pe_gap_q > 0.30:
-                _pe_quality_note = (
-                    f"P/E 口徑分歧過大（系統 {format_quality_value(pe_ratio, 'x')} vs "
-                    f"AI {format_quality_value(ai_pe, 'x')}，差距 {_pe_gap_q*100:.1f}%）；"
-                    "通常代表 TTM EPS 分母或資料期間不同，不可標示為交叉一致。"
-                )
-
-            _fy2_quality_note = "第17-C-9c-hotfix442：FY2 第二年預估估值用，不直接當買點"
-            if _fy2_jump_q is not None and _fy2_jump_q > 1.50:
-                _fy2_quality_note += (
-                    f"；FY2/FY1={_fy2_jump_q:.2f}x，屬高成長遠期預估，只能解釋市場先行定價，"
-                    "不可直接作為買點，需等待營收、毛利率與 EPS 逐季落地。"
-                )
-
             quality_rows = [
                 {"field": "現價", "system_source": "Yahoo/yfinance 即時或延遲行情", "system_value": curr_p, "ai_source": "不使用AI", "ai_value": None, "adopted_value": curr_p, "adopted_source": "系統行情", "period": "即時/延遲", "fmt": "price"},
-                {"field": "P/E", "system_source": "yfinance；異常時 FinMind PER 備援", "system_value": pe_ratio, "ai_source": _ai_src("pe"), "ai_source_url": _ai_url("pe"), "ai_value": ai_pe, "adopted_value": eff_pe, "adopted_source": _adopt_src(pe_ratio, ai_pe), "period": ai_period_text if pe_ratio is None and ai_pe is not None else "系統最新可得", "fmt": "x", "notes": _pe_quality_note},
+                {"field": "P/E", "system_source": "yfinance；異常時 FinMind PER 備援", "system_value": pe_ratio, "ai_source": _ai_src("pe"), "ai_source_url": _ai_url("pe"), "ai_value": ai_pe, "adopted_value": eff_pe, "adopted_source": _adopt_src(pe_ratio, ai_pe), "period": ai_period_text if pe_ratio is None and ai_pe is not None else "系統最新可得", "fmt": "x"},
                 {"field": "Forward P/E", "system_source": "yfinance forwardPE 或 EPS 反推", "system_value": sys_forward_pe, "ai_source": _ai_src("forward_eps"), "ai_source_url": _ai_url("forward_eps"), "ai_value": ai_fpe, "adopted_value": eff_forward_pe, "adopted_source": _adopt_src(sys_forward_pe, ai_fpe), "period": ai_period_text if sys_forward_pe is None and ai_fpe is not None else "系統/反推", "fmt": "x"},
                 {"field": "PEG", "system_source": "Forward P/E ÷ 預估成長率", "system_value": orig_peg, "ai_source": _ai_src("yoy"), "ai_source_url": _ai_url("yoy"), "ai_value": ai_peg, "adopted_value": None if eff_peg == -999 else eff_peg, "adopted_source": "系統優先/AI備援", "period": "推估值", "fmt": "x", "notes": "成長率為負時 PEG 無意義" if eff_peg == -999 else ""},
                 {"field": "P/B", "system_source": "yfinance；異常時 FinMind PBR 備援", "system_value": pb_ratio, "ai_source": _ai_src("pb"), "ai_source_url": _ai_url("pb"), "ai_value": ai_pb, "adopted_value": eff_pb, "adopted_source": _adopt_src(pb_ratio, ai_pb), "period": ai_period_text if pb_ratio is None and ai_pb is not None else "系統最新可得", "fmt": "x"},
                 {"field": "最新單季 EPS", "system_source": "系統未穩定提供，避免用 TTM 冒充", "system_value": sys_latest_quarter_eps, "ai_source": _ai_src("latest_quarter_eps"), "ai_source_url": _ai_url("latest_quarter_eps"), "ai_value": ai_latest_quarter_eps, "adopted_value": ai_latest_quarter_eps, "adopted_source": "AI補齊" if ai_latest_quarter_eps is not None else "無可用資料", "period": ai_period_text, "fmt": "num", "notes": "判斷最新獲利動能"},
-                {"field": "TTM EPS", "system_source": "yfinance trailingEps；必要時用 現價÷P/E 反推", "system_value": sys_ttm_eps, "ai_source": _ai_src("ttm_eps"), "ai_source_url": _ai_url("ttm_eps"), "ai_value": ai_ttm_eps, "adopted_value": eff_t_eps, "adopted_source": _adopt_src(sys_ttm_eps, ai_ttm_eps), "period": ai_period_text if sys_ttm_eps is None and ai_ttm_eps is not None else "系統/反推", "fmt": "num", "notes": ("用於歷史 P/E；" + _ttm_eps_quality_note) if _ttm_eps_quality_note else "用於歷史 P/E"},
+                {"field": "TTM EPS", "system_source": "yfinance trailingEps；必要時用 現價÷P/E 反推", "system_value": sys_ttm_eps, "ai_source": _ai_src("ttm_eps"), "ai_source_url": _ai_url("ttm_eps"), "ai_value": ai_ttm_eps, "adopted_value": eff_t_eps, "adopted_source": _adopt_src(sys_ttm_eps, ai_ttm_eps), "period": ai_period_text if sys_ttm_eps is None and ai_ttm_eps is not None else "系統/反推", "fmt": "num", "notes": "用於歷史 P/E"},
                 {"field": "完整年度 EPS", "system_source": "未穩定提供，需 AI/年報補齊", "system_value": sys_fiscal_year_eps, "ai_source": _ai_src("fiscal_year_eps"), "ai_source_url": _ai_url("fiscal_year_eps"), "ai_value": ai_fiscal_year_eps, "adopted_value": ai_fiscal_year_eps, "adopted_source": "AI補齊" if ai_fiscal_year_eps is not None else "無可用資料", "period": ai_period_text, "fmt": "num", "notes": "年度基準，不與 TTM 混用"},
                 {"field": "Forward EPS－系統", "system_source": "yfinance forwardEps；必要時由 TTM EPS×成長率推估", "system_value": sys_forward_eps_system, "ai_source": "不使用AI", "ai_source_url": "", "ai_value": None, "adopted_value": sys_forward_eps_system, "adopted_source": "系統/推估" if sys_forward_eps_system is not None else "無可用資料", "period": "系統/推估", "fmt": "num"},
                 {"field": "Forward EPS－AI/共識", "system_source": "不使用系統", "system_value": None, "ai_source": _ai_src("forward_eps_consensus") if ai_forward_eps_consensus is not None else _ai_src("forward_eps_ai"), "ai_source_url": _ai_url("forward_eps_consensus") if ai_forward_eps_consensus is not None else _ai_url("forward_eps_ai"), "ai_value": ai_f_eps_calc, "adopted_value": ai_f_eps_calc, "adopted_source": "法人共識/FY1" if ai_forward_eps_fy1 is not None or ai_forward_eps_consensus is not None else ("AI補齊" if ai_forward_eps_ai is not None else "無可用資料"), "period": ai_period_text, "fmt": "num", "notes": "與系統 Forward EPS 分開比較"},
                 {"field": "Forward EPS－FY1", "system_source": "不使用系統", "system_value": None, "ai_source": _safe_ai_src("forward_eps_fy1"), "ai_source_url": _safe_ai_url("forward_eps_fy1"), "ai_value": _fy1_eps_safe, "adopted_value": _fy1_eps_safe, "adopted_source": "AI/法人FY1" if _fy1_eps_safe is not None else "無可用資料", "period": _fy_year_display_safe(_fy1_year_safe), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY1 一年預估估值用"},
-                {"field": "Forward EPS－FY2", "system_source": "不使用系統", "system_value": None, "ai_source": _safe_ai_src("forward_eps_fy2"), "ai_source_url": _safe_ai_url("forward_eps_fy2"), "ai_value": _fy2_eps_safe, "adopted_value": _fy2_eps_safe, "adopted_source": "AI/法人FY2" if _fy2_eps_safe is not None else "無可用資料", "period": _fy_year_display_safe(_fy2_year_safe), "fmt": "num", "notes": _fy2_quality_note},
+                {"field": "Forward EPS－FY2", "system_source": "不使用系統", "system_value": None, "ai_source": _safe_ai_src("forward_eps_fy2"), "ai_source_url": _safe_ai_url("forward_eps_fy2"), "ai_value": _fy2_eps_safe, "adopted_value": _fy2_eps_safe, "adopted_source": "AI/法人FY2" if _fy2_eps_safe is not None else "無可用資料", "period": _fy_year_display_safe(_fy2_year_safe), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY2 第二年預估估值用，不直接當買點"},
                 {"field": "Forward EPS－FY3", "system_source": "不使用系統", "system_value": None, "ai_source": _safe_ai_src("forward_eps_fy3"), "ai_source_url": _safe_ai_url("forward_eps_fy3"), "ai_value": _fy3_eps_safe, "adopted_value": _fy3_eps_safe, "adopted_source": "AI/法人FY3" if _fy3_eps_safe is not None else "無可用資料", "period": _fy_year_display_safe(_fy3_year_safe), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY3 第三年預估/高風險情境，不作買點"},
                 {"field": "營收 YoY", "system_source": "FinMind 月營收優先；yfinance 備援", "system_value": rev_growth, "ai_source": _ai_src("yoy"), "ai_source_url": _ai_url("yoy"), "ai_value": ai_yoy, "adopted_value": eff_rg, "adopted_source": _adopt_src(rev_growth, ai_yoy, "FinMind/yfinance", "AI補齊"), "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale, "notes": latest_rev_notice or ("月營收可能不是最新公告月份" if rev_is_stale else "")},
                 {"field": "營收 MoM", "system_source": "FinMind 月營收", "system_value": (latest_mom_val / 100.0) if latest_mom_val is not None else None, "ai_source": _ai_src("mom"), "ai_source_url": _ai_url("mom"), "ai_value": ai_mom, "adopted_value": (latest_mom_val / 100.0) if latest_mom_val is not None else ai_mom, "adopted_source": "FinMind 月營收/AI覆蓋", "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale},
@@ -1128,12 +1096,6 @@ def render_main_page(sidebar_state=None):
                 ai_de=ai_de,
                 system_pb=pb_ratio,
                 ai_pb=ai_pb,
-                system_ttm_eps=sys_ttm_eps,
-                ai_ttm_eps=ai_ttm_eps,
-                system_pe=pe_ratio,
-                ai_pe=ai_pe,
-                fy1_eps=ai_forward_eps_fy1,
-                fy2_eps=ai_forward_eps_fy2,
                 stock_id=curr_id,
                 stock_name=c_name,
             )
@@ -2796,6 +2758,55 @@ def render_main_page(sidebar_state=None):
                         pass
                     return "NULL"
 
+            # 第 17-C-10：技術面摘要第一階段 + 第三階段提示詞選配。
+            try:
+                technical_summary_pack = build_technical_summary(hist, timeframe="日線", lookback=120)
+            except Exception as e:
+                try:
+                    log_exception("TechnicalSummary", "ui_main_build_technical_summary", e)
+                except Exception:
+                    pass
+                technical_summary_pack = {"available": False, "summary_text": "NULL", "error": str(e)[:160]}
+
+            def _prompt_technical_summary():
+                """打包提示詞用技術面摘要。技術面只輔助進出場節奏，不覆蓋基本面與估值。"""
+                try:
+                    if isinstance(technical_summary_pack, dict) and technical_summary_pack.get("available"):
+                        return _nullize_text(technical_summary_pack.get("summary_text"))
+                    err = technical_summary_pack.get("error") if isinstance(technical_summary_pack, dict) else "未產生"
+                    return f"- 技術面摘要: NULL（{_nullize_text(err)}）"
+                except Exception:
+                    return "- 技術面摘要: NULL"
+
+            def _prompt_technical_chart_guide():
+                """第二階段：若使用者另外附上技術線圖，外部 AI 應如何輔助判讀。"""
+                return """若另外附上本系統輸出的技術線圖（含 K 線、5/10/20/60MA、成交量、外資/投信/自營商、KD），請只用它輔助判斷以下 10 點：
+1. 是否沿 5MA / 10MA 強勢上攻。
+2. 是否有高檔賣壓區（前高、整數關卡、爆量上影線、量增不漲）。
+3. 是否有明顯支撐平台（5MA / 10MA / 20MA / 60MA / 前波平台）。
+4. 是洗盤後續攻，還是出貨轉弱。
+5. 是否短線乖離過大，不宜追高。
+6. 是否適合等回測 5MA / 10MA / 20MA。
+7. 量價結構是否健康（價漲量增、拉回量縮、爆量換手）。
+8. 法人籌碼是否配合線型。
+9. 關鍵停損 / 減碼位置在哪裡。
+10. 技術面是否支持系統買進結論。
+重要限制：技術線圖只能輔助進出場節奏、支撐壓力、追價風險、停損停利與洗盤/出貨判斷；不可覆蓋月營收公告月份、EPS 口徑、資料品質、Dynamic Cap、可操作估值區間與最終操作燈號。"""
+
+            def _build_technical_prompt_addon(mode, prompt_kind="buy"):
+                """依 UI 選項產生提示詞附加區塊。"""
+                try:
+                    if mode == "不加入技術面":
+                        return ""
+                    summary_title = "【15. 技術面與進出場節奏（日線摘要，選配）】" if prompt_kind == "buy" else "【20. 技術面與進出場節奏（日線摘要，選配）】"
+                    chart_title = "【16. 技術線圖輔助判讀重點（選配；需另附技術圖）】" if prompt_kind == "buy" else "【21. 技術線圖輔助判讀重點（選配；需另附技術圖）】"
+                    addon = f"\n\n{summary_title}\n{_prompt_technical_summary()}"
+                    if mode == "加入技術面摘要 + 技術線圖輔助規則":
+                        addon += f"\n\n{chart_title}\n{_prompt_technical_chart_guide()}"
+                    return addon
+                except Exception:
+                    return ""
+
             def _prompt_panel_sync_audit():
                 """提示詞與畫面面板同步自檢。"""
                 try:
@@ -2812,7 +2823,9 @@ def render_main_page(sidebar_state=None):
                     lines = []
                     for name, ok in checks:
                         lines.append(f"- {name}: {'已同步' if ok else '可能缺值/需人工確認'}")
-                    lines.append("- 技術線圖/KD/均線: 目前位於提示詞區塊之後才計算，未完整打包；若外部 AI 需做短線進出，請人工搭配技術線圖判斷。")
+                    lines.append(f"- 技術面摘要（日線）: {'已同步' if isinstance(technical_summary_pack, dict) and technical_summary_pack.get('available') else '可能缺值/需人工確認'}；可依提示詞選項加入或不加入。")
+                    lines.append("- 技術線圖輸出（第二階段）: 圖表工具列可下載 PNG；若另附圖，外部 AI 應依 10 點規則輔助判讀。")
+                    lines.append("- 技術線圖輔助規則: 已同步；技術面不可覆蓋基本面、資料品質、Dynamic Cap 與最終燈號。")
                     lines.append("- 產業同業PK/估值河流圖: 屬互動視覺輔助，研究完整版以產業模型、Dynamic Cap、估值區間摘要為主，未塞完整圖表資料。")
                     return "\n".join(lines)
                 except Exception:
@@ -3209,8 +3222,20 @@ def render_main_page(sidebar_state=None):
                     horizontal=True,
                     key=f"prompt_pack_mode_{curr_id}",
                 )
-                selected_prompt_for_copy = buy_decision_prompt_for_copy if prompt_mode.startswith("買進決策版") else research_prompt_for_copy
-                st.caption("買進決策版只保留會影響是否買進的採用值、系統/AI差異、估值層級、產業模型、Dynamic Cap 與燈號；研究完整版保留較完整資料品質與來源摘要。")
+                technical_pack_mode = st.radio(
+                    "技術面打包選項",
+                    ["不加入技術面", "加入技術面摘要", "加入技術面摘要 + 技術線圖輔助規則"],
+                    index=1,
+                    horizontal=True,
+                    key=f"technical_pack_mode_{curr_id}",
+                )
+                base_prompt_for_copy = buy_decision_prompt_for_copy if prompt_mode.startswith("買進決策版") else research_prompt_for_copy
+                selected_prompt_for_copy = base_prompt_for_copy + _build_technical_prompt_addon(
+                    technical_pack_mode,
+                    "buy" if prompt_mode.startswith("買進決策版") else "research",
+                )
+                st.caption("買進決策版已精簡為買進安全邊際判斷：保留採用值、分歧、估值層級、產業模型、Dynamic Cap、燈號與關鍵來源；研究完整版保留模型稽核、同步自檢與模型庫回饋。")
+                st.caption("技術面打包為選配：平常建議加入技術面摘要；若要判斷洗盤、出貨、賣壓、支撐與沿 5MA/10MA 走勢，可選『技術面摘要 + 技術線圖輔助規則』並另外附上技術圖。")
 
                 # 用 json.dumps 包裝提示詞，避免換行、引號或特殊符號造成 JavaScript 失效。
                 safe_prompt_js = json.dumps(selected_prompt_for_copy, ensure_ascii=False)
@@ -3424,6 +3449,13 @@ def render_main_page(sidebar_state=None):
             # 🚀 專業技術線圖與 KD 指標
             # ==========================================
             st.markdown("### 🤖 專業技術線圖與量化型態分析")
+            if isinstance(locals().get('technical_summary_pack'), dict) and technical_summary_pack.get('available'):
+                with st.expander("🧾 技術面摘要（日線，可選擇打包提示詞）", expanded=False):
+                    st.markdown("<div style='background:#1e1e1e; border:1px solid #333; border-radius:8px; padding:12px; line-height:1.75; color:#eee;'>" + "<br>".join([x for x in str(technical_summary_pack.get('summary_text', '')).split('\\n') if x.strip()]) + "</div>", unsafe_allow_html=True)
+                    st.caption("技術面只輔助進出場節奏、追價風險、支撐壓力與停損停利，不覆蓋基本面、估值、Dynamic Cap 與系統燈號。")
+            else:
+                st.caption("技術面摘要尚未產生；若 K 線資料不足，請以技術線圖人工輔助判斷。")
+
         
             chart_tf = st.radio("切換 K 線週期：", ["60分線", "日線", "週線", "月線"], index=1, horizontal=True)
         
