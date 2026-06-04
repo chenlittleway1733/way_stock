@@ -2101,3 +2101,195 @@ def build_forward_eps_tiered_valuation_report(
     }
     return {"summary": summary, "report": report}
 
+
+# ==========================================
+# 17-C-9e：技術面摘要（提示詞打包用）
+# ==========================================
+def build_technical_summary(hist, lookback=120):
+    """
+    根據 K 線資料產生日線技術面摘要，供提示詞打包使用。
+    不依賴 AI 看圖；只做進出場節奏輔助，不覆蓋基本面與估值。
+    """
+    try:
+        if hist is None or len(hist) == 0:
+            return {"available": False, "error": "hist 無資料", "summary_text": "- 技術面摘要: NULL（hist 無資料）"}
+        df = hist.copy()
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col not in df.columns:
+                df[col] = 0.0
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["Close"])
+        if len(df) < 20:
+            return {"available": False, "error": "K 線資料不足", "summary_text": "- 技術面摘要: NULL（K 線資料不足）"}
+
+        df["MA5"] = df["Close"].rolling(5).mean()
+        df["MA10"] = df["Close"].rolling(10).mean()
+        df["MA20"] = df["Close"].rolling(20).mean()
+        df["MA60"] = df["Close"].rolling(60).mean()
+        df["Vol_MA5"] = df["Volume"].rolling(5).mean()
+        df["Vol_MA20"] = df["Volume"].rolling(20).mean()
+
+        h9 = df["High"].rolling(9).max()
+        l9 = df["Low"].rolling(9).min()
+        denom = (h9 - l9).replace(0, math.nan)
+        rsv = ((df["Close"] - l9) / denom * 100).fillna(50)
+        k_vals, d_vals = [50.0], [50.0]
+        for v in rsv:
+            k_vals.append(k_vals[-1] * (2 / 3) + float(v) * (1 / 3))
+            d_vals.append(d_vals[-1] * (2 / 3) + k_vals[-1] * (1 / 3))
+        df["K"] = k_vals[1:]
+        df["D"] = d_vals[1:]
+
+        sub = df.tail(int(lookback)).copy()
+        last = sub.iloc[-1]
+        close = s_float(last.get("Close"))
+        ma5 = s_float(last.get("MA5"))
+        ma10 = s_float(last.get("MA10"))
+        ma20 = s_float(last.get("MA20"))
+        ma60 = s_float(last.get("MA60"))
+        k = s_float(last.get("K"))
+        d = s_float(last.get("D"))
+        vol = s_float(last.get("Volume"), 0)
+        vol_ma5 = s_float(last.get("Vol_MA5"), 0)
+        vol_ma20 = s_float(last.get("Vol_MA20"), 0)
+
+        def fmt_price(x):
+            return "NULL" if x is None else f"{x:.2f}"
+        def pct(x):
+            return "NULL" if x is None else f"{x:.2f}%"
+
+        above = []
+        below = []
+        for name, ma in [("5MA", ma5), ("10MA", ma10), ("20MA", ma20), ("60MA", ma60)]:
+            if close is not None and ma is not None:
+                (above if close >= ma else below).append(name)
+
+        if all(v is not None for v in [close, ma5, ma10, ma20, ma60]) and close > ma5 > ma10 > ma20 > ma60:
+            ma_structure = "強多頭排列（收盤價 > 5MA > 10MA > 20MA > 60MA）"
+        elif all(v is not None for v in [close, ma5, ma10, ma20, ma60]) and close < ma5 < ma10 < ma20 < ma60:
+            ma_structure = "空頭排列（收盤價 < 5MA < 10MA < 20MA < 60MA）"
+        else:
+            ma_structure = "均線糾結 / 趨勢需觀察"
+
+        ma5_count = 0
+        if "MA5" in sub.columns:
+            tmp = sub.tail(10)
+            ma5_count = int((tmp["Close"] >= tmp["MA5"]).sum()) if len(tmp) else 0
+        if ma5_count >= 8:
+            trend_line = f"近10日有 {ma5_count} 日收在 5MA 之上，屬沿 5MA 強勢上攻"
+        elif ma5_count >= 6:
+            trend_line = f"近10日有 {ma5_count} 日收在 5MA 之上，屬偏多但強度需觀察"
+        else:
+            trend_line = f"近10日僅 {ma5_count} 日收在 5MA 之上，沿線攻勢不足"
+
+        dev5 = ((close / ma5 - 1) * 100) if close is not None and ma5 not in (None, 0) else None
+        dev20 = ((close / ma20 - 1) * 100) if close is not None and ma20 not in (None, 0) else None
+        if dev20 is not None and dev20 > 15:
+            chase_risk = "短線乖離過大，追價風險高"
+        elif dev20 is not None and dev20 > 8:
+            chase_risk = "短線偏熱，宜等拉回"
+        elif dev20 is not None and dev20 < -8:
+            chase_risk = "短線偏弱，需等止穩"
+        else:
+            chase_risk = "乖離尚可，仍需搭配量價與支撐確認"
+
+        kd_note = "NULL"
+        if k is not None and d is not None:
+            kd_zone = "KD 高檔區" if k >= 80 else ("KD 低檔區" if k <= 20 else "KD 中性區")
+            kd_cross = "KD 偏多 / K 值在 D 值上方" if k >= d else "KD 偏弱 / K 值在 D 值下方"
+            kd_note = f"K={k:.1f}；D={d:.1f}；{kd_zone}；{kd_cross}"
+
+        vol_ratio = (vol / vol_ma20) if vol_ma20 not in (None, 0) else None
+        vol5_ratio = (vol_ma5 / vol_ma20) if vol_ma20 not in (None, 0) else None
+        if vol_ratio is None:
+            vol_note = "量能資料不足"
+        elif vol_ratio >= 2:
+            vol_note = f"爆量（約 {vol_ratio:.2f} 倍 20 日均量）"
+        elif vol_ratio >= 1.2:
+            vol_note = f"量能放大（約 {vol_ratio:.2f} 倍 20 日均量）"
+        else:
+            vol_note = f"量縮（約 {vol_ratio:.2f} 倍 20 日均量）"
+        if vol5_ratio is not None:
+            vol_note += f"；5日均量/20日均量={vol5_ratio:.2f}x"
+
+        recent20 = sub.tail(20)
+        recent60 = sub.tail(60)
+        high20 = s_float(recent20["High"].max()) if not recent20.empty else None
+        high60 = s_float(recent60["High"].max()) if not recent60.empty else None
+        low20 = s_float(recent20["Low"].min()) if not recent20.empty else None
+        supports = []
+        for name, ma in [("5MA", ma5), ("10MA", ma10), ("20MA", ma20), ("60MA", ma60)]:
+            if ma is not None and close is not None and ma <= close:
+                supports.append(f"{name} {ma:.2f}")
+        if low20 is not None:
+            supports.append(f"20日低點 {low20:.2f}")
+        pressure = []
+        if high20 is not None:
+            pressure.append(f"20日高點 {high20:.2f}")
+        if high60 is not None and (high20 is None or abs(high60 - high20) > 0.01):
+            pressure.append(f"60日高點 {high60:.2f}")
+
+        high_pressure = "未見明確高檔賣壓訊號"
+        try:
+            high_vol_day = recent20.loc[recent20["Volume"].idxmax()]
+            hv = s_float(high_vol_day.get("Volume"), 0)
+            hv_ma20 = s_float(high_vol_day.get("Vol_MA20"), 0)
+            if hv_ma20 and hv > hv_ma20 * 1.8 and close is not None and high20 is not None and close < high20 * 0.94:
+                high_pressure = "近期出現高量後未能突破，疑似上檔賣壓需留意"
+        except Exception:
+            pass
+
+        if close is not None and ma20 is not None and close > ma20 and dev20 is not None and dev20 > 15:
+            wash_note = "偏多整理 / 洗盤後續攻機率較高，但仍需量縮拉回與守均線確認"
+        elif close is not None and ma20 is not None and close < ma20:
+            wash_note = "跌破 20MA，偏轉弱，需觀察是否是假跌破或出貨轉弱"
+        else:
+            wash_note = "區間整理，洗盤或出貨需搭配量價與平台支撐確認"
+
+        if close is not None:
+            if ma5 is not None and ma10 is not None and ma20 is not None and close > ma5:
+                buy_rhythm = f"不宜追高，優先等回測 5MA {ma5:.2f} / 10MA {ma10:.2f}；若失守 10MA 再看 20MA {ma20:.2f}"
+            elif ma20 is not None:
+                buy_rhythm = f"等待站回或回測 20MA {ma20:.2f} 後再評估"
+            else:
+                buy_rhythm = "均線資料不足，需人工判斷買點"
+        else:
+            buy_rhythm = "價格資料不足"
+
+        if close is not None and dev20 is not None and dev20 > 15 and k is not None and k >= 80:
+            conclusion = "趨勢偏多但短線偏熱，買進安全邊際下降"
+        elif close is not None and ma20 is not None and close >= ma20:
+            conclusion = "趨勢偏多，適合等回測支撐確認後分批"
+        else:
+            conclusion = "技術面偏弱或盤整，宜降低追價並等待轉強"
+
+        lines = [
+            f"- 技術週期/資料範圍: 日線 / 近 {len(sub)} 根 K 線",
+            f"- 收盤價與均線: 收盤={fmt_price(close)}；5MA={fmt_price(ma5)}；10MA={fmt_price(ma10)}；20MA={fmt_price(ma20)}；60MA={fmt_price(ma60)}",
+            f"- 均線結構: {ma_structure}；站上 {', '.join(above) if above else '無主要均線'}；跌破 {', '.join(below) if below else '無主要均線'}",
+            f"- 沿線上攻: {trend_line}",
+            f"- 乖離與追價風險: 距 5MA={pct(dev5)}；距 20MA={pct(dev20)}；{chase_risk}",
+            f"- KD 狀態: {kd_note}",
+            f"- 量價結構: {vol_note}",
+            f"- 支撐平台: {', '.join(supports[:5]) if supports else 'NULL'}",
+            f"- 賣壓/壓力區: {', '.join(pressure) if pressure else 'NULL'}；{high_pressure}",
+            f"- 洗盤或出貨初判: {wash_note}",
+            f"- 回測買點節奏: {buy_rhythm}",
+            f"- 技術面結論: {conclusion}",
+            "- 使用限制: 技術面只輔助進出場節奏、追價風險、支撐壓力與停損停利，不可覆蓋月營收、EPS、資料品質、Dynamic Cap、可操作估值區間與系統最終燈號。",
+        ]
+        return {
+            "available": True,
+            "summary_text": "\n".join(lines),
+            "close": close,
+            "ma5": ma5,
+            "ma10": ma10,
+            "ma20": ma20,
+            "ma60": ma60,
+            "k": k,
+            "d": d,
+            "dev20": dev20,
+            "conclusion": conclusion,
+        }
+    except Exception as e:
+        return {"available": False, "error": str(e)[:160], "summary_text": f"- 技術面摘要: NULL（{str(e)[:120]}）"}

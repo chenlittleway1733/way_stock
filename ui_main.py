@@ -82,7 +82,31 @@ def render_main_page(sidebar_state=None):
             with cols[idx]: st.button(f"{name}\n({code})", on_click=reset_all_states_on_stock_change, args=(code,), key=f"w_{code}", use_container_width=True)
         st.markdown("---")
 
-    curr_id = st.session_state.selected_stock
+    curr_id = str(st.session_state.get('selected_stock', '') or '').strip()
+    if not curr_id:
+        st.markdown(
+            """
+            <div style="
+                margin-top: 2.5rem;
+                padding: 1.4rem 1.6rem;
+                border: 1px solid rgba(120,120,120,0.25);
+                border-radius: 14px;
+                background: rgba(120,120,120,0.06);
+                max-width: 820px;
+            ">
+                <div style="font-size:1.35rem; font-weight:800; margin-bottom:0.55rem;">
+                    🔎 請先輸入股票代號或使用左側下拉選股查詢
+                </div>
+                <div style="font-size:1.02rem; line-height:1.8; color:rgba(120,120,120,0.95);">
+                    可在左側「輸入台股代號」欄位輸入，例如 <b>2330</b>、<b>3037</b>、<b>2454</b>，
+                    輸入後請按 <b style="color:#ff8c00;">Enter</b> 確認送出；也可以從「快速選股名單」下拉選擇股票。
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
     if curr_id:
         # 🚀 絕對防呆宣告：避免因任何例外導致變數未定義而觸發 NameError
         ctx_pe, ctx_fpe, ctx_pb, ctx_peg = "N/A", "N/A", "N/A", "N/A"
@@ -2798,6 +2822,55 @@ def render_main_page(sidebar_state=None):
                         pass
                     return "NULL"
 
+            try:
+                technical_summary_pack = build_technical_summary(hist)
+            except Exception as e:
+                try:
+                    log_exception("PromptPack", "build_technical_summary", e)
+                except Exception:
+                    pass
+                technical_summary_pack = {"available": False, "error": str(e)[:160], "summary_text": "- 技術面摘要: NULL"}
+
+            def _prompt_technical_summary():
+                """打包提示詞用技術面摘要。"""
+                try:
+                    if isinstance(technical_summary_pack, dict) and technical_summary_pack.get("available"):
+                        return _nullize_text(technical_summary_pack.get("summary_text"))
+                    err = technical_summary_pack.get("error") if isinstance(technical_summary_pack, dict) else "未產生"
+                    return f"- 技術面摘要: NULL（{_nullize_text(err)}）"
+                except Exception:
+                    return "- 技術面摘要: NULL"
+
+            def _prompt_technical_chart_guide():
+                """第二階段：若使用者另外附上技術線圖，外部 AI 應如何輔助判讀。"""
+                return """若另外附上本系統輸出的技術線圖（含 K 線、5/10/20/60MA、成交量、外資/投信/自營商、KD），請只用它輔助判斷以下 10 點：
+1. 是否沿 5MA / 10MA 強勢上攻。
+2. 是否有高檔賣壓區（前高、整數關卡、爆量上影線、量增不漲）。
+3. 是否有明顯支撐平台（5MA / 10MA / 20MA / 60MA / 前波平台）。
+4. 是洗盤後續攻，還是出貨轉弱。
+5. 是否短線乖離過大，不宜追高。
+6. 是否適合等回測 5MA / 10MA / 20MA。
+7. 量價結構是否健康（價漲量增、拉回量縮、爆量換手）。
+8. 法人籌碼是否配合線型。
+9. 關鍵停損 / 減碼位置在哪裡。
+10. 技術面是否支持系統買進結論。
+重要限制：技術線圖只能輔助進出場節奏、支撐壓力、追價風險、停損停利與洗盤/出貨判斷；不可覆蓋月營收公告月份、EPS 口徑、資料品質、Dynamic Cap、可操作估值區間與最終操作燈號。"""
+
+            def _technical_prompt_suffix(mode, target="buy"):
+                """依提示詞技術面打包選項，動態補入技術面區塊。"""
+                try:
+                    m = str(mode or "")
+                    if m.startswith("不加入"):
+                        return ""
+                    base_no = "15" if target == "buy" else "20"
+                    chart_no = "16" if target == "buy" else "21"
+                    parts = [f"\n【{base_no}. 技術面與進出場節奏（日線摘要，選配）】\n{_prompt_technical_summary()}"]
+                    if "技術線圖" in m:
+                        parts.append(f"\n【{chart_no}. 技術線圖輔助判讀重點（選配；需另附技術圖）】\n{_prompt_technical_chart_guide()}")
+                    return "\n".join(parts)
+                except Exception:
+                    return ""
+
             def _prompt_panel_sync_audit():
                 """提示詞與畫面面板同步自檢。"""
                 try:
@@ -2814,7 +2887,9 @@ def render_main_page(sidebar_state=None):
                     lines = []
                     for name, ok in checks:
                         lines.append(f"- {name}: {'已同步' if ok else '可能缺值/需人工確認'}")
-                    lines.append("- 技術線圖/KD/均線: 目前位於提示詞區塊之後才計算，未完整打包；若外部 AI 需做短線進出，請人工搭配技術線圖判斷。")
+                    lines.append(f"- 技術面摘要（日線）: {'已同步' if isinstance(technical_summary_pack, dict) and technical_summary_pack.get('available') else '可能缺值/需人工確認'}；可依提示詞選項加入或不加入。")
+                    lines.append("- 技術線圖輸出（第二階段）: 圖表工具列可下載 PNG；若另附圖，外部 AI 應依 10 點規則輔助判讀。")
+                    lines.append("- 技術線圖輔助規則: 已同步；技術面不可覆蓋基本面、資料品質、Dynamic Cap 與最終燈號。")
                     lines.append("- 產業同業PK/估值河流圖: 屬互動視覺輔助，研究完整版以產業模型、Dynamic Cap、估值區間摘要為主，未塞完整圖表資料。")
                     return "\n".join(lines)
                 except Exception:
@@ -3184,6 +3259,7 @@ def render_main_page(sidebar_state=None):
 - 若資料品質不足或關鍵欄位異常，請明確說「暫不適合做買進判斷」。
 - 若同一欄位同時列出系統值與 AI 值，請說明採用哪一個，以及是否影響估值可信度。
 - 若觸發「模型落差風險提示」，請優先判斷落差是否會傷害買進安全邊際；但不要在買進決策版提出模型庫修正建議。
+- 若提示詞附有「技術面與進出場節奏」摘要或另附技術線圖，只可用來判斷追價風險、支撐壓力、回測買點、洗盤/出貨、停損停利與短線節奏，不可覆蓋月營收、EPS、資料品質、Dynamic Cap、可操作估值區間與最終燈號。
 
 請依序回答：
 1. [投資結論一句話]：可買 / 觀望 / 不建議 / 資料異常，並說明是否同意系統最終燈號。
@@ -3211,8 +3287,17 @@ def render_main_page(sidebar_state=None):
                     horizontal=True,
                     key=f"prompt_pack_mode_{curr_id}",
                 )
+                tech_pack_mode = st.radio(
+                    "技術面打包選項",
+                    ["不加入技術面", "加入技術面摘要", "加入技術面摘要 + 技術線圖輔助規則"],
+                    index=1,
+                    horizontal=True,
+                    key=f"technical_pack_mode_{curr_id}",
+                )
                 selected_prompt_for_copy = buy_decision_prompt_for_copy if prompt_mode.startswith("買進決策版") else research_prompt_for_copy
+                selected_prompt_for_copy += _technical_prompt_suffix(tech_pack_mode, target="buy" if prompt_mode.startswith("買進決策版") else "research")
                 st.caption("買進決策版只保留會影響是否買進的採用值、系統/AI差異、估值層級、產業模型、Dynamic Cap 與燈號；研究完整版保留較完整資料品質與來源摘要。")
+                st.caption("技術面為選配：摘要用於追價風險、支撐壓力與回測買點；若選擇技術線圖輔助規則，請另外附上系統匯出的技術圖。")
 
                 # 用 json.dumps 包裝提示詞，避免換行、引號或特殊符號造成 JavaScript 失效。
                 safe_prompt_js = json.dumps(selected_prompt_for_copy, ensure_ascii=False)
@@ -3532,6 +3617,13 @@ def render_main_page(sidebar_state=None):
                 <div style='margin-top:15px; padding-top:10px; border-top:1px dashed #444;'><span style='color:#aaa; font-size:0.9rem;'>💡 策略解析：</span><span style='color:#ffd700; font-weight:bold;'>{adv_text}</span></div>
             </div>
             """.replace('\n', ''), unsafe_allow_html=True)
+
+            try:
+                if isinstance(technical_summary_pack, dict) and technical_summary_pack.get("available"):
+                    with st.expander("🧾 技術面摘要（日線，已同步至打包提示詞選項）", expanded=False):
+                        st.text(_nullize_text(technical_summary_pack.get("summary_text")))
+            except Exception:
+                pass
         
             def get_ma_trend(ma_series):
                 if len(ma_series) < 2 or pd.isna(ma_series.iloc[-1]): return 0.0, "-", "#aaa"
@@ -3609,6 +3701,43 @@ def render_main_page(sidebar_state=None):
 
             fig_k.update_xaxes(rangebreaks=rb, tickformat=x_fmt, showgrid=True, gridcolor='#333', mirror=True, showline=True, linecolor='#555')
             fig_k.update_layout(height=750, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=10,b=10), template="plotly_dark", hovermode="x unified", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
-            st.plotly_chart(fig_k, use_container_width=True)
+            st.plotly_chart(
+                fig_k,
+                use_container_width=True,
+                config={
+                    "displaylogo": False,
+                    "modeBarButtonsToAdd": ["drawline", "eraseshape"],
+                    "toImageButtonOptions": {
+                        "format": "png",
+                        "filename": f"{curr_id}_{chart_tf}_technical_chart",
+                        "height": 900,
+                        "width": 1600,
+                        "scale": 2,
+                    },
+                },
+            )
+
+            chart_export_filename = f"{curr_id}_{chart_tf}_technical_chart"
+            try:
+                chart_html_data = fig_k.to_html(full_html=True, include_plotlyjs='cdn')
+            except Exception:
+                chart_html_data = ""
+            with st.expander("🖼️ 技術圖輸出（第二階段）", expanded=False):
+                st.caption("可用圖表右上工具列下載 PNG；或下載 HTML 後附給外部 AI，搭配提示詞中的技術線圖輔助規則判讀。")
+                if chart_html_data:
+                    st.download_button(
+                        "⬇️ 下載技術圖 HTML",
+                        data=chart_html_data,
+                        file_name=f"{chart_export_filename}.html",
+                        mime="text/html",
+                        use_container_width=True,
+                        key=f"download_tech_chart_html_{curr_id}_{chart_tf}",
+                    )
+                st.text_area(
+                    "附圖給外部 AI 時可一起貼上的技術圖說明",
+                    value=_prompt_technical_chart_guide(),
+                    height=220,
+                    key=f"tech_chart_attach_guide_{curr_id}_{chart_tf}",
+                )
         else:
             st.error(f"找不到代號 {curr_id} 的資料，請確認代號是否正確或重新整理。")
