@@ -26,6 +26,58 @@ from google.genai import types
 # 從 utils 引入需要的工具
 from utils import s_float, log_data_health, log_exception, validate_ai_financial_json
 
+# 2.2：Gemini response_schema 結構化輸出。
+# 百分比類欄位全部用 *_percent，直接填「百分比數字」：730.14% -> 730.14。
+# 系統內部再統一轉成 ratio，避免 Gemini/程式二次縮放造成 730% 變 7.30%。
+FINANCIAL_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "pe": {"type": "number", "nullable": True},
+        "latest_quarter_eps": {"type": "number", "nullable": True},
+        "ttm_eps": {"type": "number", "nullable": True},
+        "trailing_eps": {"type": "number", "nullable": True},
+        "fiscal_year_eps": {"type": "number", "nullable": True},
+        "forward_eps_system": {"type": "number", "nullable": True},
+        "forward_eps_ai": {"type": "number", "nullable": True},
+        "forward_eps_consensus": {"type": "number", "nullable": True},
+        "forward_eps": {"type": "number", "nullable": True},
+        "forward_eps_fy1": {"type": "number", "nullable": True},
+        "forward_eps_fy2": {"type": "number", "nullable": True},
+        "forward_eps_fy3": {"type": "number", "nullable": True},
+        "forward_eps_fy1_year": {"type": "integer", "nullable": True},
+        "forward_eps_fy2_year": {"type": "integer", "nullable": True},
+        "forward_eps_fy3_year": {"type": "integer", "nullable": True},
+        "forward_eps_fy_basis": {"type": "string", "nullable": True},
+        "forward_eps_fy_source_note": {"type": "string", "nullable": True},
+        "pb": {"type": "number", "nullable": True},
+        "gross_margin_percent": {"type": "number", "nullable": True},
+        "operating_margin_percent": {"type": "number", "nullable": True},
+        "roe_percent": {"type": "number", "nullable": True},
+        "debt_to_equity": {"type": "number", "nullable": True},
+        "monthly_revenue_yoy_percent": {"type": "number", "nullable": True},
+        "monthly_revenue_mom_percent": {"type": "number", "nullable": True},
+        "accumulated_revenue_yoy_percent": {"type": "number", "nullable": True},
+        "earnings_growth_yoy_percent": {"type": "number", "nullable": True},
+        "cagr_percent": {"type": "number", "nullable": True},
+        "dividend_yield_percent": {"type": "number", "nullable": True},
+        "target_price": {"type": "number", "nullable": True},
+        "target_price_high": {"type": "number", "nullable": True},
+        "target_price_avg": {"type": "number", "nullable": True},
+        "target_price_low": {"type": "number", "nullable": True},
+        "target_price_analyst_count": {"type": "integer", "nullable": True},
+        "target_price_rationale": {"type": "string", "nullable": True},
+        "data_period": {"type": "string", "nullable": True},
+        "revenue_month": {"type": "string", "nullable": True},
+        "free_cash_flow": {"type": "number", "nullable": True},
+        "current_ratio": {"type": "number", "nullable": True},
+        "shares_outstanding": {"type": "number", "nullable": True},
+        "revenue_source_quote": {"type": "string", "nullable": True},
+        "source_urls": {"type": "array", "items": {"type": "string"}, "nullable": True},
+        "industry_classification": {"type": "object", "nullable": True},
+        "_sources": {"type": "object", "nullable": True}
+    },
+}
+
 # ==========================================
 # 3. 外部 API 與模型模組
 # ==========================================
@@ -822,14 +874,8 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     10. 「法人預估未來 1~3 年獲利複合成長率 (CAGR)，若無則用最新營收 YoY 替代」
     11. 「國內外法人最新預估目標價 (Target Price)」
     12. 「負債權益比 (Debt-to-Equity Ratio)」
-    13. 「最新公告月份的單月營收年增率 / 月增率」：請優先回傳 percent 欄位，不要用小數比率。
-        - monthly_revenue_yoy_percent：最新公告月份單月營收 YoY，例：年增 730.14% 請填 730.14。
-        - monthly_revenue_mom_percent：最新公告月份單月營收 MoM，例：月增 8.55% 請填 8.55。
-        - accumulated_revenue_yoy_percent：累計營收 YoY，例：前5月累計年增 649.62% 請填 649.62。
-        - revenue_month：月營收公告月份，例如 2026/05。
-        - revenue_source_quote：摘錄原文關鍵句，例如「2026年5月合併營收276.70億元，年增730.14%，月增8.55%」。
-        - 若只找到累計營收年增率，不可填入 monthly_revenue_yoy_percent；請填 accumulated_revenue_yoy_percent，monthly_revenue_yoy_percent 填 null。
-    14. 「預估現金殖利率 (Dividend Yield)」：請用 dividend_yield_percent，例如殖利率 3.4% 請填 3.4，不要填 0.034。
+    13. 「最新單月營收月增率(MoM)」
+    14. 「預估現金殖利率 (Dividend Yield)」(例如：擬配發現金股利2元，最新股價900元，殖利率應為 0.0022)
     15. 「最新資料所屬年月或具體日期 (Data Period)」(請務必標示出你查到這些最新數據的具體發布日期或所屬時間，例如：2024年4月或2024/05/15)
     16. 「目標價統計分析師人數 (Target Price Analyst Count)」
     17. 「目標價核心理由摘要 (Target Price Rationale)」
@@ -859,20 +905,16 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     - trailing_eps 與 forward_eps 為向下相容 legacy 欄位，trailing_eps 可同 ttm_eps，forward_eps 可同 forward_eps_consensus 或 forward_eps_ai。
 
     必須嚴格回傳包含上述財務欄位的 JSON 格式。
-
-    【17-C-9e 全域數值單位硬性規則】
-    1. EPS、P/E、P/B、目標價、流動比率、股數、FCF：直接填數字，不可加單位。
-    2. 所有「百分比類欄位」一律優先使用 *_percent 欄位，且直接填「百分比數字」，不要轉成小數比率：
-       - 年增 730.14% -> monthly_revenue_yoy_percent = 730.14，不可填 7.3014、0.073014、0.073。
-       - 月增 8.55% -> monthly_revenue_mom_percent = 8.55，不可填 0.0855。
-       - 毛利率 67.90% -> gross_margin_percent = 67.90，不可填 0.679。
-       - ROE 17.95% -> roe_percent = 17.95，不可填 0.1795。
-       - 殖利率 3.4% -> dividend_yield_percent = 3.4，不可填 0.034。
-    3. 若同時保留 legacy 欄位（gross_margin、roe、yoy、mom、dividend_yield），可以同步填小數比率；但 *_percent 欄位是主要欄位。
-    4. 不確定單月 YoY / 累計 YoY 時，monthly_revenue_yoy_percent 請填 null，不可自行猜測。
-    5. 請務必在 revenue_source_quote 摘錄原文，使系統能人工檢查數值是否縮放錯位。
-
-    若查無資料，該欄位請填 null。請務必搜尋近期各大券商對該公司的最新目標價。
+    【2.2 結構化輸出與百分比欄位硬性規則】
+    - 本函式已啟用 Gemini response_schema；請只依 schema 欄位輸出 JSON，不要自行新增 legacy 百分比欄位。
+    - 所有百分比類欄位一律使用 *_percent 欄位，直接填「百分比數字」，不可填小數比率。
+      例：730.14% -> monthly_revenue_yoy_percent=730.14；8.55% -> monthly_revenue_mom_percent=8.55；67.90% -> gross_margin_percent=67.90；17.95% -> roe_percent=17.95；0.34% -> dividend_yield_percent=0.34。
+    - 不要輸出 yoy、mom、gross_margin、operating_margin、roe、dividend_yield 這些 legacy 百分比欄位；若 schema 未列出的欄位請省略。
+    - monthly_revenue_yoy_percent 只能填最新公告月份「單月營收 YoY」；若只找到累計 YoY，請填 accumulated_revenue_yoy_percent，不可混用。
+    - 若不確定是單月 YoY 或累計 YoY，monthly_revenue_yoy_percent 請填 null。
+    - 請盡量附 revenue_month 與 revenue_source_quote，例如「2026年5月合併營收276.70億元，年增730.14%，月增8.55%」。
+    數值請直接輸出數字。若查無資料，該欄位請填 null。
+    請務必搜尋近期各大券商對該公司的最新目標價。
 
     重要：除了 18 個財務欄位，請額外回傳「_sources」物件，逐欄標示每個數值的來源。
     _sources 內每個欄位必須包含：
@@ -884,19 +926,27 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
 
     注意：本函式只負責財報與估值校對，不要查詢 ETF 持股；ETF 持股由獨立按鈕 get_etf_holders_from_ai() 執行。
     JSON 格式範例：
-    {{"pe": 15.2, "latest_quarter_eps": 1.35, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin_percent": 25.5, "operating_margin_percent": 12.3, "roe_percent": 15.0, "monthly_revenue_yoy_percent": 35.0, "monthly_revenue_mom_percent": 1.5, "accumulated_revenue_yoy_percent": null, "revenue_month": "2026/05", "revenue_source_quote": "2026年5月合併營收xxx億元，年增35.0%，月增1.5%", "gross_margin": 0.255, "operating_margin": 0.123, "roe": 0.15, "yoy": 0.35, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "mom": 0.015, "dividend_yield_percent": 3.2, "dividend_yield": 0.032, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
+    {{"pe": 15.2, "latest_quarter_eps": 1.35, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin_percent": 25.5, "operating_margin_percent": 12.3, "roe_percent": 15.0, "monthly_revenue_yoy_percent": 35.0, "monthly_revenue_mom_percent": 1.5, "accumulated_revenue_yoy_percent": null, "earnings_growth_yoy_percent": null, "cagr_percent": null, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "dividend_yield_percent": 3.2, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
     絕對不要輸出 markdown 標記或其他文字。"""
 
-    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、最新公告月份單月營收 YoY/MoM、累計營收 YoY、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。百分比欄位請使用 *_percent 並直接填百分比數字，例如 730.14% 填 730.14，不要填 7.3014 或 0.073。請務必確認 EPS 對應年度、月營收公告月份、資料發布日期、來源與 revenue_source_quote；若只找到累計營收年增率，不可當成 monthly_revenue_yoy_percent。不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
+    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、最新公告月份單月營收 YoY / MoM、累計營收 YoY、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。請務必確認並標示出 EPS 對應年度、月營收公告月份、資料發布日期與來源！所有百分比欄位請依 response_schema 的 *_percent 欄位填百分比數字，例如 730.14% 填 730.14，不要填 7.3014 或 0.073014。不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
 
-    def _make_config(search_enabled=True):
+    def _make_config(search_enabled=True, schema_enabled=True):
         kwargs = {
             "system_instruction": system_prompt,
             "response_mime_type": "application/json",
         }
+        if schema_enabled:
+            kwargs["response_schema"] = FINANCIAL_RESPONSE_SCHEMA
         if search_enabled:
             kwargs["tools"] = [{"google_search": {}}]
-        return types.GenerateContentConfig(**kwargs)
+        try:
+            return types.GenerateContentConfig(**kwargs)
+        except TypeError:
+            # 部分 google-genai 版本若不支援 response_schema，退回 JSON mime，
+            # 但後端 validate_ai_financial_json 仍會執行 2.2 全域單位防呆。
+            kwargs.pop("response_schema", None)
+            return types.GenerateContentConfig(**kwargs)
 
     def _is_non_retryable_error(err_text):
         """授權/權限/模型不存在這類錯誤，短時間重試通常無效。"""
@@ -917,6 +967,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     text = None
     used_model = candidate_model
     used_search = True
+    used_response_schema = True
     fallback_reason = ""
     last_error = None
 
@@ -928,7 +979,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
             response = client.models.generate_content(
                 model=candidate_model,
                 contents=prompt_text,
-                config=_make_config(search_enabled=True)
+                config=_make_config(search_enabled=True, schema_enabled=used_response_schema)
             )
             text = response.text
             log_data_health("Gemini", True, 200)
@@ -938,12 +989,15 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
                 "search_enabled": True,
                 "delay_before_retry_sec": delay_sec,
                 "ok": True,
-                "reason": "Pro Only 同模型聯網重試成功" if idx > 1 else "Pro Only 付費版高階模型聯網成功"
+                "reason": ("Pro Only 同模型聯網重試成功" if idx > 1 else "Pro Only 付費版高階模型聯網成功") + ("；response_schema=on" if used_response_schema else "；response_schema=off/fallback")
             })
             break
         except Exception as e:
             err_msg = str(e)
             last_error = err_msg
+            if ("response_schema" in err_msg.lower() or "schema" in err_msg.lower()) and ("unsupported" in err_msg.lower() or "invalid" in err_msg.lower() or "400" in err_msg.lower()):
+                used_response_schema = False
+                fallback_reason = "Gemini response_schema 與目前模型/搜尋工具組合不相容，已退回 JSON mime；後端仍執行 2.2 單位防呆。"
             log_data_health("Gemini", False, f"ERR:{candidate_model}:search:try{idx}")
             attempts.append({
                 "attempt": idx,
@@ -997,6 +1051,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
                 parsed = _normalize_ai_source_metadata(parsed)
                 parsed["model_used"] = used_model
                 parsed["ai_search_enabled"] = bool(used_search)
+                parsed["response_schema_enabled"] = bool(used_response_schema)
                 parsed["fallback_reason"] = fallback_reason
                 parsed["attempts"] = attempts
                 parsed["retry_policy"] = "Pro Only：gemini-3.1-pro-preview + Google Search；最多 3 次；不降級。"
