@@ -363,14 +363,8 @@ def infer_quality_status(adopted_value, system_value=None, ai_value=None, is_sta
     if adopted_value is None:
         return "❌ 缺資料"
     if is_stale:
-        # 若是 AI 補齊但公告月份未取得，不能顯示為高可信 / 完全可用。
-        if any(k in note_text for k in ["公告月份未取得", "未取得 FinMind 月營收", "單月 / 累計", "需人工確認", "可信度：中"]):
-            return "⚠️ 中可信/需人工確認"
         return "⚠️ 可能過期"
-    medium_risk_keywords = ["公告月份未取得", "未取得 FinMind 月營收", "單月 / 累計", "需人工確認", "可信度：中"]
-    if any(k in note_text for k in medium_risk_keywords):
-        return "⚠️ 中可信/需人工確認"
-    high_risk_keywords = ["校驗失敗", "不合理", "已排除", "NULL", "過舊", "錯置", "幻覺", "分歧", "需人工確認"]
+    high_risk_keywords = ["校驗失敗", "不合理", "已排除", "NULL", "過舊", "錯置", "幻覺"]
     if any(k in note_text for k in high_risk_keywords):
         return "⚠️ 已校正/需留意"
     if system_value is not None and ai_value is not None:
@@ -403,6 +397,285 @@ def build_financial_quality_report(rows):
     return pd.DataFrame(table)
 
 
+
+
+# ==========================================
+# 1.2 技術面摘要模型（第 17-C-10 階段）
+# ==========================================
+def build_technical_summary(hist_df, timeframe="日線", lookback=120):
+    """依 K 線資料產生給畫面與提示詞共用的技術面摘要。
+
+    設計目的：
+    - 不讓外部 AI 只靠看圖猜均線、KD、乖離與量價。
+    - 技術面只輔助進出場節奏，不覆蓋基本面、估值、Dynamic Cap 與系統燈號。
+    - 第一階段僅使用 K 線資料；法人籌碼圖與圖片打包留待第二階段。
+    """
+    try:
+        if hist_df is None or getattr(hist_df, 'empty', True):
+            return {"available": False, "summary_text": "NULL", "error": "無 K 線資料，無法產生技術面摘要。"}
+
+        df = hist_df.copy()
+        for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+            if col not in df.columns:
+                df[col] = 0.0
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df.dropna(subset=['Close']).copy()
+        if df.empty:
+            return {"available": False, "summary_text": "NULL", "error": "Close 欄位無有效資料。"}
+
+        df['MA5'] = df['Close'].rolling(5).mean()
+        df['MA10'] = df['Close'].rolling(10).mean()
+        df['MA20'] = df['Close'].rolling(20).mean()
+        df['MA60'] = df['Close'].rolling(60).mean()
+        df['Vol_MA5'] = df['Volume'].rolling(5).mean()
+        df['Vol_MA20'] = df['Volume'].rolling(20).mean()
+
+        h9 = df['High'].rolling(9).max()
+        l9 = df['Low'].rolling(9).min()
+        denom = (h9 - l9).replace(0, 1e-9)
+        rsv = (df['Close'] - l9) / denom * 100
+        k_vals, d_vals = [50.0], [50.0]
+        for v in rsv.fillna(50):
+            k_vals.append(k_vals[-1] * (2/3) + float(v) * (1/3))
+            d_vals.append(d_vals[-1] * (2/3) + k_vals[-1] * (1/3))
+        df['K'] = k_vals[1:]
+        df['D'] = d_vals[1:]
+
+        plot = df.tail(int(lookback)).copy()
+        last = plot.iloc[-1]
+
+        def _num(x, default=None):
+            try:
+                if x is None or pd.isna(x):
+                    return default
+                return float(x)
+            except Exception:
+                return default
+
+        close = _num(last.get('Close'))
+        ma5 = _num(last.get('MA5'), close)
+        ma10 = _num(last.get('MA10'), close)
+        ma20 = _num(last.get('MA20'), close)
+        ma60 = _num(last.get('MA60'), ma20)
+        k = _num(last.get('K'), 50.0)
+        d = _num(last.get('D'), 50.0)
+        vol = _num(last.get('Volume'), 0.0)
+        vol_ma5 = _num(last.get('Vol_MA5'), vol)
+        vol_ma20 = _num(last.get('Vol_MA20'), vol_ma5)
+
+        def _fmt_price(v):
+            return "NULL" if v is None else f"{v:.2f}"
+        def _fmt_pct(v):
+            return "NULL" if v is None else f"{v:.2f}%"
+        def _gap(price, base):
+            if price is None or base is None or abs(base) < 1e-9:
+                return None
+            return (price / base - 1.0) * 100
+
+        ma_order = "均線資料不足"
+        if None not in [ma5, ma10, ma20, ma60]:
+            if close > ma5 > ma10 > ma20 > ma60:
+                ma_order = "強多頭排列（收盤價 > 5MA > 10MA > 20MA > 60MA）"
+            elif ma5 > ma10 > ma20 > ma60:
+                ma_order = "多頭排列（5MA > 10MA > 20MA > 60MA）"
+            elif close < ma5 < ma10 < ma20 < ma60:
+                ma_order = "強空頭排列（收盤價 < 5MA < 10MA < 20MA < 60MA）"
+            elif ma5 < ma10 < ma20 < ma60:
+                ma_order = "空頭排列（5MA < 10MA < 20MA < 60MA）"
+            else:
+                ma_order = "均線糾結 / 震盪整理"
+
+        above = []
+        below = []
+        for name, val in [('5MA', ma5), ('10MA', ma10), ('20MA', ma20), ('60MA', ma60)]:
+            if close is not None and val is not None:
+                (above if close >= val else below).append(name)
+        ma_position = f"站上 {', '.join(above) if above else '無主要均線'}；跌破 {', '.join(below) if below else '無主要均線'}"
+
+        ma20_gap = _gap(close, ma20)
+        ma5_gap = _gap(close, ma5)
+        if ma20_gap is None:
+            chase_risk = "乖離資料不足"
+        elif ma20_gap >= 15:
+            chase_risk = "短線乖離過大，追價風險高"
+        elif ma20_gap >= 8:
+            chase_risk = "短線偏熱，宜等拉回確認"
+        elif ma20_gap <= -8:
+            chase_risk = "明顯低於 20MA，需確認是否轉弱或反彈契機"
+        else:
+            chase_risk = "乖離尚可，仍需搭配量價與基本面"
+
+        if k >= 80 and d >= 80:
+            kd_status = "KD 高檔區"
+        elif k <= 20 and d <= 20:
+            kd_status = "KD 低檔區"
+        elif k > d:
+            kd_status = "KD 偏多 / K 值在 D 值上方"
+        elif k < d:
+            kd_status = "KD 偏弱 / K 值在 D 值下方"
+        else:
+            kd_status = "KD 中性"
+        if len(plot) >= 2:
+            prev = plot.iloc[-2]
+            pk = _num(prev.get('K'), k)
+            pdv = _num(prev.get('D'), d)
+            if pk is not None and pdv is not None:
+                if pk <= pdv and k > d:
+                    kd_status += "；近期黃金交叉"
+                elif pk >= pdv and k < d:
+                    kd_status += "；近期死亡交叉"
+
+        if vol_ma20 and vol_ma20 > 0:
+            vol_ratio = vol / vol_ma20 if vol is not None else None
+            vol_5_20 = vol_ma5 / vol_ma20 if vol_ma5 is not None else None
+        else:
+            vol_ratio = None
+            vol_5_20 = None
+        if vol_ratio is None:
+            volume_status = "量能資料不足"
+        elif vol_ratio >= 2:
+            volume_status = f"單日量能明顯放大（約 {vol_ratio:.2f} 倍 20 日均量）"
+        elif vol_ratio >= 1.3:
+            volume_status = f"量能偏強（約 {vol_ratio:.2f} 倍 20 日均量）"
+        elif vol_ratio <= 0.7:
+            volume_status = f"量縮（約 {vol_ratio:.2f} 倍 20 日均量）"
+        else:
+            volume_status = f"量能接近均量（約 {vol_ratio:.2f} 倍 20 日均量）"
+
+        recent20 = plot.tail(20)
+        recent60 = plot.tail(60)
+        recent_high20 = _num(recent20['High'].max(), close) if not recent20.empty else close
+        recent_low20 = _num(recent20['Low'].min(), close) if not recent20.empty else close
+        recent_high60 = _num(recent60['High'].max(), recent_high20) if not recent60.empty else recent_high20
+        recent_low60 = _num(recent60['Low'].min(), recent_low20) if not recent60.empty else recent_low20
+
+        # 支撐：優先看 5/10/20/60MA 與 20 日低點中低於現價且最接近者。
+        support_candidates = []
+        for label, val in [('5MA', ma5), ('10MA', ma10), ('20MA', ma20), ('60MA', ma60), ('20日低點', recent_low20), ('60日低點', recent_low60)]:
+            if close is not None and val is not None and val <= close:
+                support_candidates.append((abs(close - val), label, val))
+        support_candidates.sort(key=lambda x: x[0])
+        supports = support_candidates[:3]
+        support_text = "、".join([f"{label} {_fmt_price(val)}" for _, label, val in supports]) if supports else "未形成明確下檔支撐"
+
+        pressure_candidates = []
+        for label, val in [('20日高點', recent_high20), ('60日高點', recent_high60)]:
+            if close is not None and val is not None and val >= close:
+                pressure_candidates.append((abs(val - close), label, val))
+        pressure_candidates.sort(key=lambda x: x[0])
+        pressure_text = "、".join([f"{label} {_fmt_price(val)}" for _, label, val in pressure_candidates[:2]]) if pressure_candidates else "已接近或突破近期高點，需看量價續航"
+
+        # 沿線強勢：近 10 日有多少天守在 5MA/10MA 上方。
+        last10 = plot.tail(10).copy()
+        follow5 = None
+        follow10 = None
+        if len(last10) >= 5:
+            follow5 = int((last10['Close'] >= last10['MA5']).sum()) if 'MA5' in last10 else None
+            follow10 = int((last10['Close'] >= last10['MA10']).sum()) if 'MA10' in last10 else None
+        if follow5 is not None and follow10 is not None:
+            if follow5 >= 8:
+                line_walk = f"近10日有 {follow5} 日收在 5MA 之上，屬沿 5MA 強勢上攻"
+            elif follow10 >= 8:
+                line_walk = f"近10日有 {follow10} 日收在 10MA 之上，屬沿 10MA 墊高"
+            else:
+                line_walk = f"近10日站上 5MA/10MA 天數為 {follow5}/{follow10}，強勢延續性需觀察"
+        else:
+            line_walk = "沿線資料不足"
+
+        # 高檔賣壓 / 洗盤出貨初步判讀。
+        sell_pressure = "未見明確高檔賣壓訊號"
+        if close is not None and recent_high20 is not None and close >= recent_high20 * 0.97:
+            sell_pressure = "接近 20 日高點區，需觀察是否出現上影線、爆量不漲或攻高失敗"
+        if not recent20.empty and 'Volume' in recent20 and 'Vol_MA20' in recent20:
+            try:
+                max_vol_idx = recent20['Volume'].idxmax()
+                max_vol_day = recent20.loc[max_vol_idx]
+                mv = _num(max_vol_day.get('Volume'))
+                mv_ma = _num(max_vol_day.get('Vol_MA20'))
+                mv_high = _num(max_vol_day.get('High'))
+                mv_low = _num(max_vol_day.get('Low'))
+                if mv_ma and mv and mv > mv_ma * 2 and mv_high and recent_high20 and mv_high >= recent_high20 * 0.95 and close and mv_low and close < mv_low:
+                    sell_pressure = "近20日高檔爆量後跌破該日低點，疑似賣壓 / 換手失敗警訊"
+            except Exception:
+                pass
+
+        if close is not None and ma20 is not None:
+            if close > ma20 and ma_order.startswith("多頭") or ma_order.startswith("強多頭"):
+                wash_or_distribution = "偏多整理 / 洗盤後續攻機率較高，但仍需量縮拉回與守均線確認"
+            elif close < ma20 and ma5 is not None and ma5 < ma20:
+                wash_or_distribution = "跌破中線且短均轉弱，較偏出貨或轉弱，需等重新站回 20MA"
+            else:
+                wash_or_distribution = "盤整型態，洗盤或出貨仍需等待方向確認"
+        else:
+            wash_or_distribution = "資料不足，無法判斷洗盤或出貨"
+
+        if close is not None and ma5 is not None and ma10 is not None and ma20 is not None:
+            if ma20_gap is not None and ma20_gap >= 8:
+                pullback_plan = f"不宜追高，優先等回測 5MA {_fmt_price(ma5)} / 10MA {_fmt_price(ma10)}；若失守 10MA 再看 20MA {_fmt_price(ma20)}"
+            elif close >= ma20:
+                pullback_plan = f"可觀察 5MA {_fmt_price(ma5)} / 10MA {_fmt_price(ma10)} 是否守住；波段支撐看 20MA {_fmt_price(ma20)}"
+            else:
+                pullback_plan = f"尚未站穩 20MA {_fmt_price(ma20)}，不急於追買，等重新站回中線再評估"
+        else:
+            pullback_plan = "均線資料不足，暫不給回測買點"
+
+        if close is not None and ma20 is not None and close >= ma20 and (ma20_gap or 0) <= 8 and (k or 0) < 85:
+            technical_bias = "技術面中性偏多，可輔助分批，但仍需基本面與估值支持"
+        elif close is not None and ma20 is not None and close >= ma20 and (ma20_gap or 0) > 8:
+            technical_bias = "趨勢偏多但短線偏熱，買進安全邊際下降"
+        elif close is not None and ma20 is not None and close < ma20:
+            technical_bias = "技術面偏弱，宜等站回 20MA 或量縮止跌"
+        else:
+            technical_bias = "技術面資料不足"
+
+        lines = [
+            f"- 技術週期/資料範圍: {timeframe} / 近 {min(len(plot), int(lookback))} 根 K 線",
+            f"- 收盤價與均線: 收盤={_fmt_price(close)}；5MA={_fmt_price(ma5)}；10MA={_fmt_price(ma10)}；20MA={_fmt_price(ma20)}；60MA={_fmt_price(ma60)}",
+            f"- 均線結構: {ma_order}；{ma_position}",
+            f"- 沿線上攻: {line_walk}",
+            f"- 乖離與追價風險: 距 5MA={_fmt_pct(ma5_gap)}；距 20MA={_fmt_pct(ma20_gap)}；{chase_risk}",
+            f"- KD 狀態: K={k:.1f}；D={d:.1f}；{kd_status}",
+            f"- 量價結構: {volume_status}；5日均量/20日均量={('NULL' if vol_5_20 is None else f'{vol_5_20:.2f}x')}",
+            f"- 支撐平台: {support_text}",
+            f"- 賣壓/壓力區: {pressure_text}；{sell_pressure}",
+            f"- 洗盤或出貨初判: {wash_or_distribution}",
+            f"- 回測買點節奏: {pullback_plan}",
+            f"- 技術面結論: {technical_bias}",
+            "- 使用限制: 技術面只輔助進出場節奏、追價風險、支撐壓力與停損停利，不可覆蓋月營收、EPS、資料品質、Dynamic Cap、可操作估值區間與系統最終燈號。",
+        ]
+
+        return {
+            "available": True,
+            "timeframe": timeframe,
+            "close": close,
+            "ma5": ma5,
+            "ma10": ma10,
+            "ma20": ma20,
+            "ma60": ma60,
+            "k": k,
+            "d": d,
+            "ma_order": ma_order,
+            "ma_position": ma_position,
+            "ma5_gap_pct": ma5_gap,
+            "ma20_gap_pct": ma20_gap,
+            "volume_status": volume_status,
+            "support_text": support_text,
+            "pressure_text": pressure_text,
+            "line_walk": line_walk,
+            "sell_pressure": sell_pressure,
+            "wash_or_distribution": wash_or_distribution,
+            "pullback_plan": pullback_plan,
+            "technical_bias": technical_bias,
+            "summary_text": "\n".join(lines),
+        }
+    except Exception as e:
+        try:
+            log_exception("TechnicalSummary", "build_technical_summary", e)
+        except Exception:
+            pass
+        return {"available": False, "summary_text": "NULL", "error": str(e)[:160]}
+
+
 # ==========================================
 # 1.1 財務資料合理性校驗 / 欄位錯位防呆
 # ==========================================
@@ -416,28 +689,6 @@ def normalize_financial_ratio(val, default=None):
     # Yahoo / AI / 不同 API 有時會把百分比以 31.5 而非 0.315 回傳
     if abs(v) > 1.5 and abs(v) <= 100:
         return v / 100.0
-    return v
-
-
-def normalize_growth_ratio(val, default=None):
-    """
-    17-C-9d-hotfix：營收 YoY / 成長率專用正規化。
-
-    一般比率 normalize_financial_ratio 會把 7.3014 視為 7.3014% 並轉成 0.073014，
-    但 AI prompt 已規定「730.14% 應填 7.3014」。因此成長率需要獨立處理：
-    - 0.35 代表 35%
-    - 5.20 代表 520%
-    - 7.3014 代表 730.14%
-    - 35 或 730.14 這種百分比數字才除以 100
-    """
-    v = s_float(val, default)
-    if v is None:
-        return default
-    av = abs(v)
-    # 傳統百分比數字：35 = 35%，730.14 = 730.14%。
-    if av > 10:
-        return v / 100.0
-    # 0.35、5.20、7.3014 視為已經是小數倍率。
     return v
 
 
@@ -559,38 +810,6 @@ def build_revenue_month_notice(actual_month, today=None):
     }
 
 
-def detect_yoy_scale_mismatch(system_yoy, ai_yoy):
-    """
-    17-C-9d-hotfix：偵測 AI YoY 百分比縮放錯位。
-
-    system_yoy / ai_yoy 均應為小數格式：
-    - 717.33% = 7.1733
-    - 7.30% = 0.073
-
-    目的：避免新聞寫「年增 730.14%」時，AI 誤回 0.073 或 0.073014，
-    導致畫面顯示 7.30% / 7.3014%，進而污染買進決策版。
-    """
-    sys_v = s_float(system_yoy)
-    ai_v = s_float(ai_yoy)
-    if sys_v is None or ai_v is None:
-        return False
-
-    sys_abs = abs(sys_v)
-    ai_abs = abs(ai_v)
-
-    # 情境 1：系統月營收為極端高成長（>100%），AI 卻小於 20%，高度疑似二次縮放。
-    if sys_abs >= 1.0 and ai_abs <= 0.20 and abs(sys_abs - ai_abs) >= 0.50:
-        return True
-
-    # 情境 2：AI 剛好接近系統值 / 100，例如 7.17 被錯成 0.0717。
-    if sys_abs >= 1.0 and ai_abs > 0:
-        ratio = sys_abs / ai_abs
-        if 80 <= ratio <= 120:
-            return True
-
-    return False
-
-
 def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_rev_df=None, stock_id="", stock_name=""):
     """
     財務資料品質閘門：
@@ -607,28 +826,16 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
     warnings = []
     label = f"{stock_name} ({stock_id})" if stock_name and stock_id else (stock_name or stock_id or "目前標的")
 
-    # v1.24/2.1 欄位相容：
-    # monthly_revenue_yoy/monthly_revenue_mom 為最新公告月份單月營收；
-    # rev_growth/revenue_yoy/yoy 舊欄位只作相容，不可混用累計 YoY、獲利 YoY 或 CAGR。
-    if ai_norm.get("monthly_revenue_yoy") is None:
-        ai_norm["monthly_revenue_yoy"] = ai_norm.get("revenue_yoy") if ai_norm.get("revenue_yoy") is not None else ai_norm.get("rev_growth")
-    if ai_norm.get("monthly_revenue_mom") is None and ai_norm.get("revenue_mom") is not None:
-        ai_norm["monthly_revenue_mom"] = ai_norm.get("revenue_mom")
-    if ai_norm.get("revenue_yoy") is None and ai_norm.get("monthly_revenue_yoy") is not None:
-        ai_norm["revenue_yoy"] = ai_norm.get("monthly_revenue_yoy")
-    if ai_norm.get("rev_growth") is None and ai_norm.get("monthly_revenue_yoy") is not None:
-        ai_norm["rev_growth"] = ai_norm.get("monthly_revenue_yoy")
-    if ai_norm.get("revenue_mom") is None and ai_norm.get("monthly_revenue_mom") is not None:
-        ai_norm["revenue_mom"] = ai_norm.get("monthly_revenue_mom")
+    # v1.24 欄位相容：rev_growth/revenue_yoy、mom/revenue_mom 新舊欄位可互通。
+    if ai_norm.get("revenue_yoy") is None and ai_norm.get("rev_growth") is not None:
+        ai_norm["revenue_yoy"] = ai_norm.get("rev_growth")
+    if ai_norm.get("rev_growth") is None and ai_norm.get("revenue_yoy") is not None:
+        ai_norm["rev_growth"] = ai_norm.get("revenue_yoy")
 
     # 統一百分比欄位尺度；D/E 需獨立正規化，避免 2.69 倍被誤判成 2.69%。
-    # YoY / 成長率使用 normalize_growth_ratio，避免 520% 正確小數 5.20 被二次縮小成 5.20%。
-    for key in ["gross_margin", "operating_margin", "revenue_mom", "monthly_revenue_mom"]:
+    for key in ["gross_margin", "operating_margin", "rev_growth", "revenue_yoy", "revenue_mom", "earnings_cagr", "eps_growth_yoy"]:
         corrected[key] = normalize_financial_ratio(corrected.get(key))
         ai_norm[key] = normalize_financial_ratio(ai_norm.get(key))
-    for key in ["rev_growth", "revenue_yoy", "monthly_revenue_yoy", "earnings_growth_yoy", "earnings_cagr", "cagr", "eps_growth_yoy"]:
-        corrected[key] = normalize_growth_ratio(corrected.get(key))
-        ai_norm[key] = normalize_growth_ratio(ai_norm.get(key))
     corrected["debt_to_equity"] = normalize_debt_to_equity(corrected.get("debt_to_equity"))
     ai_norm["debt_to_equity"] = normalize_debt_to_equity(ai_norm.get("debt_to_equity"))
 
@@ -682,30 +889,13 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
     except Exception:
         pass
 
-    # AI YoY 也做合理範圍防呆；極端值多半是抓到錯欄或摘要幻覺。
-    # 注意：記憶體低基期可能出現 500%～700% 以上 YoY，因此合理上限放到 1000%。
+    # AI YoY 也做合理範圍防呆；極端值多半是抓到錯欄或摘要幻覺
     ai_yoy = ai_norm.get("rev_growth")
     if ai_yoy is not None and not (-1.0 <= ai_yoy <= 10.0):
         warnings.append(
-            f"{label} 的 AI 營收 YoY={to_val_str(ai_yoy, 'pct')} 超出 -100%～1000% 安全範圍，已設為 NULL。"
+            f"{label} 的 AI 營收 YoY={to_val_str(ai_yoy, 'pct')} 超出合理範圍，已設為 NULL。"
         )
         ai_norm["rev_growth"] = None
-        ai_norm["revenue_yoy"] = None
-        ai_norm["monthly_revenue_yoy"] = None
-        ai_yoy = None
-
-    # 17-C-9d-hotfix：YoY 極端成長率百分比縮放錯位防呆。
-    # 例：系統月營收 717.33%，AI 回 7.30%，代表 AI 可能將 730.14% 誤轉成 0.073。
-    sys_yoy_for_scale_guard = corrected.get("rev_growth")
-    if detect_yoy_scale_mismatch(sys_yoy_for_scale_guard, ai_yoy):
-        warnings.append(
-            f"{label} 的 AI 營收 YoY={to_val_str(ai_yoy, 'pct')} 與系統公告月營收 YoY={to_val_str(sys_yoy_for_scale_guard, 'pct')} 差距過大，"
-            "疑似百分比縮放錯位；已排除 AI YoY，月營收判斷採用系統公告月營收，AI YoY 不得作為買進依據。"
-        )
-        ai_norm["rev_growth"] = None
-        ai_norm["revenue_yoy"] = None
-        ai_norm["monthly_revenue_yoy"] = None
-        ai_norm["revenue_yoy_scale_mismatch"] = True
 
     # D/E：系統值與 AI 值雙層防呆。D/E > 800% 直接視為高風險異常值，不進估值模型。
     def debt_to_equity_is_valid(v):
@@ -835,28 +1025,11 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
     if data.get("forward_eps") is None:
         data["forward_eps"] = data.get("forward_eps_consensus") or data.get("forward_eps_ai") or data.get("forward_eps_system")
 
-    # 百分比/比率欄位標準化。
-    # 毛利率/ROE 等一般百分比仍用 normalize_financial_ratio；
-    # YoY / 成長率用 normalize_growth_ratio，避免 520% 正確小數 5.20 被二次縮放。
-    ratio_fields = ["gross_margin", "operating_margin", "roe", "monthly_revenue_mom", "mom", "dividend_yield"]
-    growth_fields = ["monthly_revenue_yoy", "earnings_growth_yoy", "cagr", "yoy"]
+    # 百分比/比率欄位標準化。AI 常把 25.5% 寫成 25.5，這裡轉為 0.255。
+    ratio_fields = ["gross_margin", "operating_margin", "roe", "yoy", "mom", "dividend_yield"]
     for field in ratio_fields:
         if field in data:
             data[field] = normalize_financial_ratio(data.get(field))
-    for field in growth_fields:
-        if field in data:
-            data[field] = normalize_growth_ratio(data.get(field))
-
-    # 17-C-9d-hotfix：新舊 YoY/MoM 欄位相容。
-    # monthly_revenue_yoy 才代表最新公告月份單月營收 YoY；legacy yoy 僅相容舊程式。
-    if data.get("monthly_revenue_yoy") is None and data.get("yoy") is not None:
-        data["monthly_revenue_yoy"] = data.get("yoy")
-    if data.get("yoy") is None and data.get("monthly_revenue_yoy") is not None:
-        data["yoy"] = data.get("monthly_revenue_yoy")
-    if data.get("monthly_revenue_mom") is None and data.get("mom") is not None:
-        data["monthly_revenue_mom"] = data.get("mom")
-    if data.get("mom") is None and data.get("monthly_revenue_mom") is not None:
-        data["mom"] = data.get("monthly_revenue_mom")
 
     if "debt_to_equity" in data:
         data["debt_to_equity"] = normalize_debt_to_equity(data.get("debt_to_equity"))
@@ -894,12 +1067,6 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
     roe = data.get("roe")
     if roe is not None and not (-1.0 <= roe <= 1.0):
         null_field("roe", f"ROE={roe:.2%} 超出 -100%～100%")
-
-    monthly_yoy = data.get("monthly_revenue_yoy")
-    if monthly_yoy is not None and not (-1.0 <= monthly_yoy <= 10.0):
-        null_field("monthly_revenue_yoy", f"單月營收 YoY={monthly_yoy:.2%} 超出 -100%～1000% 安全範圍")
-        if data.get("yoy") == monthly_yoy:
-            data["yoy"] = None
 
     yoy = data.get("yoy")
     if yoy is not None and not (-1.0 <= yoy <= 10.0):
