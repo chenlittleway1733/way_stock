@@ -31,6 +31,7 @@ from utils import s_float, log_data_health, log_exception, validate_ai_financial
 # 系統內部再統一轉成 ratio，避免 Gemini/程式二次縮放造成 730% 變 7.30%。
 FINANCIAL_RESPONSE_SCHEMA = {
     "type": "object",
+    "additionalProperties": False,
     "properties": {
         "pe": {"type": "number", "nullable": True},
         "latest_quarter_eps": {"type": "number", "nullable": True},
@@ -766,10 +767,14 @@ AI_FINANCIAL_FIELD_LABELS = {
     "forward_eps_fy_source_note": "Forward EPS 年期來源備註",
     "forward_eps_fy_basis": "Forward EPS 年期基準/可靠度",
     "pb": "股價淨值比 P/B",
-    "gross_margin": "毛利率",
-    "operating_margin": "營益率",
-    "roe": "ROE",
-    "yoy": "營收/獲利成長率 YoY/CAGR",
+    "gross_margin_percent": "毛利率（百分比數字）",
+    "operating_margin_percent": "營益率（百分比數字）",
+    "roe_percent": "ROE（百分比數字）",
+    "monthly_revenue_yoy_percent": "最新公告月份單月營收 YoY（百分比數字）",
+    "monthly_revenue_mom_percent": "最新公告月份單月營收 MoM（百分比數字）",
+    "accumulated_revenue_yoy_percent": "累計營收 YoY（百分比數字）",
+    "earnings_growth_yoy_percent": "預估獲利成長 YoY（百分比數字）",
+    "cagr_percent": "未來三年 CAGR（百分比數字）",
     "target_price": "目標價",
     "target_price_high": "目標價高標",
     "target_price_avg": "目標價均值",
@@ -777,8 +782,7 @@ AI_FINANCIAL_FIELD_LABELS = {
     "target_price_analyst_count": "目標價分析師人數",
     "target_price_rationale": "目標價理由",
     "debt_to_equity": "負債權益比 D/E",
-    "mom": "最新單月營收 MoM",
-    "dividend_yield": "預估現金殖利率",
+    "dividend_yield_percent": "預估現金殖利率（百分比數字）",
     "data_period": "資料期間",
     "free_cash_flow": "自由現金流",
     "current_ratio": "流動比率",
@@ -834,6 +838,121 @@ def _normalize_ai_source_metadata(parsed):
     parsed["source_summary"] = "已要求 AI 逐欄回傳來源、發布日期與網址；若單欄來源缺漏，請以原始回報與 source_urls 交叉檢查。"
     return parsed
 
+
+
+def _collect_text_for_percent_extraction(obj):
+    """2.2：從 AI JSON / sources 裡收集可解析百分比的原文片段。"""
+    parts = []
+    if not isinstance(obj, dict):
+        return ""
+    for k in ["revenue_source_quote", "target_price_rationale", "forward_eps_fy_source_note", "data_period"]:
+        v = obj.get(k)
+        if isinstance(v, str) and v.strip():
+            parts.append(v)
+    src = obj.get("_sources") or obj.get("field_sources") or obj.get("sources") or {}
+    if isinstance(src, dict):
+        for meta in src.values():
+            if isinstance(meta, dict):
+                for mk in ["note", "quote", "description", "source", "published_date", "period"]:
+                    mv = meta.get(mk)
+                    if isinstance(mv, str) and mv.strip():
+                        parts.append(mv)
+            elif isinstance(meta, str):
+                parts.append(meta)
+    return "；".join(parts)
+
+
+def _extract_percent_from_text(text, patterns):
+    if not text:
+        return None
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            try:
+                return float(str(m.group(1)).replace(",", ""))
+            except Exception:
+                return None
+    return None
+
+
+def _strict_ai_percent_json_guard(parsed):
+    """2.2：AI JSON 回收層百分比欄位守門。
+
+    重點：
+    1. 只讓 *_percent 欄位成為正式百分比資料來源。
+    2. legacy yoy/mom/gross_margin/roe 等先封存，不直接進正式欄位。
+    3. 若 revenue_source_quote 或 sources 原文含「年增 730.14%」，自動補 monthly_revenue_yoy_percent=730.14。
+    """
+    if not isinstance(parsed, dict):
+        return parsed
+    out = dict(parsed)
+    warnings = list(out.get("_ai_validation_warnings") or [])
+    raw_legacy = dict(out.get("_raw_legacy_percent_fields") or {})
+
+    legacy_to_percent = {
+        "yoy": "monthly_revenue_yoy_percent",
+        "revenue_yoy": "monthly_revenue_yoy_percent",
+        "rev_growth": "monthly_revenue_yoy_percent",
+        "monthly_revenue_yoy": "monthly_revenue_yoy_percent",
+        "mom": "monthly_revenue_mom_percent",
+        "revenue_mom": "monthly_revenue_mom_percent",
+        "monthly_revenue_mom": "monthly_revenue_mom_percent",
+        "gross_margin": "gross_margin_percent",
+        "operating_margin": "operating_margin_percent",
+        "roe": "roe_percent",
+        "dividend_yield": "dividend_yield_percent",
+        "earnings_growth_yoy": "earnings_growth_yoy_percent",
+        "eps_growth_yoy": "earnings_growth_yoy_percent",
+        "cagr": "cagr_percent",
+        "earnings_cagr": "cagr_percent",
+    }
+
+    raw_text = _collect_text_for_percent_extraction(out)
+    # 優先從原文抓營收百分比，避免 Gemini JSON 把 730.14% 寫成 yoy=7.30。
+    yoy_from_quote = _extract_percent_from_text(raw_text, [
+        r"(?:單月)?(?:營收)?(?:年增率?|YoY)[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
+        r"年增[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
+        r"YoY[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
+    ])
+    mom_from_quote = _extract_percent_from_text(raw_text, [
+        r"(?:月增率?|MoM)[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
+        r"月增[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
+        r"MoM[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
+    ])
+    acc_yoy_from_quote = _extract_percent_from_text(raw_text, [
+        r"(?:累計|前\s*\d+\s*月)[^%]{0,40}(?:年增|YoY)[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
+    ])
+    if out.get("monthly_revenue_yoy_percent") in (None, "", "null", "None") and yoy_from_quote is not None:
+        out["monthly_revenue_yoy_percent"] = yoy_from_quote
+        warnings.append(f"2.2回收層：已從原文擷取單月營收 YoY={yoy_from_quote:.2f}%，優先於 legacy yoy。")
+    if out.get("monthly_revenue_mom_percent") in (None, "", "null", "None") and mom_from_quote is not None:
+        out["monthly_revenue_mom_percent"] = mom_from_quote
+        warnings.append(f"2.2回收層：已從原文擷取單月營收 MoM={mom_from_quote:.2f}%。")
+    if out.get("accumulated_revenue_yoy_percent") in (None, "", "null", "None") and acc_yoy_from_quote is not None:
+        out["accumulated_revenue_yoy_percent"] = acc_yoy_from_quote
+
+    for legacy_key, pct_key in legacy_to_percent.items():
+        if legacy_key in out and out.get(legacy_key) not in (None, "", "null", "None"):
+            raw_legacy[legacy_key] = out.get(legacy_key)
+            raw_val = s_float(out.get(legacy_key))
+            # 非營收類百分比若只有 legacy 欄位，仍可安全轉進 *_percent。
+            # 但營收 YoY/MoM 類最容易發生 730% -> 7.30% 錯位；沒有 quote 或 *_percent 時先封存，不採用。
+            is_revenue_legacy = legacy_key in {"yoy", "revenue_yoy", "rev_growth", "monthly_revenue_yoy", "mom", "revenue_mom", "monthly_revenue_mom"}
+            if out.get(pct_key) in (None, "", "null", "None") and raw_val is not None and not is_revenue_legacy:
+                if abs(raw_val) <= 1.5:
+                    out[pct_key] = raw_val * 100.0
+                    warnings.append(f"2.2回收層：legacy {legacy_key}={raw_val} 疑似 ratio，已轉為 {pct_key}={raw_val*100.0:.2f}。")
+                else:
+                    out[pct_key] = raw_val
+                    warnings.append(f"2.2回收層：legacy {legacy_key}={raw_val} 疑似百分比數字，已轉為 {pct_key}。")
+            out[legacy_key] = None
+
+    if raw_legacy:
+        out["_raw_legacy_percent_fields"] = raw_legacy
+        warnings.append("2.2回收層：已封存 legacy 百分比欄位；正式計算只使用 *_percent 欄位與系統資料。")
+
+    out["_ai_validation_warnings"] = warnings
+    return out
 
 def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1-pro-preview"):
     """
@@ -909,7 +1028,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     - 本函式已啟用 Gemini response_schema；請只依 schema 欄位輸出 JSON，不要自行新增 legacy 百分比欄位。
     - 所有百分比類欄位一律使用 *_percent 欄位，直接填「百分比數字」，不可填小數比率。
       例：730.14% -> monthly_revenue_yoy_percent=730.14；8.55% -> monthly_revenue_mom_percent=8.55；67.90% -> gross_margin_percent=67.90；17.95% -> roe_percent=17.95；0.34% -> dividend_yield_percent=0.34。
-    - 不要輸出 yoy、mom、gross_margin、operating_margin、roe、dividend_yield 這些 legacy 百分比欄位；若 schema 未列出的欄位請省略。
+    - 不要輸出 yoy、mom、gross_margin、operating_margin、roe、dividend_yield 這些 legacy 百分比欄位；若 schema 未列出的欄位請省略。_sources 來源物件的 key 也必須使用 *_percent 欄位名，不可使用 yoy / mom / gross_margin 等 legacy key。
     - monthly_revenue_yoy_percent 只能填最新公告月份「單月營收 YoY」；若只找到累計 YoY，請填 accumulated_revenue_yoy_percent，不可混用。
     - 若不確定是單月 YoY 或累計 YoY，monthly_revenue_yoy_percent 請填 null。
     - 請盡量附 revenue_month 與 revenue_source_quote，例如「2026年5月合併營收276.70億元，年增730.14%，月增8.55%」。
@@ -1045,6 +1164,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
         try:
             parsed = json.loads(clean_text)
             if isinstance(parsed, dict):
+                parsed = _strict_ai_percent_json_guard(parsed)
                 parsed.update({k: v for k, v in marker_data.items() if v is not None and parsed.get(k) is None})
                 parsed = _normalize_ai_source_metadata(parsed)
                 parsed = validate_ai_financial_json(parsed, stock_id=stock_id, stock_name=stock_name)
