@@ -822,8 +822,14 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     10. 「法人預估未來 1~3 年獲利複合成長率 (CAGR)，若無則用最新營收 YoY 替代」
     11. 「國內外法人最新預估目標價 (Target Price)」
     12. 「負債權益比 (Debt-to-Equity Ratio)」
-    13. 「最新單月營收月增率(MoM)」
-    14. 「預估現金殖利率 (Dividend Yield)」(例如：擬配發現金股利2元，最新股價900元，殖利率應為 0.0022)
+    13. 「最新公告月份的單月營收年增率 / 月增率」：請優先回傳 percent 欄位，不要用小數比率。
+        - monthly_revenue_yoy_percent：最新公告月份單月營收 YoY，例：年增 730.14% 請填 730.14。
+        - monthly_revenue_mom_percent：最新公告月份單月營收 MoM，例：月增 8.55% 請填 8.55。
+        - accumulated_revenue_yoy_percent：累計營收 YoY，例：前5月累計年增 649.62% 請填 649.62。
+        - revenue_month：月營收公告月份，例如 2026/05。
+        - revenue_source_quote：摘錄原文關鍵句，例如「2026年5月合併營收276.70億元，年增730.14%，月增8.55%」。
+        - 若只找到累計營收年增率，不可填入 monthly_revenue_yoy_percent；請填 accumulated_revenue_yoy_percent，monthly_revenue_yoy_percent 填 null。
+    14. 「預估現金殖利率 (Dividend Yield)」：請用 dividend_yield_percent，例如殖利率 3.4% 請填 3.4，不要填 0.034。
     15. 「最新資料所屬年月或具體日期 (Data Period)」(請務必標示出你查到這些最新數據的具體發布日期或所屬時間，例如：2024年4月或2024/05/15)
     16. 「目標價統計分析師人數 (Target Price Analyst Count)」
     17. 「目標價核心理由摘要 (Target Price Rationale)」
@@ -852,8 +858,21 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     - forward_eps_fy_source_note：簡述 EPS 年期資料來源與可靠度，例如「券商共識」、「單一券商」、「AI依成長率推估」。
     - trailing_eps 與 forward_eps 為向下相容 legacy 欄位，trailing_eps 可同 ttm_eps，forward_eps 可同 forward_eps_consensus 或 forward_eps_ai。
 
-    必須嚴格回傳包含上述財務欄位的 JSON 格式。百分比請轉換為小數（例如 25.5% 寫成 0.255，衰退5%寫成 -0.05），數值請直接輸出數字。若查無資料，該欄位請填 null。
-    請務必搜尋近期各大券商對該公司的最新目標價。
+    必須嚴格回傳包含上述財務欄位的 JSON 格式。
+
+    【17-C-9e 全域數值單位硬性規則】
+    1. EPS、P/E、P/B、目標價、流動比率、股數、FCF：直接填數字，不可加單位。
+    2. 所有「百分比類欄位」一律優先使用 *_percent 欄位，且直接填「百分比數字」，不要轉成小數比率：
+       - 年增 730.14% -> monthly_revenue_yoy_percent = 730.14，不可填 7.3014、0.073014、0.073。
+       - 月增 8.55% -> monthly_revenue_mom_percent = 8.55，不可填 0.0855。
+       - 毛利率 67.90% -> gross_margin_percent = 67.90，不可填 0.679。
+       - ROE 17.95% -> roe_percent = 17.95，不可填 0.1795。
+       - 殖利率 3.4% -> dividend_yield_percent = 3.4，不可填 0.034。
+    3. 若同時保留 legacy 欄位（gross_margin、roe、yoy、mom、dividend_yield），可以同步填小數比率；但 *_percent 欄位是主要欄位。
+    4. 不確定單月 YoY / 累計 YoY 時，monthly_revenue_yoy_percent 請填 null，不可自行猜測。
+    5. 請務必在 revenue_source_quote 摘錄原文，使系統能人工檢查數值是否縮放錯位。
+
+    若查無資料，該欄位請填 null。請務必搜尋近期各大券商對該公司的最新目標價。
 
     重要：除了 18 個財務欄位，請額外回傳「_sources」物件，逐欄標示每個數值的來源。
     _sources 內每個欄位必須包含：
@@ -865,10 +884,10 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
 
     注意：本函式只負責財報與估值校對，不要查詢 ETF 持股；ETF 持股由獨立按鈕 get_etf_holders_from_ai() 執行。
     JSON 格式範例：
-    {{"pe": 15.2, "latest_quarter_eps": 1.35, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin": 0.255, "operating_margin": 0.123, "roe": 0.15, "yoy": 0.35, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "mom": 0.015, "dividend_yield": 0.032, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
+    {{"pe": 15.2, "latest_quarter_eps": 1.35, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin_percent": 25.5, "operating_margin_percent": 12.3, "roe_percent": 15.0, "monthly_revenue_yoy_percent": 35.0, "monthly_revenue_mom_percent": 1.5, "accumulated_revenue_yoy_percent": null, "revenue_month": "2026/05", "revenue_source_quote": "2026年5月合併營收xxx億元，年增35.0%，月增1.5%", "gross_margin": 0.255, "operating_margin": 0.123, "roe": 0.15, "yoy": 0.35, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "mom": 0.015, "dividend_yield_percent": 3.2, "dividend_yield": 0.032, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
     絕對不要輸出 markdown 標記或其他文字。"""
 
-    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、營收 MoM、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。請務必確認並標示出 EPS 對應年度、資料發布日期與來源！不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
+    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、最新公告月份單月營收 YoY/MoM、累計營收 YoY、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。百分比欄位請使用 *_percent 並直接填百分比數字，例如 730.14% 填 730.14，不要填 7.3014 或 0.073。請務必確認 EPS 對應年度、月營收公告月份、資料發布日期、來源與 revenue_source_quote；若只找到累計營收年增率，不可當成 monthly_revenue_yoy_percent。不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
 
     def _make_config(search_enabled=True):
         kwargs = {

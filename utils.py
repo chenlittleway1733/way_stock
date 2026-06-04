@@ -242,12 +242,6 @@ def build_divergence_warnings(
     ai_de=None,
     system_pb=None,
     ai_pb=None,
-    system_ttm_eps=None,
-    ai_ttm_eps=None,
-    system_pe=None,
-    ai_pe=None,
-    fy1_eps=None,
-    fy2_eps=None,
     stock_id="",
     stock_name="",
 ):
@@ -283,46 +277,6 @@ def build_divergence_warnings(
             format_quality_value(ai_forward_eps, "num"),
             _fmt_gap_pct(eps_gap),
             "請優先確認 Forward EPS 是單一券商、AI 推估，還是多家法人共識；可操作估值應採較保守 EPS。",
-        )
-
-    # 1b) TTM EPS 分歧：TTM 是歷史 P/E 分母，分歧過大時不得標示為交叉驗證。
-    ttm_gap = _relative_gap(system_ttm_eps, ai_ttm_eps, "min")
-    if ttm_gap is not None and ttm_gap > 0.30:
-        add(
-            "TTM EPS 分歧",
-            f"{label} 的 TTM EPS 系統值與 AI 值差距過大，歷史 P/E 與實際獲利支撐度可信度下降。",
-            "danger" if ttm_gap > 1.00 else "warning",
-            format_quality_value(system_ttm_eps, "num"),
-            format_quality_value(ai_ttm_eps, "num"),
-            _fmt_gap_pct(ttm_gap),
-            "請分開解讀 TTM EPS 與 FY1/FY2 Forward EPS；循環股不可用遠期 EPS 直接覆蓋 TTM 風險。",
-        )
-
-    # 1c) P/E 口徑分歧：通常來自 TTM EPS 分母不同，不能視為系統+AI交叉。
-    pe_gap = _relative_gap(system_pe, ai_pe, "min")
-    if pe_gap is not None and pe_gap > 0.30:
-        add(
-            "P/E 口徑分歧",
-            f"{label} 的歷史 P/E 系統值與 AI 值差距過大，可能來自 TTM EPS 期間或分母不同。",
-            "warning",
-            format_quality_value(system_pe, "x"),
-            format_quality_value(ai_pe, "x"),
-            _fmt_gap_pct(pe_gap),
-            "P/E 分歧未釐清前不可視為交叉驗證；循環股應優先看 P/B 週期模型與報價/毛利率落地。",
-        )
-
-    # 1d) FY2 遠期 EPS 跳升：只可解釋市場先行定價，不可直接作買點。
-    fy1 = s_float(fy1_eps)
-    fy2 = s_float(fy2_eps)
-    if fy1 is not None and fy2 is not None and fy1 > 0 and fy2 / fy1 > 1.50:
-        add(
-            "FY2 EPS 遠期跳升",
-            f"{label} 的 FY2 EPS 較 FY1 EPS 跳升超過 50%，屬高成長遠期預估。",
-            "warning",
-            format_quality_value(fy1, "num"),
-            format_quality_value(fy2, "num"),
-            f"FY2/FY1={fy2/fy1:.2f}x",
-            "FY2 只能用來解釋市場先行定價，不可直接作為買點；需等待營收、毛利率與 EPS 逐季落地。",
         )
 
     # 2) YoY 分歧：系統 YoY 與 AI YoY 差距 > 20 個百分點
@@ -410,11 +364,7 @@ def infer_quality_status(adopted_value, system_value=None, ai_value=None, is_sta
         return "❌ 缺資料"
     if is_stale:
         return "⚠️ 可能過期"
-    high_risk_keywords = [
-        "校驗失敗", "不合理", "已排除", "NULL", "過舊", "錯置", "幻覺",
-        "分歧", "差距過大", "可信度下降", "需人工確認", "遠期預估",
-        "不可直接當買點", "不可視為交叉", "極端值", "已降權", "口徑",
-    ]
+    high_risk_keywords = ["校驗失敗", "不合理", "已排除", "NULL", "過舊", "錯置", "幻覺"]
     if any(k in note_text for k in high_risk_keywords):
         return "⚠️ 已校正/需留意"
     if system_value is not None and ai_value is not None:
@@ -462,41 +412,142 @@ def normalize_financial_ratio(val, default=None):
         return v / 100.0
     return v
 
-
-
-def normalize_growth_ratio(val, default=None):
-    """將營收/獲利成長率統一成小數格式，但避免 520% / 730% 被二次縮小。
+def normalize_percent_ratio(val, default=None, *, allow_extreme=False):
+    """
+    17-C-9e 全域百分比正規化：把「百分比數字」與「小數比率」統一成小數比率。
 
     規則：
-    - 0.073 = 7.3%
-    - 5.20 = 520%
-    - 7.3014 = 730.14%
-    - 35 這類通常代表 35%，轉成 0.35
+    - 8.55 代表 8.55%，回傳 0.0855。
+    - 67.9 代表 67.9%，回傳 0.679。
+    - 730.14 代表 730.14%，回傳 7.3014。
+    - 0.0855 代表 8.55%，維持 0.0855。
+
+    allow_extreme=True 用於月營收 YoY / 預估獲利 YoY 等可能超過 100% 的欄位。
+    一般毛利率、ROE、殖利率不可用 extreme，避免把 6.5x / 35.9x 這種倍數誤當百分比。
     """
     v = s_float(val, default)
     if v is None:
         return default
     av = abs(v)
-    if av <= 10:
-        return v
-    if av <= 1000:
+    # 1.5 以上通常是百分比數字；極端 YoY 可到數百/數千%。
+    if av > 1.5:
         return v / 100.0
     return v
 
-def detect_yoy_scale_mismatch(system_yoy, ai_yoy):
-    """偵測 AI 是否把 520% / 730% 等極端 YoY 錯縮成 5.20% / 7.30%。"""
-    sy = s_float(system_yoy)
-    ay = s_float(ai_yoy)
-    if sy is None or ay is None or ay == 0:
+
+def normalize_growth_ratio(val, default=None):
+    """成長率專用正規化。允許 520%、730.14% 這類循環股低基期極端值。"""
+    return normalize_percent_ratio(val, default, allow_extreme=True)
+
+
+def percent_number_to_ratio(val, default=None):
+    """明確 *_percent 欄位專用：JSON 內 730.14 代表 730.14%，一律除以 100。"""
+    v = s_float(val, default)
+    if v is None:
+        return default
+    return v / 100.0
+
+
+def detect_scale_mismatch(system_ratio, ai_ratio, *, tolerance_ratio=0.25, min_abs_gap=0.20):
+    """
+    偵測 AI 百分比縮放錯位：例如系統 717.33% = 7.1733，AI 7.30% = 0.073。
+    回傳 True 代表 AI 值高度疑似被多除/少除 100 倍，不可作交叉驗證。
+    """
+    sys_v = s_float(system_ratio)
+    ai_v = s_float(ai_ratio)
+    if sys_v is None or ai_v is None or ai_v == 0:
         return False
-    sys_abs = abs(sy)
-    ai_abs = abs(ay)
+    sys_abs, ai_abs = abs(sys_v), abs(ai_v)
+    if abs(sys_abs - ai_abs) < min_abs_gap:
+        return False
+    ratio = sys_abs / ai_abs if ai_abs else None
+    # 典型：7.17 / 0.0717 ≈ 100。容許 80~120。
+    if ratio is not None and 80 <= ratio <= 120:
+        return True
+    # 反向：0.0717 / 7.17 ≈ 0.01。
+    if ratio is not None and 0.008 <= ratio <= 0.012:
+        return True
+    # 系統是極端成長，AI 卻只有個位數/十幾%。
     if sys_abs >= 1.0 and ai_abs <= 0.20 and abs(sys_abs - ai_abs) >= 0.50:
         return True
-    ratio = sys_abs / ai_abs if ai_abs > 0 else None
-    if sys_abs >= 1.0 and ratio is not None and 80 <= ratio <= 120:
-        return True
     return False
+
+
+def detect_yoy_scale_mismatch(system_yoy, ai_yoy):
+    """向下相容名稱：YoY 專用縮放錯位偵測。"""
+    return detect_scale_mismatch(system_yoy, ai_yoy)
+
+
+def canonicalize_percent_fields(data, warnings=None, label="AI"):
+    """
+    17-C-9e：全域百分比欄位回收處理。
+    AI JSON 優先讀 *_percent 欄位，因為這些欄位規定直接填「百分比數字」：
+    730.14% -> 730.14；8.55% -> 8.55；殖利率 3.4% -> 3.4。
+
+    轉入系統內部時再統一變成小數比率：730.14 -> 7.3014。
+    legacy 欄位（yoy / gross_margin / roe 等）仍相容，但不再作為首選。
+    """
+    if not isinstance(data, dict):
+        return data
+    warnings = warnings if warnings is not None else []
+
+    # canonical: (percent_aliases, legacy_aliases, allow_extreme)
+    mapping = {
+        "monthly_revenue_yoy": (["monthly_revenue_yoy_percent", "revenue_yoy_percent", "yoy_percent"], ["monthly_revenue_yoy", "revenue_yoy", "yoy"], True),
+        "monthly_revenue_mom": (["monthly_revenue_mom_percent", "revenue_mom_percent", "mom_percent"], ["monthly_revenue_mom", "revenue_mom", "mom"], True),
+        "accumulated_revenue_yoy": (["accumulated_revenue_yoy_percent", "cumulative_revenue_yoy_percent"], ["accumulated_revenue_yoy", "cumulative_revenue_yoy"], True),
+        "earnings_growth_yoy": (["earnings_growth_yoy_percent", "profit_growth_yoy_percent"], ["earnings_growth_yoy", "eps_growth_yoy"], True),
+        "cagr": (["cagr_percent", "earnings_cagr_percent"], ["cagr", "earnings_cagr"], True),
+        "gross_margin": (["gross_margin_percent"], ["gross_margin"], False),
+        "operating_margin": (["operating_margin_percent"], ["operating_margin"], False),
+        "roe": (["roe_percent"], ["roe"], False),
+        "dividend_yield": (["dividend_yield_percent"], ["dividend_yield"], False),
+    }
+
+    notes = data.setdefault("_unit_normalization_notes", [])
+    for canonical, (percent_aliases, legacy_aliases, allow_extreme) in mapping.items():
+        percent_val = None
+        percent_key = None
+        for k in percent_aliases:
+            if k in data and s_float(data.get(k)) is not None:
+                percent_val = percent_number_to_ratio(data.get(k))
+                percent_key = k
+                break
+
+        legacy_val = None
+        legacy_key = None
+        for k in legacy_aliases:
+            if k in data and s_float(data.get(k)) is not None:
+                legacy_val = normalize_growth_ratio(data.get(k)) if allow_extreme else normalize_financial_ratio(data.get(k))
+                legacy_key = k
+                break
+
+        adopted = percent_val if percent_val is not None else legacy_val
+        if adopted is None:
+            continue
+
+        # 若 percent 欄位與 legacy 欄位差 100 倍，採 percent 欄位並留下警告。
+        if percent_val is not None and legacy_val is not None and detect_scale_mismatch(percent_val, legacy_val):
+            msg = f"{label} 欄位 {canonical} 的 legacy 值疑似百分比縮放錯位：{legacy_key}={legacy_val:.6g}，{percent_key}={percent_val:.6g}；已採用 *_percent 欄位。"
+            warnings.append(msg)
+            notes.append(msg)
+
+        data[canonical] = adopted
+        # 同步 legacy 常用欄位，避免 UI 舊邏輯漏讀。
+        if canonical == "monthly_revenue_yoy":
+            data["revenue_yoy"] = adopted
+            data["rev_growth"] = adopted
+            data["yoy"] = adopted
+        elif canonical == "monthly_revenue_mom":
+            data["revenue_mom"] = adopted
+            data["mom"] = adopted
+        elif canonical == "cagr":
+            data["earnings_cagr"] = adopted
+        elif canonical == "earnings_growth_yoy":
+            data["eps_growth_yoy"] = adopted
+
+    return data
+
 
 def normalize_debt_to_equity(val, default=None):
     """將 D/E 統一成「倍數」：0.608=60.8%；2.69=269%；132.1=132.1%。
@@ -632,6 +683,9 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
     warnings = []
     label = f"{stock_name} ({stock_id})" if stock_name and stock_id else (stock_name or stock_id or "目前標的")
 
+    # 17-C-9e：AI 百分比欄位先做全域正規化。優先採用 *_percent 欄位，避免 730.14% 被回收成 7.30%。
+    ai_norm = canonicalize_percent_fields(ai_norm, warnings=warnings, label=label)
+
     # v1.24 欄位相容：rev_growth/revenue_yoy、mom/revenue_mom 新舊欄位可互通。
     if ai_norm.get("revenue_yoy") is None and ai_norm.get("rev_growth") is not None:
         ai_norm["revenue_yoy"] = ai_norm.get("rev_growth")
@@ -639,9 +693,12 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
         ai_norm["rev_growth"] = ai_norm.get("revenue_yoy")
 
     # 統一百分比欄位尺度；D/E 需獨立正規化，避免 2.69 倍被誤判成 2.69%。
-    for key in ["gross_margin", "operating_margin", "rev_growth", "revenue_yoy", "revenue_mom", "earnings_cagr", "eps_growth_yoy"]:
+    for key in ["gross_margin", "operating_margin", "roe", "dividend_yield"]:
         corrected[key] = normalize_financial_ratio(corrected.get(key))
         ai_norm[key] = normalize_financial_ratio(ai_norm.get(key))
+    for key in ["rev_growth", "revenue_yoy", "revenue_mom", "monthly_revenue_yoy", "monthly_revenue_mom", "earnings_cagr", "eps_growth_yoy", "earnings_growth_yoy", "cagr"]:
+        corrected[key] = normalize_growth_ratio(corrected.get(key))
+        ai_norm[key] = normalize_growth_ratio(ai_norm.get(key))
     corrected["debt_to_equity"] = normalize_debt_to_equity(corrected.get("debt_to_equity"))
     ai_norm["debt_to_equity"] = normalize_debt_to_equity(ai_norm.get("debt_to_equity"))
 
@@ -695,28 +752,24 @@ def validate_and_correct_financial_metrics(system_vals, ai_vals=None, monthly_re
     except Exception:
         pass
 
-    # AI YoY 也做合理範圍與百分比縮放錯位防呆。
-    ai_yoy = normalize_growth_ratio(ai_norm.get("rev_growth"))
-    ai_norm["rev_growth"] = ai_yoy
-    sys_yoy_for_check = corrected.get("rev_growth")
+    # AI YoY 也做合理範圍與縮放錯位防呆。
+    ai_yoy = ai_norm.get("rev_growth")
+    sys_yoy_for_guard = corrected.get("rev_growth")
     if ai_yoy is not None and not (-1.0 <= ai_yoy <= 10.0):
         warnings.append(
             f"{label} 的 AI 營收 YoY={to_val_str(ai_yoy, 'pct')} 超出合理範圍，已設為 NULL。"
         )
         ai_norm["rev_growth"] = None
-        ai_yoy = None
-    elif detect_yoy_scale_mismatch(sys_yoy_for_check, ai_yoy):
+        ai_norm["revenue_yoy"] = None
+        ai_norm["monthly_revenue_yoy"] = None
+    elif detect_yoy_scale_mismatch(sys_yoy_for_guard, ai_yoy):
         warnings.append(
-            f"{label} 的 AI 營收 YoY={to_val_str(ai_yoy, 'pct')} 與系統月營收 YoY={to_val_str(sys_yoy_for_check, 'pct')} 差距過大，疑似百分比縮放錯位；已排除 AI YoY，月營收判斷採用系統公告月營收。"
+            f"{label} 的 AI 營收 YoY={to_val_str(ai_yoy, 'pct')} 與系統月營收 YoY={to_val_str(sys_yoy_for_guard, 'pct')} 差距過大，疑似百分比縮放錯位；已排除 AI YoY，月營收判斷採用系統公告月營收。"
         )
+        ai_norm["rev_growth_raw_excluded"] = ai_yoy
         ai_norm["rev_growth"] = None
-        ai_norm["revenue_yoy_scale_mismatch"] = True
-        ai_yoy = None
-
-    if sys_yoy_for_check is not None and abs(sys_yoy_for_check) >= 3.0:
-        warnings.append(
-            f"{label} 的系統月營收 YoY={to_val_str(sys_yoy_for_check, 'pct')} 屬 300% 以上極端值；月營收判斷仍以系統公告資料為主，但建議人工確認公告月份、低基期原因與同月份新聞。"
-        )
+        ai_norm["revenue_yoy"] = None
+        ai_norm["monthly_revenue_yoy"] = None
 
     # D/E：系統值與 AI 值雙層防呆。D/E > 800% 直接視為高風險異常值，不進估值模型。
     def debt_to_equity_is_valid(v):
@@ -828,13 +881,23 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
         "trailing_eps", "forward_eps",
         "latest_quarter_eps", "ttm_eps", "fiscal_year_eps",
         "forward_eps_system", "forward_eps_ai", "forward_eps_consensus",
+        "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3",
         "pb", "target_price", "target_price_high",
         "target_price_avg", "target_price_low", "target_price_analyst_count", "free_cash_flow",
-        "current_ratio", "shares_outstanding"
+        "current_ratio", "shares_outstanding",
+        # 17-C-9e：AI 原始 percent 欄位，要求直接填百分比數字，不填小數比率。
+        "gross_margin_percent", "operating_margin_percent", "roe_percent",
+        "monthly_revenue_yoy_percent", "monthly_revenue_mom_percent",
+        "accumulated_revenue_yoy_percent", "earnings_growth_yoy_percent",
+        "cagr_percent", "dividend_yield_percent"
     ]
     for field in numeric_fields:
         if field in data:
             num(field)
+
+    # 17-C-9e：先把所有 AI 百分比欄位做全域回收處理，再進入 EPS 與估值邏輯。
+    # percent 欄位優先於 legacy 小數欄位，可避免 730.14% 被錯誤回收成 7.30%。
+    data = canonicalize_percent_fields(data, warnings=warnings, label=label)
 
     # EPS 拆欄向下相容：舊版 AI 只回 trailing_eps / forward_eps 時，映射到新口徑。
     if data.get("ttm_eps") is None and data.get("trailing_eps") is not None:
@@ -847,10 +910,15 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
         data["forward_eps"] = data.get("forward_eps_consensus") or data.get("forward_eps_ai") or data.get("forward_eps_system")
 
     # 百分比/比率欄位標準化。AI 常把 25.5% 寫成 25.5，這裡轉為 0.255。
-    ratio_fields = ["gross_margin", "operating_margin", "roe", "yoy", "mom", "dividend_yield"]
-    for field in ratio_fields:
+    # 成長率與月營收 YoY/MoM 允許超過 100%，毛利率/ROE/殖利率仍使用一般比例邏輯。
+    normal_ratio_fields = ["gross_margin", "operating_margin", "roe", "dividend_yield"]
+    growth_ratio_fields = ["yoy", "mom", "revenue_yoy", "revenue_mom", "monthly_revenue_yoy", "monthly_revenue_mom", "accumulated_revenue_yoy", "earnings_growth_yoy", "eps_growth_yoy", "cagr", "earnings_cagr"]
+    for field in normal_ratio_fields:
         if field in data:
             data[field] = normalize_financial_ratio(data.get(field))
+    for field in growth_ratio_fields:
+        if field in data:
+            data[field] = normalize_growth_ratio(data.get(field))
 
     if "debt_to_equity" in data:
         data["debt_to_equity"] = normalize_debt_to_equity(data.get("debt_to_equity"))
@@ -889,13 +957,15 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
     if roe is not None and not (-1.0 <= roe <= 1.0):
         null_field("roe", f"ROE={roe:.2%} 超出 -100%～100%")
 
-    yoy = data.get("yoy")
-    if yoy is not None and not (-1.0 <= yoy <= 10.0):
-        null_field("yoy", f"YoY/CAGR={yoy:.2%} 超出 -100%～1000% 安全範圍")
+    for field in ["yoy", "revenue_yoy", "monthly_revenue_yoy", "accumulated_revenue_yoy", "earnings_growth_yoy", "eps_growth_yoy", "cagr", "earnings_cagr"]:
+        v = data.get(field)
+        if v is not None and not (-1.0 <= v <= 10.0):
+            null_field(field, f"{field}={v:.2%} 超出 -100%～1000% 安全範圍")
 
-    mom = data.get("mom")
-    if mom is not None and not (-1.0 <= mom <= 5.0):
-        null_field("mom", f"MoM={mom:.2%} 超出 -100%～500% 安全範圍")
+    for field in ["mom", "revenue_mom", "monthly_revenue_mom"]:
+        v = data.get(field)
+        if v is not None and not (-1.0 <= v <= 5.0):
+            null_field(field, f"{field}={v:.2%} 超出 -100%～500% 安全範圍")
 
     dy = data.get("dividend_yield")
     if dy is not None and not (0 <= dy <= 0.20):
@@ -2101,195 +2171,3 @@ def build_forward_eps_tiered_valuation_report(
     }
     return {"summary": summary, "report": report}
 
-
-# ==========================================
-# 17-C-9e：技術面摘要（提示詞打包用）
-# ==========================================
-def build_technical_summary(hist, lookback=120):
-    """
-    根據 K 線資料產生日線技術面摘要，供提示詞打包使用。
-    不依賴 AI 看圖；只做進出場節奏輔助，不覆蓋基本面與估值。
-    """
-    try:
-        if hist is None or len(hist) == 0:
-            return {"available": False, "error": "hist 無資料", "summary_text": "- 技術面摘要: NULL（hist 無資料）"}
-        df = hist.copy()
-        for col in ["Open", "High", "Low", "Close", "Volume"]:
-            if col not in df.columns:
-                df[col] = 0.0
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df.dropna(subset=["Close"])
-        if len(df) < 20:
-            return {"available": False, "error": "K 線資料不足", "summary_text": "- 技術面摘要: NULL（K 線資料不足）"}
-
-        df["MA5"] = df["Close"].rolling(5).mean()
-        df["MA10"] = df["Close"].rolling(10).mean()
-        df["MA20"] = df["Close"].rolling(20).mean()
-        df["MA60"] = df["Close"].rolling(60).mean()
-        df["Vol_MA5"] = df["Volume"].rolling(5).mean()
-        df["Vol_MA20"] = df["Volume"].rolling(20).mean()
-
-        h9 = df["High"].rolling(9).max()
-        l9 = df["Low"].rolling(9).min()
-        denom = (h9 - l9).replace(0, math.nan)
-        rsv = ((df["Close"] - l9) / denom * 100).fillna(50)
-        k_vals, d_vals = [50.0], [50.0]
-        for v in rsv:
-            k_vals.append(k_vals[-1] * (2 / 3) + float(v) * (1 / 3))
-            d_vals.append(d_vals[-1] * (2 / 3) + k_vals[-1] * (1 / 3))
-        df["K"] = k_vals[1:]
-        df["D"] = d_vals[1:]
-
-        sub = df.tail(int(lookback)).copy()
-        last = sub.iloc[-1]
-        close = s_float(last.get("Close"))
-        ma5 = s_float(last.get("MA5"))
-        ma10 = s_float(last.get("MA10"))
-        ma20 = s_float(last.get("MA20"))
-        ma60 = s_float(last.get("MA60"))
-        k = s_float(last.get("K"))
-        d = s_float(last.get("D"))
-        vol = s_float(last.get("Volume"), 0)
-        vol_ma5 = s_float(last.get("Vol_MA5"), 0)
-        vol_ma20 = s_float(last.get("Vol_MA20"), 0)
-
-        def fmt_price(x):
-            return "NULL" if x is None else f"{x:.2f}"
-        def pct(x):
-            return "NULL" if x is None else f"{x:.2f}%"
-
-        above = []
-        below = []
-        for name, ma in [("5MA", ma5), ("10MA", ma10), ("20MA", ma20), ("60MA", ma60)]:
-            if close is not None and ma is not None:
-                (above if close >= ma else below).append(name)
-
-        if all(v is not None for v in [close, ma5, ma10, ma20, ma60]) and close > ma5 > ma10 > ma20 > ma60:
-            ma_structure = "強多頭排列（收盤價 > 5MA > 10MA > 20MA > 60MA）"
-        elif all(v is not None for v in [close, ma5, ma10, ma20, ma60]) and close < ma5 < ma10 < ma20 < ma60:
-            ma_structure = "空頭排列（收盤價 < 5MA < 10MA < 20MA < 60MA）"
-        else:
-            ma_structure = "均線糾結 / 趨勢需觀察"
-
-        ma5_count = 0
-        if "MA5" in sub.columns:
-            tmp = sub.tail(10)
-            ma5_count = int((tmp["Close"] >= tmp["MA5"]).sum()) if len(tmp) else 0
-        if ma5_count >= 8:
-            trend_line = f"近10日有 {ma5_count} 日收在 5MA 之上，屬沿 5MA 強勢上攻"
-        elif ma5_count >= 6:
-            trend_line = f"近10日有 {ma5_count} 日收在 5MA 之上，屬偏多但強度需觀察"
-        else:
-            trend_line = f"近10日僅 {ma5_count} 日收在 5MA 之上，沿線攻勢不足"
-
-        dev5 = ((close / ma5 - 1) * 100) if close is not None and ma5 not in (None, 0) else None
-        dev20 = ((close / ma20 - 1) * 100) if close is not None and ma20 not in (None, 0) else None
-        if dev20 is not None and dev20 > 15:
-            chase_risk = "短線乖離過大，追價風險高"
-        elif dev20 is not None and dev20 > 8:
-            chase_risk = "短線偏熱，宜等拉回"
-        elif dev20 is not None and dev20 < -8:
-            chase_risk = "短線偏弱，需等止穩"
-        else:
-            chase_risk = "乖離尚可，仍需搭配量價與支撐確認"
-
-        kd_note = "NULL"
-        if k is not None and d is not None:
-            kd_zone = "KD 高檔區" if k >= 80 else ("KD 低檔區" if k <= 20 else "KD 中性區")
-            kd_cross = "KD 偏多 / K 值在 D 值上方" if k >= d else "KD 偏弱 / K 值在 D 值下方"
-            kd_note = f"K={k:.1f}；D={d:.1f}；{kd_zone}；{kd_cross}"
-
-        vol_ratio = (vol / vol_ma20) if vol_ma20 not in (None, 0) else None
-        vol5_ratio = (vol_ma5 / vol_ma20) if vol_ma20 not in (None, 0) else None
-        if vol_ratio is None:
-            vol_note = "量能資料不足"
-        elif vol_ratio >= 2:
-            vol_note = f"爆量（約 {vol_ratio:.2f} 倍 20 日均量）"
-        elif vol_ratio >= 1.2:
-            vol_note = f"量能放大（約 {vol_ratio:.2f} 倍 20 日均量）"
-        else:
-            vol_note = f"量縮（約 {vol_ratio:.2f} 倍 20 日均量）"
-        if vol5_ratio is not None:
-            vol_note += f"；5日均量/20日均量={vol5_ratio:.2f}x"
-
-        recent20 = sub.tail(20)
-        recent60 = sub.tail(60)
-        high20 = s_float(recent20["High"].max()) if not recent20.empty else None
-        high60 = s_float(recent60["High"].max()) if not recent60.empty else None
-        low20 = s_float(recent20["Low"].min()) if not recent20.empty else None
-        supports = []
-        for name, ma in [("5MA", ma5), ("10MA", ma10), ("20MA", ma20), ("60MA", ma60)]:
-            if ma is not None and close is not None and ma <= close:
-                supports.append(f"{name} {ma:.2f}")
-        if low20 is not None:
-            supports.append(f"20日低點 {low20:.2f}")
-        pressure = []
-        if high20 is not None:
-            pressure.append(f"20日高點 {high20:.2f}")
-        if high60 is not None and (high20 is None or abs(high60 - high20) > 0.01):
-            pressure.append(f"60日高點 {high60:.2f}")
-
-        high_pressure = "未見明確高檔賣壓訊號"
-        try:
-            high_vol_day = recent20.loc[recent20["Volume"].idxmax()]
-            hv = s_float(high_vol_day.get("Volume"), 0)
-            hv_ma20 = s_float(high_vol_day.get("Vol_MA20"), 0)
-            if hv_ma20 and hv > hv_ma20 * 1.8 and close is not None and high20 is not None and close < high20 * 0.94:
-                high_pressure = "近期出現高量後未能突破，疑似上檔賣壓需留意"
-        except Exception:
-            pass
-
-        if close is not None and ma20 is not None and close > ma20 and dev20 is not None and dev20 > 15:
-            wash_note = "偏多整理 / 洗盤後續攻機率較高，但仍需量縮拉回與守均線確認"
-        elif close is not None and ma20 is not None and close < ma20:
-            wash_note = "跌破 20MA，偏轉弱，需觀察是否是假跌破或出貨轉弱"
-        else:
-            wash_note = "區間整理，洗盤或出貨需搭配量價與平台支撐確認"
-
-        if close is not None:
-            if ma5 is not None and ma10 is not None and ma20 is not None and close > ma5:
-                buy_rhythm = f"不宜追高，優先等回測 5MA {ma5:.2f} / 10MA {ma10:.2f}；若失守 10MA 再看 20MA {ma20:.2f}"
-            elif ma20 is not None:
-                buy_rhythm = f"等待站回或回測 20MA {ma20:.2f} 後再評估"
-            else:
-                buy_rhythm = "均線資料不足，需人工判斷買點"
-        else:
-            buy_rhythm = "價格資料不足"
-
-        if close is not None and dev20 is not None and dev20 > 15 and k is not None and k >= 80:
-            conclusion = "趨勢偏多但短線偏熱，買進安全邊際下降"
-        elif close is not None and ma20 is not None and close >= ma20:
-            conclusion = "趨勢偏多，適合等回測支撐確認後分批"
-        else:
-            conclusion = "技術面偏弱或盤整，宜降低追價並等待轉強"
-
-        lines = [
-            f"- 技術週期/資料範圍: 日線 / 近 {len(sub)} 根 K 線",
-            f"- 收盤價與均線: 收盤={fmt_price(close)}；5MA={fmt_price(ma5)}；10MA={fmt_price(ma10)}；20MA={fmt_price(ma20)}；60MA={fmt_price(ma60)}",
-            f"- 均線結構: {ma_structure}；站上 {', '.join(above) if above else '無主要均線'}；跌破 {', '.join(below) if below else '無主要均線'}",
-            f"- 沿線上攻: {trend_line}",
-            f"- 乖離與追價風險: 距 5MA={pct(dev5)}；距 20MA={pct(dev20)}；{chase_risk}",
-            f"- KD 狀態: {kd_note}",
-            f"- 量價結構: {vol_note}",
-            f"- 支撐平台: {', '.join(supports[:5]) if supports else 'NULL'}",
-            f"- 賣壓/壓力區: {', '.join(pressure) if pressure else 'NULL'}；{high_pressure}",
-            f"- 洗盤或出貨初判: {wash_note}",
-            f"- 回測買點節奏: {buy_rhythm}",
-            f"- 技術面結論: {conclusion}",
-            "- 使用限制: 技術面只輔助進出場節奏、追價風險、支撐壓力與停損停利，不可覆蓋月營收、EPS、資料品質、Dynamic Cap、可操作估值區間與系統最終燈號。",
-        ]
-        return {
-            "available": True,
-            "summary_text": "\n".join(lines),
-            "close": close,
-            "ma5": ma5,
-            "ma10": ma10,
-            "ma20": ma20,
-            "ma60": ma60,
-            "k": k,
-            "d": d,
-            "dev20": dev20,
-            "conclusion": conclusion,
-        }
-    except Exception as e:
-        return {"available": False, "error": str(e)[:160], "summary_text": f"- 技術面摘要: NULL（{str(e)[:120]}）"}
