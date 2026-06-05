@@ -26,59 +26,6 @@ from google.genai import types
 # 從 utils 引入需要的工具
 from utils import s_float, log_data_health, log_exception, validate_ai_financial_json
 
-# 2.2：兩段式 JSON mime；Pass A 搜尋取材，Pass B 無搜尋 JSON 整理。
-# 百分比類欄位全部用 *_percent，直接填「百分比數字」：730.14% -> 730.14。
-# 系統內部再統一轉成 ratio，避免 Gemini/程式二次縮放造成 730% 變 7.30%。
-FINANCIAL_RESPONSE_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "pe": {"type": "number", "nullable": True},
-        "latest_quarter_eps": {"type": "number", "nullable": True},
-        "ttm_eps": {"type": "number", "nullable": True},
-        "trailing_eps": {"type": "number", "nullable": True},
-        "fiscal_year_eps": {"type": "number", "nullable": True},
-        "forward_eps_system": {"type": "number", "nullable": True},
-        "forward_eps_ai": {"type": "number", "nullable": True},
-        "forward_eps_consensus": {"type": "number", "nullable": True},
-        "forward_eps": {"type": "number", "nullable": True},
-        "forward_eps_fy1": {"type": "number", "nullable": True},
-        "forward_eps_fy2": {"type": "number", "nullable": True},
-        "forward_eps_fy3": {"type": "number", "nullable": True},
-        "forward_eps_fy1_year": {"type": "integer", "nullable": True},
-        "forward_eps_fy2_year": {"type": "integer", "nullable": True},
-        "forward_eps_fy3_year": {"type": "integer", "nullable": True},
-        "forward_eps_fy_basis": {"type": "string", "nullable": True},
-        "forward_eps_fy_source_note": {"type": "string", "nullable": True},
-        "pb": {"type": "number", "nullable": True},
-        "gross_margin_percent": {"type": "number", "nullable": True},
-        "operating_margin_percent": {"type": "number", "nullable": True},
-        "roe_percent": {"type": "number", "nullable": True},
-        "debt_to_equity": {"type": "number", "nullable": True},
-        "monthly_revenue_yoy_percent": {"type": "number", "nullable": True},
-        "monthly_revenue_mom_percent": {"type": "number", "nullable": True},
-        "accumulated_revenue_yoy_percent": {"type": "number", "nullable": True},
-        "earnings_growth_yoy_percent": {"type": "number", "nullable": True},
-        "cagr_percent": {"type": "number", "nullable": True},
-        "dividend_yield_percent": {"type": "number", "nullable": True},
-        "target_price": {"type": "number", "nullable": True},
-        "target_price_high": {"type": "number", "nullable": True},
-        "target_price_avg": {"type": "number", "nullable": True},
-        "target_price_low": {"type": "number", "nullable": True},
-        "target_price_analyst_count": {"type": "integer", "nullable": True},
-        "target_price_rationale": {"type": "string", "nullable": True},
-        "data_period": {"type": "string", "nullable": True},
-        "revenue_month": {"type": "string", "nullable": True},
-        "free_cash_flow": {"type": "number", "nullable": True},
-        "current_ratio": {"type": "number", "nullable": True},
-        "shares_outstanding": {"type": "number", "nullable": True},
-        "revenue_source_quote": {"type": "string", "nullable": True},
-        "source_urls": {"type": "array", "items": {"type": "string"}, "nullable": True},
-        "industry_classification": {"type": "object", "nullable": True},
-        "_sources": {"type": "object", "nullable": True}
-    },
-}
-
 # ==========================================
 # 3. 外部 API 與模型模組
 # ==========================================
@@ -774,15 +721,23 @@ AI_FINANCIAL_FIELD_LABELS = {
     "monthly_revenue_mom_percent": "最新公告月份單月營收 MoM（百分比數字）",
     "accumulated_revenue_yoy_percent": "累計營收 YoY（百分比數字）",
     "earnings_growth_yoy_percent": "預估獲利成長 YoY（百分比數字）",
-    "cagr_percent": "未來三年 CAGR（百分比數字）",
-    "target_price": "目標價",
+    "cagr_percent": "未來 1~3 年 EPS CAGR（百分比數字）",
+    "dividend_yield_percent": "預估現金殖利率（百分比數字）",
+    "gross_margin": "毛利率（legacy，不作正式採用）",
+    "operating_margin": "營益率（legacy，不作正式採用）",
+    "roe": "ROE（legacy，不作正式採用）",
+    "yoy": "營收/獲利成長率 YoY/CAGR（legacy，不作正式採用）",
+    "ai_latest_target_price": "AI 最新目標價補充",
+    "ai_latest_target_price_rationale": "AI 最新目標價理由",
+    "target_price": "AI 最新目標價補充（legacy/補充，不作法人平均）",
     "target_price_high": "目標價高標",
     "target_price_avg": "目標價均值",
     "target_price_low": "目標價低標",
     "target_price_analyst_count": "目標價分析師人數",
     "target_price_rationale": "目標價理由",
     "debt_to_equity": "負債權益比 D/E",
-    "dividend_yield_percent": "預估現金殖利率（百分比數字）",
+    "mom": "最新單月營收 MoM",
+    "dividend_yield": "預估現金殖利率",
     "data_period": "資料期間",
     "free_cash_flow": "自由現金流",
     "current_ratio": "流動比率",
@@ -839,399 +794,6 @@ def _normalize_ai_source_metadata(parsed):
     return parsed
 
 
-
-def _collect_text_for_percent_extraction(obj):
-    """2.2：從 AI JSON / sources 裡收集可解析百分比的原文片段。"""
-    parts = []
-    if not isinstance(obj, dict):
-        return ""
-    for k in ["revenue_source_quote", "target_price_rationale", "forward_eps_fy_source_note", "data_period"]:
-        v = obj.get(k)
-        if isinstance(v, str) and v.strip():
-            parts.append(v)
-    src = obj.get("_sources") or obj.get("field_sources") or obj.get("sources") or {}
-    if isinstance(src, dict):
-        for meta in src.values():
-            if isinstance(meta, dict):
-                for mk in ["note", "quote", "description", "source", "published_date", "period"]:
-                    mv = meta.get(mk)
-                    if isinstance(mv, str) and mv.strip():
-                        parts.append(mv)
-            elif isinstance(meta, str):
-                parts.append(meta)
-    return "；".join(parts)
-
-
-def _extract_percent_from_text(text, patterns):
-    if not text:
-        return None
-    for pat in patterns:
-        m = re.search(pat, text, flags=re.IGNORECASE)
-        if m:
-            try:
-                return float(str(m.group(1)).replace(",", ""))
-            except Exception:
-                return None
-    return None
-
-
-def _flatten_text_values(obj, max_len=12000):
-    """Collect compact text from a nested JSON-like object for deterministic fallback extraction."""
-    parts = []
-    def walk(x):
-        if len("；".join(parts)) > max_len:
-            return
-        if isinstance(x, dict):
-            for k, v in x.items():
-                if k in {"prompt", "extract_prompt", "search_prompt", "query_payload"}:
-                    continue
-                if isinstance(v, (dict, list)):
-                    walk(v)
-                elif v is not None:
-                    t = str(v).strip()
-                    if t and t.lower() not in {"null", "none"}:
-                        parts.append(f"{k}: {t}")
-        elif isinstance(x, list):
-            for v in x:
-                walk(v)
-        elif x is not None:
-            t = str(x).strip()
-            if t:
-                parts.append(t)
-    walk(obj)
-    return "；".join(parts)[:max_len]
-
-
-def _first_number_from_text(text, patterns):
-    if not text:
-        return None
-    for pat in patterns:
-        m = re.search(pat, text, flags=re.IGNORECASE)
-        if not m:
-            continue
-        for g in m.groups():
-            if g is None:
-                continue
-            val = s_float(str(g).replace(",", ""))
-            if val is not None:
-                return val
-    return None
-
-
-def _range_numbers_from_text(text, patterns):
-    if not text:
-        return (None, None)
-    for pat in patterns:
-        m = re.search(pat, text, flags=re.IGNORECASE)
-        if not m:
-            continue
-        nums = []
-        for g in m.groups():
-            val = s_float(str(g).replace(",", "")) if g is not None else None
-            if val is not None:
-                nums.append(val)
-        if len(nums) >= 2:
-            return (min(nums), max(nums))
-    return (None, None)
-
-
-def _candidate_values_dict(parsed, search_parsed=None):
-    """Return merged candidate_values from Pass B and Pass A."""
-    merged = {}
-    for src in (search_parsed, parsed):
-        if isinstance(src, dict) and isinstance(src.get("candidate_values"), dict):
-            merged.update(src.get("candidate_values") or {})
-    return merged
-
-
-def _candidate_text(cv, *keys):
-    if not isinstance(cv, dict):
-        return ""
-    vals = []
-    for k in keys:
-        v = cv.get(k)
-        if v not in (None, "", "null", "None"):
-            vals.append(str(v))
-    return "；".join(vals)
-
-
-def _extract_eps_from_candidate_text(text, default_year=None):
-    """Extract EPS from candidate text without mistaking the year for EPS.
-
-    Examples:
-    - '2026年 EPS 預估中位數 46.04 元 (最高 61.5)' -> 46.04
-    - '2027年 EPS 預估約 56.4 元至 91.75 元' -> 56.4 (保守採低標)
-    """
-    if not text:
-        return None
-    t = str(text).replace(",", "")
-    # Prefer explicitly labelled median / consensus values.
-    pats = [
-        r"(?:中位數|均值|平均|共識)[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*元?",
-        r"EPS[^0-9\-+]{0,30}(?:預估|上看|達|為|約)?[^0-9\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*元?",
-    ]
-    for pat in pats:
-        m = re.search(pat, t, flags=re.IGNORECASE)
-        if m:
-            v = s_float(m.group(1))
-            if v is not None and 0 < v < 1000 and (default_year is None or abs(v - default_year) > 20):
-                return v
-    # Remove years before taking ranges/numbers.
-    t2 = re.sub(r"20\d{2}\s*年?", " ", t)
-    nums = [s_float(x) for x in re.findall(r"[\-+]?\d+(?:\.\d+)?", t2)]
-    nums = [x for x in nums if x is not None and 0 < x < 1000 and (default_year is None or abs(x - default_year) > 20)]
-    if nums:
-        # EPS ranges use conservative low value.
-        return min(nums) if any(sep in t for sep in ["至", "~", "-", "到"]) else nums[0]
-    return None
-
-
-def _extract_price_range_from_candidate_text(text):
-    if not text:
-        return (None, None)
-    t = str(text).replace(",", "")
-    # Prefer phrases explicitly mentioning target price / 目標價.
-    lo, hi = _range_numbers_from_text(t, [
-        r"(?:目標價|target_price|latest_target_price)[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)\s*元?\s*(?:至|~|到|-)\s*([\-+]?\d+(?:\.\d+)?)\s*元?",
-        r"介於\s*([\-+]?\d+(?:\.\d+)?)\s*元?\s*(?:至|~|到|-)\s*([\-+]?\d+(?:\.\d+)?)\s*元?",
-    ])
-    if lo is not None and hi is not None:
-        return lo, hi
-    # Fallback: collect price-like numbers, exclude years and percentages.
-    t2 = re.sub(r"20\d{2}", " ", t)
-    nums = [s_float(x) for x in re.findall(r"[\-+]?\d+(?:\.\d+)?(?=\s*元)", t2)]
-    nums = [x for x in nums if x is not None and 10 <= x <= 10000]
-    if len(nums) >= 2:
-        return min(nums), max(nums)
-    if len(nums) == 1:
-        return nums[0], nums[0]
-    return (None, None)
-
-
-def _extract_analyst_count_from_text(text):
-    if not text:
-        return None
-    t = str(text)
-    for pat in [r"([0-9]{1,3})\s*(?:位|家)?\s*(?:分析師|法人|券商)", r"(?:分析師|法人|券商)[^0-9]{0,12}([0-9]{1,3})\s*(?:位|家)?"]:
-        m = re.search(pat, t, flags=re.IGNORECASE)
-        if m:
-            n = s_float(m.group(1))
-            if n is not None and 0 < n <= 100:
-                return int(n)
-    return None
-
-
-def _harvest_candidate_values_into_top_level(parsed, search_parsed=None):
-    """2.2 data-safety fallback.
-
-    Pass B sometimes extracts correct values into candidate_values / source trace, but does not
-    place them on top-level fields consumed by UI and valuation.  This function promotes only
-    explicit, field-specific values from Pass A / Pass B text to canonical top-level fields.
-
-    It never promotes legacy yoy/mom fields; percent values are promoted only to *_percent.
-    """
-    if not isinstance(parsed, dict):
-        return parsed
-    out = dict(parsed)
-    combined = {
-        "parsed": parsed,
-        "search_pass": search_parsed if isinstance(search_parsed, dict) else {},
-    }
-    text = _flatten_text_values(combined)
-    warnings = list(out.get("_ai_validation_warnings") or [])
-
-    def set_if_missing(key, val, note=""):
-        if val is None:
-            return
-        if out.get(key) in (None, "", "null", "None"):
-            out[key] = val
-            if note:
-                warnings.append(note)
-
-    # Revenue percent fields from explicit monthly/cumulative revenue text.
-    set_if_missing("monthly_revenue_yoy_percent", _first_number_from_text(text, [
-        r"monthly_revenue_yoy[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%?",
-        r"revenue_yoy[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%",
-        r"年增[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*[%％]",
-    ]), "2.2回收層：已由候選值/原文回填 monthly_revenue_yoy_percent。")
-    set_if_missing("monthly_revenue_mom_percent", _first_number_from_text(text, [
-        r"monthly_revenue_mom[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%?",
-        r"revenue_mom[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%",
-        r"月增[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*[%％]",
-    ]), "2.2回收層：已由候選值/原文回填 monthly_revenue_mom_percent。")
-    set_if_missing("accumulated_revenue_yoy_percent", _first_number_from_text(text, [
-        r"cumulative_revenue_yoy[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%?",
-        r"accumulated_revenue_yoy[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%?",
-        r"(?:累計|前\s*\d+\s*月)[^%％]{0,60}年增[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*[%％]",
-    ]), "2.2回收層：已由候選值/原文回填 accumulated_revenue_yoy_percent。")
-
-    # Latest quarter and TTM/annual/forward EPS.
-    set_if_missing("latest_quarter_eps", _first_number_from_text(text, [
-        r"latest_quarter_eps[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)",
-        r"最新單季\s*EPS[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)",
-        r"(?:單季|每股稅後純益|EPS)[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*元",
-    ]), "2.2回收層：已由候選值/原文回填 latest_quarter_eps。")
-    set_if_missing("ttm_eps", _first_number_from_text(text, [
-        r"ttm_eps[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)",
-        r"近四季[^0-9\-+]{0,20}EPS[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)",
-    ]))
-    set_if_missing("fiscal_year_eps", _first_number_from_text(text, [
-        r"fiscal_year_eps[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)",
-        r"(?:完整年度|全年|年度)\s*EPS[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)",
-    ]))
-
-    cv = _candidate_values_dict(parsed, search_parsed)
-    fy_map = [
-        ("forward_eps_fy1", "forward_eps_fy1_year", 2026, ["forward_eps_fy1", "FY1_EPS", "eps_fy1", "fy1_eps"], [r"forward_eps_fy1[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)", r"FY1_EPS[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)", r"eps_fy1[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)", r"2026\s*年\s*EPS[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)"]),
-        ("forward_eps_fy2", "forward_eps_fy2_year", 2027, ["forward_eps_fy2", "FY2_EPS", "eps_fy2", "fy2_eps"], [r"forward_eps_fy2[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)", r"FY2_EPS[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)", r"eps_fy2[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)", r"2027\s*年\s*EPS[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)"]),
-        ("forward_eps_fy3", "forward_eps_fy3_year", 2028, ["forward_eps_fy3", "FY3_EPS", "eps_fy3", "fy3_eps"], [r"forward_eps_fy3[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)", r"FY3_EPS[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)", r"eps_fy3[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)", r"2028\s*年\s*EPS[^0-9\-+]{0,40}([\-+]?\d+(?:\.\d+)?)"]),
-    ]
-    for eps_key, year_key, default_year, cv_keys, patterns in fy_map:
-        cv_text = _candidate_text(cv, *cv_keys)
-        val = _extract_eps_from_candidate_text(cv_text, default_year=default_year) if cv_text else None
-        if val is None:
-            val = _extract_eps_from_candidate_text(text, default_year=default_year)
-        if val is None:
-            val = _first_number_from_text(text, patterns)
-            # Avoid accidentally using year as EPS.
-            if val is not None and abs(float(val) - float(default_year)) <= 20:
-                val = None
-        set_if_missing(eps_key, val, f"2.2回收層：已由候選值/原文回填 {eps_key}。" if val is not None else "")
-        if out.get(eps_key) not in (None, "", "null", "None") and out.get(year_key) in (None, "", "null", "None"):
-            out[year_key] = int(default_year)
-    if out.get("forward_eps_consensus") in (None, "", "null", "None") and out.get("forward_eps_fy1") not in (None, "", "null", "None"):
-        out["forward_eps_consensus"] = out.get("forward_eps_fy1")
-    if out.get("forward_eps") in (None, "", "null", "None") and out.get("forward_eps_consensus") not in (None, "", "null", "None"):
-        out["forward_eps"] = out.get("forward_eps_consensus")
-
-    # Margins / CAGR / target price from explicit candidate text.
-    set_if_missing("gross_margin_percent", _first_number_from_text(text, [
-        r"gross_margin_percent[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%?",
-        r"毛利率[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*[%％]",
-    ]), "2.2回收層：已由候選值/原文回填 gross_margin_percent。")
-    set_if_missing("operating_margin_percent", _first_number_from_text(text, [
-        r"operating_margin_percent[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*%?",
-        r"營益率[^0-9\-+]{0,20}([\-+]?\d+(?:\.\d+)?)\s*[%％]",
-    ]))
-    set_if_missing("cagr_percent", _first_number_from_text(text, [
-        r"(?:future_3y_cagr|eps_cagr|CAGR)[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)\s*%",
-        r"複合成長率[^0-9\-+]{0,30}([\-+]?\d+(?:\.\d+)?)\s*[%％]",
-    ]))
-
-    target_text = _candidate_text(cv, "latest_target_price", "target_price", "target_price_range", "broker_target_price") or text
-    lo, hi = _extract_price_range_from_candidate_text(target_text)
-    if lo is None or hi is None:
-        lo, hi = _range_numbers_from_text(text, [
-            r"latest_target_price[^0-9\-+]{0,60}([\-+]?\d+(?:\.\d+)?)\s*元?\s*(?:至|~|-|到)\s*([\-+]?\d+(?:\.\d+)?)\s*元?",
-            r"目標價[^0-9\-+]{0,60}([\-+]?\d+(?:\.\d+)?)\s*元?\s*(?:至|~|-|到)\s*([\-+]?\d+(?:\.\d+)?)\s*元?",
-        ])
-    set_if_missing("target_price_low", lo, "2.2回收層：已由候選值/原文回填 target_price_low。" if lo is not None else "")
-    set_if_missing("target_price_high", hi, "2.2回收層：已由候選值/原文回填 target_price_high。" if hi is not None else "")
-    if out.get("target_price_avg") in (None, "", "null", "None") and lo is not None and hi is not None:
-        out["target_price_avg"] = round((float(lo) + float(hi)) / 2.0, 2)
-        warnings.append("2.2回收層：目標價只有高低區間，已用區間中點暫作 target_price_avg。")
-    if out.get("target_price") in (None, "", "null", "None") and out.get("target_price_avg") not in (None, "", "null", "None"):
-        out["target_price"] = out.get("target_price_avg")
-    if out.get("target_price_analyst_count") in (None, "", "null", "None"):
-        cnt = _extract_analyst_count_from_text(text)
-        if cnt is not None:
-            out["target_price_analyst_count"] = cnt
-            warnings.append("2.2回收層：已由候選值/原文回填 target_price_analyst_count。")
-
-    if out.get("forward_eps_fy_source_note") in (None, "", "null", "None"):
-        # Keep source note concise; do not feed it into numeric decisions.
-        cv = None
-        if isinstance(search_parsed, dict):
-            cv = search_parsed.get("candidate_values")
-        if isinstance(cv, dict):
-            out["forward_eps_fy_source_note"] = "；".join([str(cv.get(k)) for k in ["eps_fy1", "eps_fy2", "eps_fy3"] if cv.get(k)])[:300] or None
-    if out.get("forward_eps_fy_basis") in (None, "", "null", "None") and out.get("forward_eps_fy1") not in (None, "", "null", "None"):
-        out["forward_eps_fy_basis"] = "Pass A 搜尋候選值 / AI JSON 整理"
-
-    if warnings:
-        out["_ai_validation_warnings"] = list(dict.fromkeys(warnings))
-    return out
-
-
-def _strict_ai_percent_json_guard(parsed):
-    """2.2：AI JSON 回收層百分比欄位守門。
-
-    重點：
-    1. 只讓 *_percent 欄位成為正式百分比資料來源。
-    2. legacy yoy/mom/gross_margin/roe 等先封存，不直接進正式欄位。
-    3. 若 revenue_source_quote 或 sources 原文含「年增 730.14%」，自動補 monthly_revenue_yoy_percent=730.14。
-    """
-    if not isinstance(parsed, dict):
-        return parsed
-    out = dict(parsed)
-    warnings = list(out.get("_ai_validation_warnings") or [])
-    raw_legacy = dict(out.get("_raw_legacy_percent_fields") or {})
-
-    legacy_to_percent = {
-        "yoy": "monthly_revenue_yoy_percent",
-        "revenue_yoy": "monthly_revenue_yoy_percent",
-        "rev_growth": "monthly_revenue_yoy_percent",
-        "monthly_revenue_yoy": "monthly_revenue_yoy_percent",
-        "mom": "monthly_revenue_mom_percent",
-        "revenue_mom": "monthly_revenue_mom_percent",
-        "monthly_revenue_mom": "monthly_revenue_mom_percent",
-        "gross_margin": "gross_margin_percent",
-        "operating_margin": "operating_margin_percent",
-        "roe": "roe_percent",
-        "dividend_yield": "dividend_yield_percent",
-        "earnings_growth_yoy": "earnings_growth_yoy_percent",
-        "eps_growth_yoy": "earnings_growth_yoy_percent",
-        "cagr": "cagr_percent",
-        "earnings_cagr": "cagr_percent",
-    }
-
-    raw_text = _collect_text_for_percent_extraction(out)
-    # 優先從原文抓營收百分比，避免 Gemini JSON 把 730.14% 寫成 yoy=7.30。
-    yoy_from_quote = _extract_percent_from_text(raw_text, [
-        r"(?:單月)?(?:營收)?(?:年增率?|YoY)[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
-        r"年增[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
-        r"YoY[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
-    ])
-    mom_from_quote = _extract_percent_from_text(raw_text, [
-        r"(?:月增率?|MoM)[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
-        r"月增[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
-        r"MoM[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
-    ])
-    acc_yoy_from_quote = _extract_percent_from_text(raw_text, [
-        r"(?:累計|前\s*\d+\s*月)[^%]{0,40}(?:年增|YoY)[^\d\-+]{0,12}([\-+]?\d+(?:\.\d+)?)\s*%",
-    ])
-    if out.get("monthly_revenue_yoy_percent") in (None, "", "null", "None") and yoy_from_quote is not None:
-        out["monthly_revenue_yoy_percent"] = yoy_from_quote
-        warnings.append(f"2.2回收層：已從原文擷取單月營收 YoY={yoy_from_quote:.2f}%，優先於 legacy yoy。")
-    if out.get("monthly_revenue_mom_percent") in (None, "", "null", "None") and mom_from_quote is not None:
-        out["monthly_revenue_mom_percent"] = mom_from_quote
-        warnings.append(f"2.2回收層：已從原文擷取單月營收 MoM={mom_from_quote:.2f}%。")
-    if out.get("accumulated_revenue_yoy_percent") in (None, "", "null", "None") and acc_yoy_from_quote is not None:
-        out["accumulated_revenue_yoy_percent"] = acc_yoy_from_quote
-
-    for legacy_key, pct_key in legacy_to_percent.items():
-        if legacy_key in out and out.get(legacy_key) not in (None, "", "null", "None"):
-            raw_legacy[legacy_key] = out.get(legacy_key)
-            raw_val = s_float(out.get(legacy_key))
-            # 非營收類百分比若只有 legacy 欄位，仍可安全轉進 *_percent。
-            # 但營收 YoY/MoM 類最容易發生 730% -> 7.30% 錯位；沒有 quote 或 *_percent 時先封存，不採用。
-            is_revenue_legacy = legacy_key in {"yoy", "revenue_yoy", "rev_growth", "monthly_revenue_yoy", "mom", "revenue_mom", "monthly_revenue_mom"}
-            if out.get(pct_key) in (None, "", "null", "None") and raw_val is not None and not is_revenue_legacy:
-                if abs(raw_val) <= 1.5:
-                    out[pct_key] = raw_val * 100.0
-                    warnings.append(f"2.2回收層：legacy {legacy_key}={raw_val} 疑似 ratio，已轉為 {pct_key}={raw_val*100.0:.2f}。")
-                else:
-                    out[pct_key] = raw_val
-                    warnings.append(f"2.2回收層：legacy {legacy_key}={raw_val} 疑似百分比數字，已轉為 {pct_key}。")
-            out[legacy_key] = None
-
-    if raw_legacy:
-        out["_raw_legacy_percent_fields"] = raw_legacy
-        warnings.append("2.2回收層：已封存 legacy 百分比欄位；正式計算只使用 *_percent 欄位與系統資料。")
-
-    out["_ai_validation_warnings"] = warnings
-    return out
-
 def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1-pro-preview"):
     """
     AI 財報校對與補齊.
@@ -1265,11 +827,13 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
         - forward_eps_fy_basis：請填「法人共識年度預估 / 單一券商預估 / 新聞引用預估 / AI依成長率推估 / 查無明確資料」之一。
         若年度不明確或只是 AI 自行推算，請填 null 或明確標示「AI推估，非法人共識」。
     6. 「股價淨值比 (P/B)」
-    7. 「毛利率」
-    8. 「營益率」
-    9. 「ROE(股東權益報酬率)」
-    10. 「法人預估未來 1~3 年獲利複合成長率 (CAGR)，若無則用最新營收 YoY 替代」
-    11. 「國內外法人最新預估目標價 (Target Price)」
+    7. 「毛利率」：請填 gross_margin_percent，67.90% 填 67.90。
+    8. 「營益率」：請填 operating_margin_percent。
+    9. 「ROE(股東權益報酬率)」：請填 roe_percent。
+    10. 「法人預估未來 1~3 年獲利複合成長率 (CAGR)」：請填 cagr_percent；不可用單月營收 YoY 冒充 CAGR。
+    11. 「國內外法人最新預估目標價」：
+        - 若有高/均/低，請填 target_price_high / target_price_avg / target_price_low。
+        - 若只查到最新單一券商/新聞目標價，請填 ai_latest_target_price 或 target_price，並在來源註明日期；它不等於法人平均。
     12. 「負債權益比 (Debt-to-Equity Ratio)」
     13. 「最新單月營收月增率(MoM)」
     14. 「預估現金殖利率 (Dividend Yield)」(例如：擬配發現金股利2元，最新股價900元，殖利率應為 0.0022)
@@ -1302,17 +866,14 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     - trailing_eps 與 forward_eps 為向下相容 legacy 欄位，trailing_eps 可同 ttm_eps，forward_eps 可同 forward_eps_consensus 或 forward_eps_ai。
 
     必須嚴格回傳包含上述財務欄位的 JSON 格式。
-    【2.2 兩段式 JSON mime 與百分比欄位硬性規則】
-    - 本函式採兩段式：Pass A 使用 Google Search 搜尋取材；Pass B 關閉搜尋，只根據 Pass A 來源整理 JSON。
-    - 請只使用下列正式欄位輸出 JSON，不要自行新增 legacy 百分比欄位。
-    - 所有百分比類欄位一律使用 *_percent 欄位，直接填「百分比數字」，不可填小數比率。
-      例：730.14% -> monthly_revenue_yoy_percent=730.14；8.55% -> monthly_revenue_mom_percent=8.55；67.90% -> gross_margin_percent=67.90；17.95% -> roe_percent=17.95；0.34% -> dividend_yield_percent=0.34。
-    - 不要輸出 yoy、mom、gross_margin、operating_margin、roe、dividend_yield 這些 legacy 百分比欄位；若非正式欄位請省略。_sources 來源物件的 key 也必須使用 *_percent 欄位名，不可使用 yoy / mom / gross_margin 等 legacy key。
-    - monthly_revenue_yoy_percent 只能填最新公告月份「單月營收 YoY」；若只找到累計 YoY，請填 accumulated_revenue_yoy_percent，不可混用。
-    - 若不確定是單月 YoY 或累計 YoY，monthly_revenue_yoy_percent 請填 null。
-    - 請盡量附 revenue_month 與 revenue_source_quote，例如「2026年5月合併營收276.70億元，年增730.14%，月增8.55%」。
-    數值請直接輸出數字。若查無資料，該欄位請填 null。
-    請務必搜尋近期各大券商對該公司的最新目標價。
+    【2.2 百分比欄位硬性規則】所有百分比一律用 *_percent 欄位，直接填百分比數字：
+    - 730.14% → monthly_revenue_yoy_percent = 730.14，不可填 7.3014 或 0.073014。
+    - 8.55% → monthly_revenue_mom_percent = 8.55，不可填 0.0855。
+    - 67.90% → gross_margin_percent = 67.90。
+    - 17.95% → roe_percent = 17.95。
+    - 3.2% → dividend_yield_percent = 3.2。
+    若查無資料，該欄位請填 null。不要輸出 yoy、mom、gross_margin、operating_margin、roe、dividend_yield 等 legacy 百分比欄位作為正式資料。
+    請務必搜尋近期各大券商對該公司的最新目標價，並盡量拆出高/均/低、分析師人數、最新單一目標價、來源日期與核心理由。
 
     重要：除了 18 個財務欄位，請額外回傳「_sources」物件，逐欄標示每個數值的來源。
     _sources 內每個欄位必須包含：
@@ -1324,27 +885,19 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
 
     注意：本函式只負責財報與估值校對，不要查詢 ETF 持股；ETF 持股由獨立按鈕 get_etf_holders_from_ai() 執行。
     JSON 格式範例：
-    {{"pe": 15.2, "latest_quarter_eps": 1.35, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin_percent": 25.5, "operating_margin_percent": 12.3, "roe_percent": 15.0, "monthly_revenue_yoy_percent": 35.0, "monthly_revenue_mom_percent": 1.5, "accumulated_revenue_yoy_percent": null, "earnings_growth_yoy_percent": null, "cagr_percent": null, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "dividend_yield_percent": 3.2, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
+    {{"pe": 15.2, "latest_quarter_eps": 1.35, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin_percent": 25.5, "operating_margin_percent": 12.3, "roe_percent": 15.0, "monthly_revenue_yoy_percent": 35.0, "monthly_revenue_mom_percent": 1.5, "cagr_percent": null, "ai_latest_target_price": 1050.0, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "dividend_yield_percent": 3.2, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
     絕對不要輸出 markdown 標記或其他文字。"""
 
-    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、最新公告月份單月營收 YoY / MoM、累計營收 YoY、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。請務必確認並標示出 EPS 對應年度、月營收公告月份、資料發布日期與來源！所有百分比欄位請使用 *_percent 欄位填百分比數字，例如 730.14% 填 730.14，不要填 7.3014 或 0.073014。不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
+    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、最新公告月份單月營收 YoY / MoM、累計營收 YoY、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。請務必確認並標示出 EPS 對應年度、資料發布日期與來源！不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
 
-    def _make_config(search_enabled=True, schema_enabled=True):
+    def _make_config(search_enabled=True):
         kwargs = {
             "system_instruction": system_prompt,
             "response_mime_type": "application/json",
         }
-        if schema_enabled:
-            kwargs["response_schema"] = FINANCIAL_RESPONSE_SCHEMA
         if search_enabled:
             kwargs["tools"] = [{"google_search": {}}]
-        try:
-            return types.GenerateContentConfig(**kwargs)
-        except TypeError:
-            # 部分 google-genai 版本若不支援 response_schema，退回 JSON mime，
-            # 但後端 validate_ai_financial_json 仍會執行 2.2 全域單位防呆。
-            kwargs.pop("response_schema", None)
-            return types.GenerateContentConfig(**kwargs)
+        return types.GenerateContentConfig(**kwargs)
 
     def _is_non_retryable_error(err_text):
         """授權/權限/模型不存在這類錯誤，短時間重試通常無效。"""
@@ -1357,211 +910,73 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
         ]
         return any(k in t for k in fatal_keywords)
 
-    # 2.2-B：兩段式 AI 財報回收。
-    # Pass A：Gemini Pro + Google Search 只負責搜尋與保留原文/來源。
-    # Pass B：關閉 Google Search，用 JSON mime 從 Pass A 原文整理結構化 JSON；不再強用 response_schema。
+    # Pro Only：只用付費版高階模型 + Google Search；不降級。
     candidate_model = "gemini-3.1-pro-preview"
-    search_retry_delays = [0, 3]
-    extract_retry_delays = [0, 1]
+    retry_delays = [0, 3, 8]
     attempts = []
+    response = None
+    text = None
     used_model = candidate_model
     used_search = True
-    used_response_schema = False
     fallback_reason = ""
     last_error = None
 
-    def _parse_json_from_text(raw_text):
-        if not raw_text:
-            return None, "empty"
-        clean = re.sub(r"```json\n?|```", "", str(raw_text)).strip()
-        s_idx = clean.find('{')
-        e_idx = clean.rfind('}')
-        if s_idx == -1 or e_idx == -1 or e_idx <= s_idx:
-            return None, "no-json-object"
-        try:
-            return json.loads(clean[s_idx:e_idx+1]), None
-        except Exception as e:
-            return None, str(e)[:200]
-
-    def _get_grounding_links(resp):
-        links = []
-        try:
-            if resp and resp.candidates and resp.candidates[0].grounding_metadata:
-                for chunk in resp.candidates[0].grounding_metadata.grounding_chunks:
-                    if getattr(chunk, "web", None) and getattr(chunk.web, "uri", None):
-                        links.append(chunk.web.uri)
-        except Exception as e:
-            log_exception("Gemini", "financial_search:grounding_metadata", e)
-        return list(dict.fromkeys(links))
-
-    search_prompt_text = f"""請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、最新公告月份單月營收 YoY / MoM、累計營收 YoY、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。
-請務必保留可查證的原文片段與資料發布日期，尤其是月營收原文，例如「2026年5月合併營收276.70億元，年增730.14%，月增8.55%」。
-本步驟只負責搜尋取材與來源彙整，不要自行縮放百分比，不要把 730.14% 改寫成 7.30%。
-請在 candidate_values 盡量列出：monthly_revenue_yoy、monthly_revenue_mom、cumulative_revenue_yoy、latest_quarter_eps、gross_margin、operating_margin、FY1_EPS、FY2_EPS、FY3_EPS、future_3y_cagr、latest_target_price、target_price_analyst_count、target_price_rationale、free_cash_flow、current_ratio。
-請回傳 JSON，欄位可包含：search_summary、revenue_source_quote、source_urls、published_date、data_period、candidate_values、_sources。不要查詢 ETF 持股。"""
-
-    search_response = None
-    search_text = None
-    for idx, delay_sec in enumerate(search_retry_delays, start=1):
+    for idx, delay_sec in enumerate(retry_delays, start=1):
         if delay_sec > 0:
             time.sleep(delay_sec)
+
         try:
-            search_response = client.models.generate_content(
+            response = client.models.generate_content(
                 model=candidate_model,
-                contents=search_prompt_text,
-                config=types.GenerateContentConfig(
-                    system_instruction=(
-                        "你是財經資料搜尋助手。請使用 Google Search 取得最新、可查證的台股財報與法人資料。"
-                        "此步驟只做搜尋取材與來源整理；百分比請保留原文百分比數字，不要轉小數。"
-                    ),
-                    response_mime_type="application/json",
-                    tools=[{"google_search": {}}]
-                )
+                contents=prompt_text,
+                config=_make_config(search_enabled=True)
             )
-            search_text = search_response.text
+            text = response.text
             log_data_health("Gemini", True, 200)
             attempts.append({
-                "phase": "A-search",
                 "attempt": idx,
                 "model": candidate_model,
                 "search_enabled": True,
-                "response_schema_enabled": False,
                 "delay_before_retry_sec": delay_sec,
                 "ok": True,
-                "reason": "2.2 兩段式 Pass A 搜尋取材成功"
+                "reason": "Pro Only 同模型聯網重試成功" if idx > 1 else "Pro Only 付費版高階模型聯網成功"
             })
             break
         except Exception as e:
             err_msg = str(e)
             last_error = err_msg
-            log_data_health("Gemini", False, f"ERR:{candidate_model}:search-pass:try{idx}")
+            log_data_health("Gemini", False, f"ERR:{candidate_model}:search:try{idx}")
             attempts.append({
-                "phase": "A-search",
                 "attempt": idx,
                 "model": candidate_model,
                 "search_enabled": True,
-                "response_schema_enabled": False,
                 "delay_before_retry_sec": delay_sec,
                 "ok": False,
                 "error": err_msg[:500],
-                "reason": "2.2 兩段式 Pass A 搜尋取材失敗；不降級，只重試同模型"
+                "reason": "Pro Only 付費版高階模型聯網失敗；不降級，只重試同模型"
             })
             if _is_non_retryable_error(err_msg):
                 break
 
-    if search_response is None or not search_text:
+    if response is None or text is None:
         return {
             "error": (
-                "Gemini 3 Pro Preview（付費版）聯網財報搜尋取材失敗。"
-                f"系統已用同一付費模型重試 Pass A {len(attempts)} 次，仍未成功；"
-                "已禁止降級到 2.5 Pro / 2.5 Flash / 離線保底，以避免不準數據進入估值模型。"
+                "Gemini 3 Pro Preview（付費版）聯網財報校對失敗。"
+                f"系統已用同一付費模型重試 {len(attempts)} 次，仍未成功；"
+                "已禁止降級到 2.5 Pro / 2.5 Flash / 離線保底，以避免不準數據進入極限高空價。"
+                "請稍後再試，或檢查 API 權限、配額與模型可用狀態。"
             ),
             "last_error": str(last_error)[:500] if last_error else None,
-            "attempts": attempts,
+            "attempts": attempts
         }
 
-    search_parsed, search_parse_error = _parse_json_from_text(search_text)
-    if not isinstance(search_parsed, dict):
-        search_parsed = {"search_summary": str(search_text)[:4000], "parse_error": search_parse_error}
-    grounding_links = _get_grounding_links(search_response)
-    if grounding_links and not search_parsed.get("source_urls"):
-        search_parsed["source_urls"] = grounding_links
+    if not text:
+        return {
+            "error": "Gemini 3 Pro Preview（付費版）回傳內容為空；系統不降級，請稍後重試。",
+            "attempts": attempts
+        }
 
-    extract_prompt_text = f"""你現在只做結構化資料抽取，不可上網搜尋，不可引入新資料。
-請只根據下方「搜尋取材 JSON / 原文片段」抽取台股 {stock_name} ({stock_id}) 的財報欄位，並整理成正式 JSON。
-
-【百分比欄位硬性規則】
-- 所有百分比欄位必須使用 *_percent，直接填百分比數字。
-- 730.14% 必須填 monthly_revenue_yoy_percent=730.14，不可填 7.3014 或 0.073014。
-- 8.55% 必須填 monthly_revenue_mom_percent=8.55，不可填 0.0855。
-- 67.90% 必須填 gross_margin_percent=67.90。
-- 若只找到累計營收年增率，請填 accumulated_revenue_yoy_percent，不可混入 monthly_revenue_yoy_percent。
-- 若無法確認單月 YoY，monthly_revenue_yoy_percent 請填 null。
-- 不要輸出 yoy、mom、gross_margin、operating_margin、roe、dividend_yield 等 legacy 百分比欄位。
-
-【搜尋取材 JSON / 原文片段】
-{json.dumps(search_parsed, ensure_ascii=False, indent=2)}
-
-請只輸出 JSON，不要輸出 markdown 或其他文字。"""
-
-    extract_response = None
-    extract_text = None
-    extract_error = None
-
-    # 2.2 正式策略：Pass B 不再強用 response_schema，改用無搜尋 JSON mime 整理。
-    # 原因：目前 Gemini 3.1 Pro Preview + Google Search / schema 組合容易不相容；
-    # 兩段式的重點是「先找來源，再整理 JSON」，並由後端守門封存 legacy 欄位。
-    for idx, delay_sec in enumerate(extract_retry_delays, start=1):
-        if delay_sec > 0:
-            time.sleep(delay_sec)
-        try:
-            extract_response = client.models.generate_content(
-                model=candidate_model,
-                contents=extract_prompt_text,
-                config=types.GenerateContentConfig(
-                    system_instruction=(
-                        "你是財經資料結構化整理助手。不可上網搜尋，不可新增 Pass A 沒有的資料。"
-                        "請只根據使用者提供的搜尋取材 JSON / 原文片段整理成 JSON。"
-                        "所有百分比欄位必須使用 *_percent，並直接填百分比數字；legacy 欄位一律不要輸出。"
-                    ),
-                    response_mime_type="application/json"
-                )
-            )
-            extract_text = extract_response.text
-            attempts.append({
-                "phase": "B-json-extract",
-                "attempt": idx,
-                "model": candidate_model,
-                "search_enabled": False,
-                "response_schema_enabled": False,
-                "delay_before_retry_sec": delay_sec,
-                "ok": True,
-                "reason": "2.2 兩段式 Pass B 無搜尋 JSON mime 整理成功"
-            })
-            break
-        except Exception as e:
-            extract_error = str(e)
-            attempts.append({
-                "phase": "B-json-extract",
-                "attempt": idx,
-                "model": candidate_model,
-                "search_enabled": False,
-                "response_schema_enabled": False,
-                "delay_before_retry_sec": delay_sec,
-                "ok": False,
-                "error": extract_error[:500],
-                "reason": "2.2 兩段式 Pass B 無搜尋 JSON mime 整理失敗；快速重試"
-            })
-            if _is_non_retryable_error(extract_error):
-                break
-
-    if not extract_text:
-        attempts.append({
-            "phase": "B-json-extract",
-            "attempt": "fallback",
-            "model": candidate_model,
-            "search_enabled": False,
-            "response_schema_enabled": False,
-            "ok": False,
-            "error": str(extract_error)[:500] if extract_error else None,
-            "reason": "Pass B 失敗，改用 Pass A 搜尋 JSON 後端守門"
-        })
-        fallback_reason = "2.2 兩段式：Pass B JSON mime 整理失敗，已改用 Pass A 搜尋資料由後端守門處理。"
-        extract_text = json.dumps(search_parsed, ensure_ascii=False)
-
-    parsed, parse_error = _parse_json_from_text(extract_text)
-    if not isinstance(parsed, dict):
-        parsed = dict(search_parsed)
-        fallback_reason = (fallback_reason + "；" if fallback_reason else "") + f"Pass B JSON 解析失敗({parse_error})，改用 Pass A 搜尋 JSON 後端守門。"
-
-    # 把 Pass A 可查證資訊帶入 Pass B 結果，方便回收層從原文 quote 擷取 730.14% 等百分比。
-    for carry_key in ["revenue_source_quote", "source_urls", "published_date", "data_period"]:
-        if parsed.get(carry_key) in (None, "", [], {}, "null", "None") and search_parsed.get(carry_key) not in (None, "", [], {}, "null", "None"):
-            parsed[carry_key] = search_parsed.get(carry_key)
-    parsed["_search_pass_raw"] = search_parsed
-    parsed["_two_pass_mode"] = True
-
-    marker_match = re.search(r"\[TARGET_PRICE:\s*([^,\]]+)\s*,\s*([^,\]]+)\s*,\s*([^\]]+)\]", str(extract_text or search_text))
+    marker_match = re.search(r"\[TARGET_PRICE:\s*([^,\]]+)\s*,\s*([^,\]]+)\s*,\s*([^\]]+)\]", text)
     marker_data = {}
     if marker_match:
         marker_data = {
@@ -1570,32 +985,44 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
             "target_price_low": s_float(marker_match.group(3).replace("無", "")),
         }
 
-    parsed = _harvest_candidate_values_into_top_level(parsed, search_parsed)
-    parsed = _strict_ai_percent_json_guard(parsed)
-    parsed.update({k: v for k, v in marker_data.items() if v is not None and parsed.get(k) is None})
-    parsed = _normalize_ai_source_metadata(parsed)
-    parsed = validate_ai_financial_json(parsed, stock_id=stock_id, stock_name=stock_name)
-    parsed = _normalize_ai_source_metadata(parsed)
-    parsed["model_used"] = used_model
-    parsed["ai_search_enabled"] = bool(used_search)
-    parsed["response_schema_enabled"] = False
-    parsed["fallback_reason"] = fallback_reason or "無"
-    parsed["attempts"] = attempts
-    parsed["retry_policy"] = "2.2 兩段式 JSON mime：Pass A 同模型 + Google Search 最多 2 次；Pass B 同模型關閉搜尋 JSON 整理最多 2 次；不降級。"
-    parsed["query_payload"] = json.dumps({
-        "stock": f"{stock_name} ({stock_id})",
-        "target_year": target_year,
-        "model_used": used_model,
-        "mode": "2.2 two-pass search_then_json_extract",
-        "pass_a_google_search_enabled": True,
-        "pass_b_google_search_enabled": False,
-        "response_schema_enabled": False,
-        "fallback_reason": fallback_reason or "無",
-        "retry_policy": "Pass A delays 0s, 3s; Pass B JSON mime delays 0s, 1s; no model downgrade.",
-        "search_prompt": search_prompt_text,
-        "extract_prompt": extract_prompt_text,
-    }, ensure_ascii=False, indent=2)
-    return parsed
+    s_idx = text.find('{')
+    e_idx = text.rfind('}')
+    if s_idx != -1 and e_idx != -1:
+        clean_text = text[s_idx:e_idx+1]
+        try:
+            parsed = json.loads(clean_text)
+            if isinstance(parsed, dict):
+                parsed.update({k: v for k, v in marker_data.items() if v is not None and parsed.get(k) is None})
+                parsed = _normalize_ai_source_metadata(parsed)
+                parsed = validate_ai_financial_json(parsed, stock_id=stock_id, stock_name=stock_name)
+                parsed = _normalize_ai_source_metadata(parsed)
+                parsed["model_used"] = used_model
+                parsed["ai_search_enabled"] = bool(used_search)
+                parsed["fallback_reason"] = fallback_reason
+                parsed["attempts"] = attempts
+                parsed["retry_policy"] = "Pro Only：gemini-3.1-pro-preview + Google Search；最多 3 次；不降級。"
+                parsed["query_payload"] = json.dumps({
+                    "stock": f"{stock_name} ({stock_id})",
+                    "target_year": target_year,
+                    "model_used": used_model,
+                    "google_search_enabled": bool(used_search),
+                    "fallback_reason": fallback_reason or "無",
+                    "retry_policy": "Pro Only same-model retry: delays 0s, 3s, 8s; no downgrade.",
+                    "prompt": prompt_text,
+                }, ensure_ascii=False, indent=2)
+            return parsed
+        except json.JSONDecodeError:
+            return {
+                "error": "AI 回傳的格式不正確，無法解析 JSON 資料。系統不降級，請稍後重試。",
+                "raw_text_preview": text[:500],
+                "attempts": attempts
+            }
+    else:
+        return {
+            "error": "AI 回傳的格式不正確，無法萃取 JSON 資料。系統不降級，請稍後重試。",
+            "raw_text_preview": text[:500],
+            "attempts": attempts
+        }
 
 @st.cache_data(ttl=86400)
 def get_peers_from_ai(stock_name, stock_id, api_key):
