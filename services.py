@@ -892,10 +892,10 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
 
     注意：本函式只負責財報與估值校對，不要查詢 ETF 持股；ETF 持股由獨立按鈕 get_etf_holders_from_ai() 執行。
     JSON 格式範例：
-    {{"pe": 15.2, "latest_quarter_eps": 1.35, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin": 0.255, "operating_margin": 0.123, "roe": 0.15, "yoy": 0.35, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "mom": 0.015, "dividend_yield": 0.032, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
+    {{"pe": 15.2, "latest_quarter_eps": 1.35, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin_percent": 25.5, "operating_margin_percent": 12.3, "roe_percent": 15.0, "monthly_revenue_yoy_percent": 35.0, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "monthly_revenue_mom_percent": 1.5, "dividend_yield_percent": 3.2, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
     絕對不要輸出 markdown 標記或其他文字。"""
 
-    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、營收 MoM、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。請務必確認並標示出 EPS 對應年度、資料發布日期與來源！不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
+    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報與估值資料。任務分三段：1) 最新月營收 YoY/MoM 與累計營收 YoY；2) 最新財報 EPS、TTM EPS、FY1/FY2/FY3 法人 EPS；3) 法人目標價 high/avg/low、分析師人數、最新單一目標價與核心理由。請務必標示每個欄位的資料期間、發布日期與來源；不要查詢 ETF 持股。"
 
     def _make_config(search_enabled=True):
         kwargs = {
@@ -1002,7 +1002,58 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
                 parsed.update({k: v for k, v in marker_data.items() if v is not None and parsed.get(k) is None})
                 parsed = _normalize_ai_source_metadata(parsed)
                 parsed = validate_ai_financial_json(parsed, stock_id=stock_id, stock_name=stock_name)
+
+                # 2.2 目標價穩定性補強：若主要財報查詢沒有完整 high/avg/low 或分析師人數，
+                # 追加一次「只查法人目標價」的小型查詢，避免主查詢任務太多導致漏欄位。
+                target_followup_attempt = None
+                try:
+                    need_target_followup = not (
+                        s_float(parsed.get("target_price_high")) is not None
+                        and s_float(parsed.get("target_price_avg")) is not None
+                        and s_float(parsed.get("target_price_low")) is not None
+                        and s_float(parsed.get("target_price_analyst_count")) is not None
+                    )
+                    if need_target_followup:
+                        tp_prompt = (
+                            f"請啟用搜尋引擎，只查詢台股 {stock_name} ({stock_id}) 最新法人目標價資料。"
+                            "請只回 JSON，不要 markdown。欄位必須包含："
+                            "target_price_high, target_price_avg, target_price_low, target_price_analyst_count, "
+                            "ai_latest_target_price, target_price_rationale, target_price_date, target_price_source。"
+                            "target_price_avg 只有資料明確寫平均/均值/共識才填；單一券商最新目標價請填 ai_latest_target_price。"
+                            "請盡量找 Yahoo Finance/yfinance 共識、券商目標價彙整、新聞報導中的高低區間與分析師樣本數。"
+                        )
+                        tp_resp = client.models.generate_content(
+                            model=candidate_model,
+                            contents=tp_prompt,
+                            config=types.GenerateContentConfig(response_mime_type="application/json", tools=[{"google_search": {}}])
+                        )
+                        tp_text = tp_resp.text or ""
+                        ts, te = tp_text.find('{'), tp_text.rfind('}')
+                        if ts != -1 and te != -1:
+                            tp_json = json.loads(tp_text[ts:te+1])
+                            if isinstance(tp_json, dict):
+                                tp_json = validate_ai_financial_json(tp_json, stock_id=stock_id, stock_name=stock_name)
+                                for k in ["target_price_high", "target_price_avg", "target_price_low", "target_price_analyst_count", "ai_latest_target_price", "target_price_rationale"]:
+                                    if parsed.get(k) in (None, "", "null", "NULL") and tp_json.get(k) not in (None, "", "null", "NULL"):
+                                        parsed[k] = tp_json.get(k)
+                                # 不覆蓋原 _sources，但補充 target 欄位來源
+                                parsed.setdefault("_sources", {})
+                                if isinstance(parsed.get("_sources"), dict):
+                                    for k in ["target_price_high", "target_price_avg", "target_price_low", "target_price_analyst_count", "ai_latest_target_price"]:
+                                        if k not in parsed["_sources"] and tp_json.get(k) not in (None, "", "null", "NULL"):
+                                            parsed["_sources"][k] = {
+                                                "source": tp_json.get("target_price_source") or "AI 目標價補查",
+                                                "published_date": tp_json.get("target_price_date") or "",
+                                                "source_url": "",
+                                                "note": "2.2 目標價小型補查"
+                                            }
+                                target_followup_attempt = "ok"
+                except Exception as e:
+                    target_followup_attempt = f"failed: {str(e)[:160]}"
+                    log_exception("Gemini", "get_financials_from_ai:target_price_followup", e)
+
                 parsed = _normalize_ai_source_metadata(parsed)
+                parsed["target_followup_attempt"] = target_followup_attempt
                 parsed["model_used"] = used_model
                 parsed["ai_search_enabled"] = bool(used_search)
                 parsed["fallback_reason"] = fallback_reason
@@ -1365,6 +1416,8 @@ def get_finmind_financial_health(stock_id, fm_key=""):
                 res_dict['grossMargins'] = gp_l / rev_l
                 res_dict['operatingMargins'] = op_l / rev_l
             if eq_l > 0: res_dict['debtToEquity'] = tl_l / eq_l
+            if cl_l > 0: res_dict['currentRatio'] = ca_l / cl_l
+            if cfo_l != 0: res_dict['freeCashflow'] = cfo_l
                 
             f_score = 0
             if ta_l > 0 and ta_p > 0:
@@ -1480,7 +1533,7 @@ def get_fallback_info(stock_id):
         json_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', text)
         if json_match:
             data = json.loads(json_match.group(1))
-            keys_to_find = ['peRatio', 'trailingPE', 'pbRatio', 'priceToBook', 'eps', 'trailingEps', 'dividendYield', 'targetHighPrice', 'targetMeanPrice', 'targetLowPrice', 'grossMargins', 'operatingMargins', 'returnOnEquity']
+            keys_to_find = ['peRatio', 'trailingPE', 'forwardPE', 'forwardPeRatio', 'pbRatio', 'priceToBook', 'eps', 'trailingEps', 'forwardEps', 'dividendYield', 'targetHighPrice', 'targetMeanPrice', 'targetLowPrice', 'numberOfAnalystOpinions', 'grossMargins', 'operatingMargins', 'returnOnEquity', 'freeCashflow', 'freeCashFlow', 'currentRatio']
             found_data = {}
             
             def find_keys(node):
@@ -1499,15 +1552,20 @@ def get_fallback_info(stock_id):
             find_keys(data)
             
             info['trailingPE'] = found_data.get('peRatio') or found_data.get('trailingPE')
+            info['forwardPE'] = found_data.get('forwardPE') or found_data.get('forwardPeRatio')
             info['priceToBook'] = found_data.get('pbRatio') or found_data.get('priceToBook')
             info['trailingEps'] = found_data.get('eps') or found_data.get('trailingEps')
+            info['forwardEps'] = found_data.get('forwardEps')
             info['dividendYield'] = found_data.get('dividendYield')
             info['targetHighPrice'] = found_data.get('targetHighPrice')
             info['targetMeanPrice'] = found_data.get('targetMeanPrice')
             info['targetLowPrice'] = found_data.get('targetLowPrice')
+            info['numberOfAnalystOpinions'] = found_data.get('numberOfAnalystOpinions')
             info['grossMargins'] = found_data.get('grossMargins')
             info['operatingMargins'] = found_data.get('operatingMargins')
             info['returnOnEquity'] = found_data.get('returnOnEquity')
+            info['freeCashflow'] = found_data.get('freeCashflow') or found_data.get('freeCashFlow')
+            info['currentRatio'] = found_data.get('currentRatio')
             
         sec_match = re.search(r'href="/class-quote\?category=([^"&]+)', text)
         if sec_match: info['sector'] = urllib.parse.unquote(sec_match.group(1))

@@ -1022,11 +1022,13 @@ def render_main_page(sidebar_state=None):
                 formula_pe_cap = min(formula_pe_cap, soft_pe_cap)
             extreme_pe_cap_for_calc = soft_pe_cap if soft_pe_cap is not None else operable_pe_cap
 
-            # 17-C-9c-hotfix44：公式合理估值口徑修正。
-            # 舊邏輯曾使用 PEG/成長率推導倍率，容易把 5.11% 成長率誤當 5.11x 倍率。
-            # 新邏輯一律使用：Forward EPS × formula_cap；若系統 Forward EPS 缺值，系統公式價維持 N/A。
-            if eff_f_eps is not None and eff_f_eps > 0 and formula_pe_cap is not None:
-                sys_target_price_est = eff_f_eps * formula_pe_cap
+            # 2.2：公式合理估值 = Forward EPS × formula_cap。
+            # Forward EPS 是輸入值，不是公式產生；若系統/yfinance Forward EPS 缺值，
+            # 允許用 AI/FY1 EPS 作「補值公式價」，但必須在說明中標示來源，不能冒充純系統值。
+            formula_eps_for_display = eff_f_eps if eff_f_eps is not None else ai_f_eps_calc
+            formula_eps_source_note = "系統 Forward EPS" if eff_f_eps is not None else ("AI/FY1 Forward EPS 補值" if ai_f_eps_calc is not None else "無 Forward EPS")
+            if formula_eps_for_display is not None and formula_eps_for_display > 0 and formula_pe_cap is not None:
+                sys_target_price_est = formula_eps_for_display * formula_pe_cap
                 is_capped = False
             else:
                 sys_target_price_est = None; is_capped = False
@@ -1270,7 +1272,7 @@ def render_main_page(sidebar_state=None):
                 debug_eps = eff_f_eps if eff_f_eps else (ai_f_eps_calc if ai_f_eps_calc else 0)
 
                 _rows = [
-                    ("🎯 1. 公式合理估值", "系統 EPS × formula cap，非買賣目標", eff_f_eps, formula_pe_cap, sys_target_price_est, "#ffffff"),
+                    ("🎯 1. 公式合理估值", f"{formula_eps_source_note} × formula cap，非買賣目標", formula_eps_for_display, formula_pe_cap, sys_target_price_est, "#ffffff"),
                     ("🤖 2. AI估值", "AI / 法人 EPS × formula cap，需看來源可信度", ai_f_eps_calc, formula_pe_cap, ai_target_price_est, "#FCD34D"),
                     ("📅 3. FY1年度估值", f"FY1 EPS × formula cap｜{fy1_year_text}", ai_forward_eps_fy1, formula_pe_cap, fy1_formula_target_price, "#93C5FD"),
                     ("📆 4. FY2第二年度估值", f"FY2 EPS × formula cap｜{fy2_year_text}｜僅供市場先行定價判斷", ai_forward_eps_fy2, formula_pe_cap, fy2_formula_target_price, "#A7F3D0"),
@@ -1594,11 +1596,10 @@ def render_main_page(sidebar_state=None):
             elif div_yield is not None and div_yield > 1.0: 
                 div_yield = div_yield / 100.0
 
-            fcf = s_float(info.get('freeCashflow'))
-            if fcf is None and fm_health.get('cfo_l'): fcf = fm_health.get('cfo_l')
+            fcf = pick_first_number(info.get('freeCashflow'), info.get('freeCashFlow'), fm_health.get('freeCashflow'), fm_health.get('freeCashFlow'), fm_health.get('cfo_l'))
             if ai_fcf is not None: fcf = ai_fcf
             
-            current_ratio = s_float(info.get('currentRatio'))
+            current_ratio = pick_first_number(info.get('currentRatio'), fm_health.get('currentRatio'), fm_health.get('current_ratio'))
             if ai_cr is not None: current_ratio = ai_cr
 
             dy_str = to_pct(div_yield)
@@ -1665,7 +1666,7 @@ def render_main_page(sidebar_state=None):
                 "low": ai_lo_val,
                 "analyst_count": ai_analyst_count,
                 "confidence": locals().get("target_confidence", classify_target_price_confidence(ai_analyst_count)),
-                "source": "法人目標價面板顯示值：AI/法人聯網 target_price_high-target_price_avg-target_price_low" if (ai_hi_val is not None and ai_me_val is not None and ai_lo_val is not None) else ("法人目標價面板顯示值：AI/法人聯網平均目標價" if ai_me_val is not None else "無可用法人目標價"),
+                "source": "法人目標價面板顯示值：高/均/低完整區間" if (ai_hi_val is not None and ai_me_val is not None and ai_lo_val is not None) else ("法人目標價面板顯示值：僅平均/均值欄位，未取得高低區間" if ai_me_val is not None else "無可用法人目標價"),
                 "rationale": ai_target_rationale,
             }
 

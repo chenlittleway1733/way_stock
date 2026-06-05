@@ -753,7 +753,9 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
         "trailing_eps", "forward_eps",
         "latest_quarter_eps", "ttm_eps", "fiscal_year_eps",
         "forward_eps_system", "forward_eps_ai", "forward_eps_consensus",
-        "pb", "target_price", "target_price_high",
+        "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3",
+        "forward_eps_fy1_year", "forward_eps_fy2_year", "forward_eps_fy3_year",
+        "pb", "target_price", "ai_latest_target_price", "target_price_high",
         "target_price_avg", "target_price_low", "target_price_analyst_count", "free_cash_flow",
         "current_ratio", "shares_outstanding"
     ]
@@ -770,6 +772,23 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
         data["forward_eps_ai"] = data.get("forward_eps")
     if data.get("forward_eps") is None:
         data["forward_eps"] = data.get("forward_eps_consensus") or data.get("forward_eps_ai") or data.get("forward_eps_system")
+
+    # 2.2 正式百分比欄位：*_percent 是唯一可信 AI 百分比輸入；
+    # 這裡轉成內部 ratio 給舊計算函式使用，但保留原始 percent 數字供 UI/來源追蹤。
+    percent_to_ratio = {
+        "monthly_revenue_yoy_percent": "yoy",
+        "monthly_revenue_mom_percent": "mom",
+        "gross_margin_percent": "gross_margin",
+        "operating_margin_percent": "operating_margin",
+        "roe_percent": "roe",
+        "dividend_yield_percent": "dividend_yield",
+    }
+    for pfield, rfield in percent_to_ratio.items():
+        if pfield in data:
+            pv = s_float(data.get(pfield))
+            data[pfield] = pv
+            if pv is not None:
+                data[rfield] = pv / 100.0
 
     # 百分比/比率欄位標準化。AI 常把 25.5% 寫成 25.5，這裡轉為 0.255。
     ratio_fields = ["gross_margin", "operating_margin", "roe", "yoy", "mom", "dividend_yield"]
@@ -857,14 +876,13 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
         data["target_price_high"], data["target_price_low"] = lo, hi
         add_warning("target_price_high", f"{label} AI 目標價 high/low 順序錯置，已交換。")
 
-    # target_price 若缺漏，用 avg 補；若和 avg 差太大，以 avg 為主，避免 target_price 抓到個別券商極端值。
+    # 2.2：target_price 只作「AI 最新目標價補充」，不可冒充法人平均。
+    # 若只有 target_price，轉存 ai_latest_target_price；若 target_price_avg 存在，兩者分開保留。
     avg = data.get("target_price_avg")
     tp = data.get("target_price")
-    if tp is None and avg is not None:
-        data["target_price"] = avg
-    elif tp is not None and avg is not None and avg > 0 and abs(tp - avg) / avg > 0.5:
-        data["target_price"] = avg
-        add_warning("target_price", f"{label} AI target_price 與平均目標價差距超過 50%，已改採 target_price_avg。")
+    latest_tp = data.get("ai_latest_target_price")
+    if latest_tp is None and tp is not None:
+        data["ai_latest_target_price"] = tp
 
     cnt = data.get("target_price_analyst_count")
     if cnt is not None:
