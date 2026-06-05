@@ -442,15 +442,19 @@ def render_main_page(sidebar_state=None):
                 pb_ratio = s_float(df_per_bk['PBR'].iloc[-1])
             
             roe = s_float(info.get('returnOnEquity'))
+            if roe is None:
+                roe = s_float(fm_health.get('returnOnEquity'))
             sys_de = s_float(info.get('debtToEquity'))
-            if sys_de is not None: sys_de = sys_de / 100.0  
+            if sys_de is not None:
+                # Yahoo debtToEquity 常以百分比數字表示，例如 46 = 46%；FinMind fallback 則已是 ratio。
+                sys_de = sys_de / 100.0 if sys_de > 3 else sys_de
         
             gross_margin = s_float(info.get('grossMargins'))
             op_margin = s_float(info.get('operatingMargins'))
         
-            if gross_margin is None: gross_margin = fm_health.get('grossMargins')
-            if op_margin is None: op_margin = fm_health.get('operatingMargins')
-            if sys_de is None: sys_de = fm_health.get('debtToEquity')
+            if gross_margin is None: gross_margin = s_float(fm_health.get('grossMargins'))
+            if op_margin is None: op_margin = s_float(fm_health.get('operatingMargins'))
+            if sys_de is None: sys_de = s_float(fm_health.get('debtToEquity'))
         
             rev_growth = s_float(info.get('revenueGrowth'))
             if rev_growth is None and df_rev_bk is not None and not df_rev_bk.empty:
@@ -462,6 +466,14 @@ def render_main_page(sidebar_state=None):
                 t_eps = curr_p / pe_ratio
             
             sys_f_eps_calc = s_float(info.get('forwardEps'))
+            # 2.2 系統端預估獲利成長 fallback：Yahoo earningsGrowth 常缺。
+            # 若系統/外部 Forward EPS 與 TTM EPS 都存在，用 EPS 反推，不再讓系統值整欄空白。
+            if earn_growth is None and sys_f_eps_calc is not None and t_eps not in (None, 0):
+                try:
+                    earn_growth = (sys_f_eps_calc - t_eps) / abs(t_eps)
+                    info['_earningsGrowth_source'] = 'Forward EPS / TTM EPS 反推'
+                except Exception:
+                    pass
             # EPS 拆欄：yfinance 多數只提供 trailingEps / forwardEps；最新單季與完整年度 EPS 先保留 NULL，避免誤標口徑。
             sys_latest_quarter_eps = None
             sys_ttm_eps = t_eps

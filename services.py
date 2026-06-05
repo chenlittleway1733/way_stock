@@ -1517,50 +1517,101 @@ def get_finmind_financial_health(stock_id, fm_key=""):
             vals_l = dict(zip(df_latest['type'].astype(str).str.strip(), df_latest['value']))
             vals_p = dict(zip(df_prev['type'].astype(str).str.strip(), df_prev['value']))
             
-            def get_val(v_dict, *keys):
-                for k in keys:
-                    for v_key in v_dict.keys():
-                        if k in v_key:
-                            try: return float(str(v_dict[v_key]).replace(',', '').replace('%', ''))
-                            except Exception as e:
-                                log_exception("FinMind", f"get_finmind_financial_health:get_val:{stock_id}", e)
-                return 0.0
-                
-            rev_l = get_val(vals_l, '營業收入', '淨收益', '收益')
-            gp_l = get_val(vals_l, '營業毛利', '毛利')
-            op_l = get_val(vals_l, '營業利益')
-            ni_l = get_val(vals_l, '本期淨利', '淨利')
-            ta_l = get_val(vals_l, '資產總計', '資產總額', '資產')
-            tl_l = get_val(vals_l, '負債總')
-            eq_l = get_val(vals_l, '權益總')
-            ca_l = get_val(vals_l, '流動資產')
-            cl_l = get_val(vals_l, '流動負債')
-            ltd_l = get_val(vals_l, '非流動負債', '長期借款')
-            cfo_l = get_val(vals_l, '營業活動之淨現金流入', '營業活動之現金流量', '營業活動之淨現金')
-            if cfo_l == 0: cfo_l = op_l 
-            shares_l = get_val(vals_l, '普通股股本', '股本')
-            
-            rev_p = get_val(vals_p, '營業收入', '淨收益', '收益')
-            gp_p = get_val(vals_p, '營業毛利', '毛利')
-            ni_p = get_val(vals_p, '本期淨利', '淨利')
-            ta_p = get_val(vals_p, '資產總計', '資產總額', '資產')
-            ca_p = get_val(vals_p, '流動資產')
-            cl_p = get_val(vals_p, '流動負債')
-            ltd_p = get_val(vals_p, '非流動負債', '長期借款')
-            shares_p = get_val(vals_p, '普通股股本', '股本')
-            
-            if ta_l <= 0 or ta_p <= 0: return {}
+            def _norm_key_text(x):
+                return re.sub(r"[\s　()（）,，:：/／\-]+", "", str(x or "")).lower()
 
-            res_dict = {}
+            def get_val(v_dict, *keys):
+                """FinMind 財報科目名稱容錯抓取。
+
+                2.2 系統財務健康 fallback：FinMind 科目常因 IFRS 版本、產業別、
+                中英文/括號差異而抓不到；此處統一正規化後比對，並避免用「資產」
+                這類過廣關鍵字誤抓流動資產。
+                """
+                if not v_dict:
+                    return 0.0
+                normalized = [(_norm_key_text(k), k, v) for k, v in v_dict.items()]
+                for raw_key in keys:
+                    key = _norm_key_text(raw_key)
+                    if not key:
+                        continue
+                    # 先精準/包含比對；科目名稱通常比關鍵字長。
+                    for nk, original_k, raw_v in normalized:
+                        if nk == key or key in nk:
+                            try:
+                                return float(str(raw_v).replace(',', '').replace('%', ''))
+                            except Exception as e:
+                                log_exception("FinMind", f"get_finmind_financial_health:get_val:{stock_id}:{original_k}", e)
+                    # 再反向比對，支援 key 是完整英文科目、v_key 是縮寫情境。
+                    for nk, original_k, raw_v in normalized:
+                        if nk and nk in key:
+                            try:
+                                return float(str(raw_v).replace(',', '').replace('%', ''))
+                            except Exception as e:
+                                log_exception("FinMind", f"get_finmind_financial_health:get_val:{stock_id}:{original_k}", e)
+                return 0.0
+
+            rev_keys = ('營業收入合計', '營業收入淨額', '營業收入', '收入合計', '營收', 'revenue', 'sales')
+            gp_keys = ('營業毛利毛損', '營業毛利', '毛利', 'grossprofit')
+            op_keys = ('營業利益損失', '營業利益', '營業淨利', 'operatingincome', 'operatingprofit')
+            ni_keys = ('本期淨利淨損', '本期淨利', '稅後淨利', '繼續營業單位本期淨利', 'netincome')
+            ta_keys = ('資產總計', '資產總額', '資產合計', 'totalassets', 'assets')
+            tl_keys = ('負債總計', '負債總額', '負債合計', 'totalliabilities', 'liabilities')
+            eq_keys = ('權益總計', '權益總額', '權益合計', '股東權益總計', '歸屬於母公司業主之權益合計', 'totalequity', 'stockholdersequity', 'shareholdersequity')
+            ca_keys = ('流動資產合計', '流動資產', 'currentassets')
+            cl_keys = ('流動負債合計', '流動負債', 'currentliabilities')
+            ltd_keys = ('非流動負債合計', '非流動負債', '長期借款', 'longtermdebt', 'noncurrentliabilities')
+            cfo_keys = ('營業活動之淨現金流入流出', '營業活動之現金流量', '營業活動之淨現金流入', '營業活動之淨現金', 'cashflowfromoperatingactivities', 'operatingcashflow')
+            capex_keys = ('取得不動產廠房及設備', '購置不動產廠房及設備', '資本支出', 'capitalexpenditure', 'capitalexpenditures')
+            shares_keys = ('普通股股本', '股本', 'commonstock', 'ordinarysharecapital')
+
+            rev_l = get_val(vals_l, *rev_keys)
+            gp_l = get_val(vals_l, *gp_keys)
+            op_l = get_val(vals_l, *op_keys)
+            ni_l = get_val(vals_l, *ni_keys)
+            ta_l = get_val(vals_l, *ta_keys)
+            tl_l = get_val(vals_l, *tl_keys)
+            eq_l = get_val(vals_l, *eq_keys)
+            ca_l = get_val(vals_l, *ca_keys)
+            cl_l = get_val(vals_l, *cl_keys)
+            ltd_l = get_val(vals_l, *ltd_keys)
+            cfo_l = get_val(vals_l, *cfo_keys)
+            capex_l = get_val(vals_l, *capex_keys)
+            shares_l = get_val(vals_l, *shares_keys)
+            
+            rev_p = get_val(vals_p, *rev_keys)
+            gp_p = get_val(vals_p, *gp_keys)
+            ni_p = get_val(vals_p, *ni_keys)
+            ta_p = get_val(vals_p, *ta_keys)
+            ca_p = get_val(vals_p, *ca_keys)
+            cl_p = get_val(vals_p, *cl_keys)
+            ltd_p = get_val(vals_p, *ltd_keys)
+            shares_p = get_val(vals_p, *shares_keys)
+            
+            res_dict = {
+                "_finmind_latest_date": str(pd.Timestamp(latest_date).date()) if latest_date is not None else "",
+            }
             if rev_l > 0:
-                res_dict['grossMargins'] = gp_l / rev_l
-                res_dict['operatingMargins'] = op_l / rev_l
-            if eq_l > 0: res_dict['debtToEquity'] = tl_l / eq_l
-            if cl_l > 0: res_dict['currentRatio'] = ca_l / cl_l
-            if cfo_l != 0: res_dict['freeCashflow'] = cfo_l
-                
-            f_score = 0
+                # 毛利率 / 營益率直接由損益表計算；不可因資產負債表缺值而整包回傳空白。
+                res_dict['grossMargins'] = gp_l / rev_l if gp_l != 0 else None
+                res_dict['operatingMargins'] = op_l / rev_l if op_l != 0 else None
+            if eq_l > 0 and tl_l >= 0:
+                res_dict['debtToEquity'] = tl_l / eq_l
+            if eq_l > 0 and ni_l != 0:
+                res_dict['returnOnEquity'] = ni_l / eq_l
+            if cl_l > 0 and ca_l >= 0:
+                res_dict['currentRatio'] = ca_l / cl_l
+            # FinMind 若有現金流/資本支出，優先估 FCF；若只有 CFO，至少回 CFO 供畫面參考。
+            if cfo_l != 0:
+                if capex_l != 0:
+                    res_dict['freeCashflow'] = cfo_l - abs(capex_l)
+                    res_dict['capex'] = capex_l
+                else:
+                    res_dict['freeCashflow'] = cfo_l
+                res_dict['cfo_l'] = cfo_l
+
+            f_score = None
             if ta_l > 0 and ta_p > 0:
+                f_score = 0
                 roa_l, roa_p = ni_l / ta_l, ni_p / ta_p
                 if roa_l > 0: f_score += 1                 
                 if cfo_l > 0: f_score += 1                 
@@ -1578,9 +1629,13 @@ def get_finmind_financial_health(stock_id, fm_key=""):
                 at_p = rev_p / ta_p
                 if at_l > at_p: f_score += 1               
                 
-            res_dict['f_score'] = f_score
-            res_dict['cfo_l'] = cfo_l
-            return res_dict
+            if f_score is not None:
+                res_dict['f_score'] = f_score
+            elif res_dict:
+                res_dict['f_score'] = None
+            if cfo_l != 0:
+                res_dict['cfo_l'] = cfo_l
+            return {k: v for k, v in res_dict.items() if v is not None}
     except Exception as e:
         log_exception("FinMind", f"get_finmind_financial_health:{stock_id}", e)
         log_data_health("FinMind", False, f"ERR:{str(e)[:120]}")
@@ -1673,7 +1728,7 @@ def get_fallback_info(stock_id):
         json_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', text)
         if json_match:
             data = json.loads(json_match.group(1))
-            keys_to_find = ['peRatio', 'trailingPE', 'forwardPE', 'forwardPeRatio', 'pbRatio', 'priceToBook', 'eps', 'trailingEps', 'forwardEps', 'dividendYield', 'targetHighPrice', 'targetMeanPrice', 'targetLowPrice', 'numberOfAnalystOpinions', 'grossMargins', 'operatingMargins', 'returnOnEquity', 'freeCashflow', 'freeCashFlow', 'currentRatio']
+            keys_to_find = ['peRatio', 'trailingPE', 'forwardPE', 'forwardPeRatio', 'pbRatio', 'priceToBook', 'eps', 'trailingEps', 'forwardEps', 'dividendYield', 'trailingAnnualDividendYield', 'targetHighPrice', 'targetMeanPrice', 'targetLowPrice', 'numberOfAnalystOpinions', 'grossMargins', 'operatingMargins', 'returnOnEquity', 'debtToEquity', 'totalDebt', 'totalStockholderEquity', 'revenueGrowth', 'earningsGrowth', 'freeCashflow', 'freeCashFlow', 'operatingCashflow', 'currentRatio']
             found_data = {}
             
             def find_keys(node):
@@ -1696,7 +1751,8 @@ def get_fallback_info(stock_id):
             info['priceToBook'] = found_data.get('pbRatio') or found_data.get('priceToBook')
             info['trailingEps'] = found_data.get('eps') or found_data.get('trailingEps')
             info['forwardEps'] = found_data.get('forwardEps')
-            info['dividendYield'] = found_data.get('dividendYield')
+            info['dividendYield'] = found_data.get('dividendYield') or found_data.get('trailingAnnualDividendYield')
+            info['trailingAnnualDividendYield'] = found_data.get('trailingAnnualDividendYield')
             info['targetHighPrice'] = found_data.get('targetHighPrice')
             info['targetMeanPrice'] = found_data.get('targetMeanPrice')
             info['targetLowPrice'] = found_data.get('targetLowPrice')
@@ -1704,7 +1760,17 @@ def get_fallback_info(stock_id):
             info['grossMargins'] = found_data.get('grossMargins')
             info['operatingMargins'] = found_data.get('operatingMargins')
             info['returnOnEquity'] = found_data.get('returnOnEquity')
-            info['freeCashflow'] = found_data.get('freeCashflow') or found_data.get('freeCashFlow')
+            info['debtToEquity'] = found_data.get('debtToEquity')
+            info['totalDebt'] = found_data.get('totalDebt')
+            info['totalStockholderEquity'] = found_data.get('totalStockholderEquity')
+            if info.get('debtToEquity') is None and info.get('totalDebt') is not None and info.get('totalStockholderEquity') not in (None, 0):
+                try:
+                    info['debtToEquity'] = float(info['totalDebt']) / float(info['totalStockholderEquity']) * 100.0
+                except Exception:
+                    pass
+            info['revenueGrowth'] = found_data.get('revenueGrowth')
+            info['earningsGrowth'] = found_data.get('earningsGrowth')
+            info['freeCashflow'] = found_data.get('freeCashflow') or found_data.get('freeCashFlow') or found_data.get('operatingCashflow')
             info['currentRatio'] = found_data.get('currentRatio')
             
         sec_match = re.search(r'href="/class-quote\?category=([^"&]+)', text)
