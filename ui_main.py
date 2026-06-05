@@ -27,7 +27,7 @@ def render_main_page(sidebar_state=None):
     # ==========================================
     # 5. 主畫面開始
     # ==========================================
-    st.markdown("## 📈 WAY AI 投資戰情室 版本2.1")
+    st.markdown("## 📈 WAY AI 投資戰情室 版本2.2")
 
     if st.session_state.fugle_key and not f_ok:
         st.error("🚨 **系統警報**：您輸入的「富果 (Fugle) API Key」驗證失敗！請至左側欄檢查金鑰是否輸入正確。")
@@ -2790,6 +2790,55 @@ def render_main_page(sidebar_state=None):
                         pass
                     return "NULL"
 
+            try:
+                technical_summary_pack = build_technical_summary(hist)
+            except Exception as e:
+                try:
+                    log_exception("PromptPack", "build_technical_summary", e)
+                except Exception:
+                    pass
+                technical_summary_pack = {"available": False, "error": str(e)[:160], "summary_text": "- 技術面摘要: NULL"}
+
+            def _prompt_technical_summary():
+                """打包提示詞用技術面摘要。"""
+                try:
+                    if isinstance(technical_summary_pack, dict) and technical_summary_pack.get("available"):
+                        return _nullize_text(technical_summary_pack.get("summary_text"))
+                    err = technical_summary_pack.get("error") if isinstance(technical_summary_pack, dict) else "未產生"
+                    return f"- 技術面摘要: NULL（{_nullize_text(err)}）"
+                except Exception:
+                    return "- 技術面摘要: NULL"
+
+            def _prompt_technical_chart_guide():
+                """第二階段：若使用者另外附上技術線圖，外部 AI 應如何輔助判讀。"""
+                return """若另外附上本系統輸出的技術線圖（含 K 線、5/10/20/60MA、成交量、外資/投信/自營商、KD），請只用它輔助判斷以下 10 點：
+1. 是否沿 5MA / 10MA 強勢上攻。
+2. 是否有高檔賣壓區（前高、整數關卡、爆量上影線、量增不漲）。
+3. 是否有明顯支撐平台（5MA / 10MA / 20MA / 60MA / 前波平台）。
+4. 是洗盤後續攻，還是出貨轉弱。
+5. 是否短線乖離過大，不宜追高。
+6. 是否適合等回測 5MA / 10MA / 20MA。
+7. 量價結構是否健康（價漲量增、拉回量縮、爆量換手）。
+8. 法人籌碼是否配合線型。
+9. 關鍵停損 / 減碼位置在哪裡。
+10. 技術面是否支持系統買進結論。
+重要限制：技術線圖只能輔助進出場節奏、支撐壓力、追價風險、停損停利與洗盤/出貨判斷；不可覆蓋月營收公告月份、EPS 口徑、資料品質、Dynamic Cap、可操作估值區間與最終操作燈號。"""
+
+            def _technical_prompt_suffix(mode, target="buy"):
+                """依提示詞技術面打包選項，動態補入技術面區塊。"""
+                try:
+                    m = str(mode or "")
+                    if m.startswith("不加入"):
+                        return ""
+                    base_no = "15" if target == "buy" else "20"
+                    chart_no = "16" if target == "buy" else "21"
+                    parts = [f"\n【{base_no}. 技術面與進出場節奏（日線摘要，選配）】\n{_prompt_technical_summary()}"]
+                    if "技術線圖" in m:
+                        parts.append(f"\n【{chart_no}. 技術線圖輔助判讀重點（選配；需另附技術圖）】\n{_prompt_technical_chart_guide()}")
+                    return "\n".join(parts)
+                except Exception:
+                    return ""
+
             def _prompt_panel_sync_audit():
                 """提示詞與畫面面板同步自檢。"""
                 try:
@@ -2806,7 +2855,9 @@ def render_main_page(sidebar_state=None):
                     lines = []
                     for name, ok in checks:
                         lines.append(f"- {name}: {'已同步' if ok else '可能缺值/需人工確認'}")
-                    lines.append("- 技術線圖/KD/均線: 目前位於提示詞區塊之後才計算，未完整打包；若外部 AI 需做短線進出，請人工搭配技術線圖判斷。")
+                    lines.append(f"- 技術面摘要（日線）: {'已同步' if isinstance(technical_summary_pack, dict) and technical_summary_pack.get('available') else '可能缺值/需人工確認'}；可依提示詞選項加入或不加入。")
+                    lines.append("- 技術線圖輸出（第二階段）: 圖表工具列可下載 PNG；若另附圖，外部 AI 應依 10 點規則輔助判讀。")
+                    lines.append("- 技術線圖輔助規則: 已同步；技術面不可覆蓋基本面、資料品質、Dynamic Cap 與最終燈號。")
                     lines.append("- 產業同業PK/估值河流圖: 屬互動視覺輔助，研究完整版以產業模型、Dynamic Cap、估值區間摘要為主，未塞完整圖表資料。")
                     return "\n".join(lines)
                 except Exception:
@@ -2928,7 +2979,7 @@ def render_main_page(sidebar_state=None):
                         pass
                     return "NULL"
             context_str = f"""
-【0. WAY AI 投資戰情室 2.1 精簡判讀總覽】
+【0. WAY AI 投資戰情室 2.2 精簡判讀總覽】
 - 股票: {c_name} ({curr_id})
 - 最新收盤價: {_nullize_text(curr_p)} 元
 - 系統版本: 2.2
@@ -3117,10 +3168,10 @@ def render_main_page(sidebar_state=None):
 """
 
 
-            full_prompt_for_copy = f"""你是台股研究總監 + 交易策略專家。請用繁體中文、條列、可執行結論，並嚴格使用下方 WAY AI 投資戰情室 2.1 數據。
+            full_prompt_for_copy = f"""你是台股研究總監 + 交易策略專家。請用繁體中文、條列、可執行結論，並嚴格使用下方 WAY AI 投資戰情室 2.2 數據。
 
 重要原則：
-1) 請優先尊重系統 2.1 已產出的「月營收公告月份、EPS 拆欄、分歧警告、資料品質報告、法人目標價可信度、公式估值/可操作估值分離、產業估值模型、Dynamic Cap 2.0、最終操作燈號」。
+1) 請優先尊重系統 2.2 已產出的「月營收公告月份、EPS 拆欄、分歧警告、資料品質報告、法人目標價可信度、公式估值/可操作估值分離、產業估值模型、Dynamic Cap 2.0、最終操作燈號」。
 2) 公式合理估值與公式極限價只代表模型輸出，不可直接當作買進目標；真正操作請以「可操作估值區間」與最終燈號為主。
 3) 若系統 / AI 分歧警告存在，必須先說明分歧對估值可信度與操作可信度的影響，不可直接給樂觀目標價。
 4) EPS 必須分清楚最新單季 EPS、TTM EPS、完整年度 EPS、系統 Forward EPS、AI Forward EPS、法人共識 Forward EPS，不可混用。
@@ -3132,7 +3183,7 @@ def render_main_page(sidebar_state=None):
 10) 研究完整版請額外輸出「模型庫回饋建議」：這不是買賣建議，而是協助日後修正 stock_mapping.py、industry_taxonomy.py、dynamic_cap_model.py 或法人目標價可信度規則；AI 回饋只能作為候選清單，不可直接覆蓋模型庫。
 
 任務要求：
-1) 先做「2.1 資料品質盤點」：逐項說明哪些欄位是系統/AI/推估/NULL，並指出最影響結論的 3 個資料風險。
+1) 先做「2.2 資料品質盤點」：逐項說明哪些欄位是系統/AI/推估/NULL，並指出最影響結論的 3 個資料風險。
 2) 解讀「分歧警告」：EPS / YoY / PEG / 合理價 / D/E 若有警告，請說明是否會讓估值降級。
 3) 解讀「產業估值模型」：說明這檔股票適合用哪些估值指標，不適合用哪些指標。
 4) 解讀「公式估值 vs 可操作估值」：請分開說明公式合理價、公式極限價、可操作估值區間，不可混成同一個目標價。
@@ -3148,7 +3199,7 @@ def render_main_page(sidebar_state=None):
 
 輸出格式（必須照做）：
 - [投資結論一句話]
-- [2.1 資料品質與分歧警告]
+- [2.2 資料品質與分歧警告]
 - [產業估值模型解讀]
 - [公式估值 vs 可操作估值]
 - [公司優缺點]
@@ -3158,14 +3209,14 @@ def render_main_page(sidebar_state=None):
 - [下月追蹤清單]
 - [模型庫回饋建議｜研究用途，非買賣建議]
 
-以下是系統面板 2.1 精簡打包數據（只保留會影響外部 AI 判斷的採用值、分歧、估值層級、產業模型、Dynamic Cap 與燈號；無資料為 NULL）。若出現數據不合理，可上網查詢並說明不合理原因，但不可忽略系統已標示的分歧與資料品質警告：
+以下是系統面板 2.2 精簡打包數據（只保留會影響外部 AI 判斷的採用值、分歧、估值層級、產業模型、Dynamic Cap 與燈號；無資料為 NULL）。若出現數據不合理，可上網查詢並說明不合理原因，但不可忽略系統已標示的分歧與資料品質警告：
 {context_str}
 """
 
             research_prompt_for_copy = full_prompt_for_copy
             buy_decision_prompt_for_copy = f"""你是台股研究總監 + 交易策略專家。請用繁體中文、條列、可執行結論，協助我判斷這檔股票「現在是否值得買進」。
 
-請優先尊重 WAY AI 投資戰情室 2.1 的判讀，尤其是：月營收公告月份、EPS 拆欄、分歧警告、資料品質、法人目標價可信度、公式估值/可操作估值分離、產業估值模型、Dynamic Cap 2.0、最終操作燈號。
+請優先尊重 WAY AI 投資戰情室 2.2 的判讀，尤其是：月營收公告月份、EPS 拆欄、分歧警告、資料品質、法人目標價可信度、公式估值/可操作估值分離、產業估值模型、Dynamic Cap 2.0、最終操作燈號。
 
 重要規則：
 - 不可把公式合理估值或公式極限價直接當買進目標。
@@ -3191,7 +3242,7 @@ def render_main_page(sidebar_state=None):
 11. [EPS 年期判斷]：請先用 TTM EPS 判斷目前實際獲利估值，再說明目前股價與法人目標價比較像用 FY1、FY2 還是 FY3 EPS 定價；FY1/FY2/FY3 是預估年度 EPS 序列，不是查詢日後1/2/3年。若用 FY2/FY3 才合理，請說明風險與是否能作為買進依據。
 12. [產業模型是否需更新]：請根據「17-C-9c-hotfix44 單次快照稽核」回答：不建議更新模型 / 暫時觀察 / 建議檢查 hybrid 權重 / 建議檢查 primary_taxon / 建議檢查整個產業倍率。若建議檢查，請說明是市場過熱、法人過度樂觀、EPS/營收尚未落地，還是公司營運型態已改變；不可因單次現價高於 hard ceiling 就直接調高模型。
 
-以下是 WAY AI 投資戰情室 2.1「買進決策版」系統資料。這不是完整研究資料包，只保留會直接影響買進判斷的採用值、系統值/AI值、分歧、估值層級、產業模型、Dynamic Cap 與燈號。若資料不合理，可上網查證，但不可忽略系統標示的資料品質與分歧警告：
+以下是 WAY AI 投資戰情室 2.2「買進決策版」系統資料。這不是完整研究資料包，只保留會直接影響買進判斷的採用值、系統值/AI值、分歧、估值層級、產業模型、Dynamic Cap 與燈號。若資料不合理，可上網查證，但不可忽略系統標示的資料品質與分歧警告：
 {decision_context_str}
 """
             
@@ -3203,8 +3254,17 @@ def render_main_page(sidebar_state=None):
                     horizontal=True,
                     key=f"prompt_pack_mode_{curr_id}",
                 )
+                tech_pack_mode = st.radio(
+                    "技術面打包選項",
+                    ["不加入技術面", "加入技術面摘要", "加入技術面摘要 + 技術線圖輔助規則"],
+                    index=1,
+                    horizontal=True,
+                    key=f"technical_pack_mode_{curr_id}",
+                )
                 selected_prompt_for_copy = buy_decision_prompt_for_copy if prompt_mode.startswith("買進決策版") else research_prompt_for_copy
+                selected_prompt_for_copy += _technical_prompt_suffix(tech_pack_mode, target="buy" if prompt_mode.startswith("買進決策版") else "research")
                 st.caption("買進決策版只保留會影響是否買進的採用值、系統/AI差異、估值層級、產業模型、Dynamic Cap 與燈號；研究完整版保留較完整資料品質與來源摘要。")
+                st.caption("技術面為選配：摘要用於追價風險、支撐壓力與回測買點；若選擇技術線圖輔助規則，請另外附上系統匯出的技術圖。")
 
                 # 用 json.dumps 包裝提示詞，避免換行、引號或特殊符號造成 JavaScript 失效。
                 safe_prompt_js = json.dumps(selected_prompt_for_copy, ensure_ascii=False)
