@@ -791,6 +791,93 @@ def _normalize_ai_source_metadata(parsed):
     return parsed
 
 
+def _ai_value_present(data, key):
+    """判斷 AI 欄位是否已有可採用值；支援數字、字串與 {value: ...} 物件。"""
+    if not isinstance(data, dict):
+        return False
+    v = data.get(key)
+    if v in (None, "", "null", "NULL", "N/A", "無資料", "AI找不到數據"):
+        return False
+    if isinstance(v, dict):
+        for sub_key in ("value", "value_percent", "ai_value", "adopted_value", "number", "data"):
+            if s_float(v.get(sub_key)) is not None:
+                return True
+        return any(str(x).strip() for x in v.values() if x not in (None, "", "null", "NULL", "N/A"))
+    return s_float(v) is not None or bool(str(v).strip())
+
+
+def _detect_missing_ai_financial_groups(parsed):
+    """
+    2.2 missing-field follow-up：找出主查詢/目標價補查後仍缺漏的資料群。
+    注意：這裡只判斷 canonical 欄位，不因 legacy 欄位存在就視為已補齊。
+    """
+    if not isinstance(parsed, dict):
+        return []
+
+    def has_any(keys):
+        return any(_ai_value_present(parsed, k) for k in keys)
+
+    groups = []
+    group_defs = [
+        ("revenue", ["monthly_revenue_yoy_percent", "monthly_revenue_mom_percent", "accumulated_revenue_yoy_percent"]),
+        ("eps", ["latest_quarter_eps", "ttm_eps", "fiscal_year_eps", "forward_eps_ai", "forward_eps_consensus", "forward_eps_fy1", "forward_eps_fy2"]),
+        ("margin_roe", ["gross_margin_percent", "operating_margin_percent", "roe_percent"]),
+        ("valuation", ["pe", "pb"]),
+        ("target_price", ["target_price_high", "target_price_avg", "target_price_low", "target_price_analyst_count", "ai_latest_target_price"]),
+        ("financial_health", ["debt_to_equity", "free_cash_flow", "current_ratio", "dividend_yield_percent", "shares_outstanding"]),
+    ]
+    for name, keys in group_defs:
+        # 該群完全沒有可用值才補查，避免為了單一非核心空值增加不必要呼叫。
+        if not has_any(keys):
+            groups.append(name)
+
+    return groups
+
+
+def _merge_missing_followup_result(parsed, follow_json):
+    """只把缺漏欄位由 follow-up 回填，不覆蓋已存在正式值。"""
+    if not isinstance(parsed, dict) or not isinstance(follow_json, dict):
+        return parsed
+
+    allowed_fields = [
+        "pe", "pb",
+        "latest_quarter_eps", "ttm_eps", "fiscal_year_eps",
+        "forward_eps_ai", "forward_eps_consensus", "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3",
+        "forward_eps_fy1_year", "forward_eps_fy2_year", "forward_eps_fy3_year", "forward_eps_fy_source_note", "forward_eps_fy_basis",
+        "monthly_revenue_yoy_percent", "monthly_revenue_mom_percent", "accumulated_revenue_yoy_percent",
+        "gross_margin_percent", "operating_margin_percent", "roe_percent",
+        "debt_to_equity", "free_cash_flow", "current_ratio", "dividend_yield_percent", "shares_outstanding",
+        "target_price_high", "target_price_avg", "target_price_low", "target_price_analyst_count",
+        "ai_latest_target_price", "target_price_rationale", "target_price_date", "target_price_source",
+    ]
+
+    for k in allowed_fields:
+        if not _ai_value_present(parsed, k) and follow_json.get(k) not in (None, "", "null", "NULL", "N/A", "無資料"):
+            parsed[k] = follow_json.get(k)
+
+    # 合併來源，不覆蓋已存在來源。
+    parsed.setdefault("_sources", {})
+    raw_sources = follow_json.get("_sources") or follow_json.get("field_sources") or {}
+    if isinstance(parsed.get("_sources"), dict):
+        if isinstance(raw_sources, dict):
+            for k, v in raw_sources.items():
+                if k not in parsed["_sources"] and v:
+                    parsed["_sources"][k] = v
+        # 若 follow-up 用總體來源欄位，幫已回填欄位補簡單來源。
+        src_name = follow_json.get("source") or follow_json.get("target_price_source") or follow_json.get("data_source") or "AI 缺漏欄位補查"
+        src_date = follow_json.get("published_date") or follow_json.get("target_price_date") or follow_json.get("data_period") or ""
+        for k in allowed_fields:
+            if _ai_value_present(parsed, k) and k not in parsed["_sources"]:
+                parsed["_sources"][k] = {
+                    "source": src_name,
+                    "published_date": src_date,
+                    "source_url": "",
+                    "note": "2.2 missing-field 小型補查"
+                }
+
+    return parsed
+
+
 def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1-pro-preview"):
     """
     AI 財報校對與補齊.
@@ -1052,8 +1139,57 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
                     target_followup_attempt = f"failed: {str(e)[:160]}"
                     log_exception("Gemini", "get_financials_from_ai:target_price_followup", e)
 
+                # 2.2 通用缺漏資料小型補查：不只目標價，若營收/EPS/毛利率/ROE/健康欄位整群缺漏，
+                # 再追加一次「只查缺漏欄位」的短查詢。避免主查詢任務過多時，台積電/欣興這類大公司仍漏資料。
+                missing_field_followup_attempt = None
+                missing_field_followup_groups = []
+                missing_field_followup_prompt = None
+                try:
+                    missing_field_followup_groups = _detect_missing_ai_financial_groups(parsed)
+                    # target_price 已有專用補查；若仍缺 target，可併入本次通用補查。
+                    if missing_field_followup_groups:
+                        group_desc = {
+                            "revenue": "最新公告月份單月營收 YoY/MoM、累計營收 YoY；請用 monthly_revenue_yoy_percent / monthly_revenue_mom_percent / accumulated_revenue_yoy_percent，百分比直接填 27.64，不填 0.2764。",
+                            "eps": "最新單季 EPS、TTM EPS、完整年度 EPS、FY1/FY2/FY3 法人預估 EPS 與對應年度。",
+                            "margin_roe": "最新季報毛利率、營益率、ROE；請用 gross_margin_percent / operating_margin_percent / roe_percent。",
+                            "valuation": "歷史本益比 pe、股價淨值比 pb；若可得也請在 _sources 說明資料源。",
+                            "target_price": "法人目標價 high/avg/low、分析師人數、AI 最新單一目標價補充與核心理由。",
+                            "financial_health": "D/E、自由現金流 free_cash_flow、流動比率 current_ratio、殖利率 dividend_yield_percent、股本/總發行股數 shares_outstanding。",
+                        }
+                        missing_items = "\n".join([f"- {g}: {group_desc.get(g, g)}" for g in missing_field_followup_groups])
+                        missing_field_followup_prompt = (
+                            f"請啟用搜尋引擎，只補查台股 {stock_name} ({stock_id}) 下列缺漏資料群。"
+                            "這是第二輪小型補查，不要重做完整分析，不要查 ETF 持股。請只回 JSON，不要 markdown。\n"
+                            f"缺漏資料群：\n{missing_items}\n\n"
+                            "硬性規則：百分比欄位一律用 *_percent 並填百分比數字，例如 27.64% 填 27.64；"
+                            "單一目標價只填 ai_latest_target_price，不可冒充 target_price_avg；"
+                            "target_price_avg 只有明確寫平均/均值/共識才填。"
+                            "每個回填欄位都請在 _sources 中標示 source、published_date、source_url、note。"
+                        )
+                        mf_resp = client.models.generate_content(
+                            model=candidate_model,
+                            contents=missing_field_followup_prompt,
+                            config=types.GenerateContentConfig(response_mime_type="application/json", tools=[{"google_search": {}}])
+                        )
+                        mf_text = mf_resp.text or ""
+                        ms, me = mf_text.find('{'), mf_text.rfind('}')
+                        if ms != -1 and me != -1:
+                            mf_json = json.loads(mf_text[ms:me+1])
+                            if isinstance(mf_json, dict):
+                                mf_json = validate_ai_financial_json(mf_json, stock_id=stock_id, stock_name=stock_name)
+                                parsed = _merge_missing_followup_result(parsed, mf_json)
+                                parsed = validate_ai_financial_json(parsed, stock_id=stock_id, stock_name=stock_name)
+                                missing_field_followup_attempt = "ok"
+                        if missing_field_followup_attempt is None:
+                            missing_field_followup_attempt = "no_json"
+                except Exception as e:
+                    missing_field_followup_attempt = f"failed: {str(e)[:160]}"
+                    log_exception("Gemini", "get_financials_from_ai:missing_field_followup", e)
+
                 parsed = _normalize_ai_source_metadata(parsed)
                 parsed["target_followup_attempt"] = target_followup_attempt
+                parsed["missing_field_followup_attempt"] = missing_field_followup_attempt
+                parsed["missing_field_followup_groups"] = missing_field_followup_groups
                 parsed["model_used"] = used_model
                 parsed["ai_search_enabled"] = bool(used_search)
                 parsed["fallback_reason"] = fallback_reason
@@ -1066,7 +1202,11 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
                     "google_search_enabled": bool(used_search),
                     "fallback_reason": fallback_reason or "無",
                     "retry_policy": "Pro Only same-model retry: delays 0s, 3s, 8s; no downgrade.",
+                    "target_followup_attempt": target_followup_attempt,
+                    "missing_field_followup_attempt": missing_field_followup_attempt,
+                    "missing_field_followup_groups": missing_field_followup_groups,
                     "prompt": prompt_text,
+                    "missing_field_followup_prompt": missing_field_followup_prompt,
                 }, ensure_ascii=False, indent=2)
             return parsed
         except json.JSONDecodeError:
