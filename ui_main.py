@@ -329,7 +329,11 @@ def render_main_page(sidebar_state=None):
                         fetched_data = get_financials_from_ai(c_name, curr_id, st.session_state.api_key, selected_model)
                     
                         if isinstance(fetched_data, dict) and "error" not in fetched_data:
-                            core_fin_keys = ["pe", "trailing_eps", "ttm_eps", "latest_quarter_eps", "forward_eps", "forward_eps_ai", "forward_eps_consensus", "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3", "pb", "gross_margin", "operating_margin", "roe", "yoy", "target_price", "mom", "dividend_yield"]
+                            core_fin_keys = [
+                                "pe", "trailing_eps", "ttm_eps", "latest_quarter_eps", "forward_eps", "forward_eps_ai", "forward_eps_consensus", "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3", "pb",
+                                "monthly_revenue_yoy_percent", "monthly_revenue_mom_percent", "accumulated_revenue_yoy_percent", "gross_margin_percent", "operating_margin_percent", "roe_percent", "dividend_yield_percent",
+                                "target_price_high", "target_price_avg", "target_price_low", "target_price_analyst_count", "ai_latest_target_price", "target_price", "free_cash_flow", "current_ratio", "debt_to_equity"
+                            ]
                             has_effective_fin_data = any(fetched_data.get(k) not in (None, "", "null") for k in core_fin_keys)
                             if not has_effective_fin_data:
                                 st.warning("⚠️ AI 本次有回應，但未抓到可用財報欄位（可能是來源暫無資料或回傳皆為 null）。請稍後重試或切換標的。")
@@ -458,7 +462,6 @@ def render_main_page(sidebar_state=None):
                 t_eps = curr_p / pe_ratio
             
             sys_f_eps_calc = s_float(info.get('forwardEps'))
-            sys_forward_eps_source_text = "Yahoo/yfinance forwardEps" if sys_f_eps_calc is not None else "系統未取得 forwardEps"
             # EPS 拆欄：yfinance 多數只提供 trailingEps / forwardEps；最新單季與完整年度 EPS 先保留 NULL，避免誤標口徑。
             sys_latest_quarter_eps = None
             sys_ttm_eps = t_eps
@@ -494,12 +497,26 @@ def render_main_page(sidebar_state=None):
                 if bound_stock_id != str(curr_id):
                     ai_fin = {}
                     st.session_state.ai_fetched_financials.pop(curr_id, None)
-            if isinstance(ai_fin, dict) and ai_fin:
-                ai_fin = unwrap_ai_value_objects(ai_fin)
-                st.session_state.ai_fetched_financials[curr_id] = ai_fin
             has_ai_fin_fetch = bool(ai_fin)
-            ai_pe = s_float(ai_fin.get('pe')) if has_ai_fin_fetch else None
-            ai_pb = s_float(ai_fin.get('pb')) if has_ai_fin_fetch else None
+
+            def _ai_num_field(field, default=None):
+                if not has_ai_fin_fetch or not isinstance(ai_fin, dict):
+                    return default
+                return s_float(ai_fin.get(field), default)
+
+            def _ai_percent_ratio(field, fallback_ratio_field=None):
+                """正式百分比欄位：AI 回 27.64 代表 27.64%，內部轉 0.2764。
+                fallback_ratio_field 僅用於非營收 legacy 安全相容；營收 YoY/MoM 不退回 legacy。
+                """
+                v = _ai_num_field(field)
+                if v is not None:
+                    return v / 100.0
+                if fallback_ratio_field:
+                    return normalize_financial_ratio(ai_fin.get(fallback_ratio_field))
+                return None
+
+            ai_pe = _ai_num_field('pe') if has_ai_fin_fetch else None
+            ai_pb = _ai_num_field('pb') if has_ai_fin_fetch else None
             # EPS 拆欄：避免最新單季、TTM、年度、Forward EPS 混用。
             ai_latest_quarter_eps = pick_first_number(ai_fin.get('latest_quarter_eps')) if has_ai_fin_fetch else None
             ai_ttm_eps = pick_first_number(ai_fin.get('ttm_eps'), ai_fin.get('trailing_eps')) if has_ai_fin_fetch else None
@@ -517,46 +534,34 @@ def render_main_page(sidebar_state=None):
             ai_forward_eps_fy_basis = ai_fin.get('forward_eps_fy_basis') if has_ai_fin_fetch else None
             ai_t_eps = ai_ttm_eps
             ai_f_eps_calc = pick_first_number(ai_forward_eps_fy1, ai_forward_eps_consensus, ai_forward_eps_ai) if has_ai_fin_fetch else None
-            def _ai_percent_ratio(*keys):
-                if not has_ai_fin_fetch or not isinstance(ai_fin, dict):
-                    return None
-                for k in keys:
-                    v = s_float(ai_fin.get(k))
-                    if v is not None:
-                        return v / 100.0
-                return None
-            # 2.2：AI 百分比正式值只讀 *_percent；legacy 欄位不進主流程。
-            ai_yoy = _ai_percent_ratio('monthly_revenue_yoy_percent')
-            ai_gm = _ai_percent_ratio('gross_margin_percent')
-            ai_om = _ai_percent_ratio('operating_margin_percent')
-            ai_roe = _ai_percent_ratio('roe_percent')
-            ai_de = s_float(ai_fin.get('debt_to_equity')) if has_ai_fin_fetch else None
-            ai_dy = _ai_percent_ratio('dividend_yield_percent')
+            # 2.2 正式資料欄位：營收/財務百分比優先讀 *_percent，避免 legacy yoy/mom 混用。
+            ai_yoy = _ai_percent_ratio('monthly_revenue_yoy_percent') if has_ai_fin_fetch else None
+            ai_gm = _ai_percent_ratio('gross_margin_percent', 'gross_margin') if has_ai_fin_fetch else None
+            ai_om = _ai_percent_ratio('operating_margin_percent', 'operating_margin') if has_ai_fin_fetch else None
+            ai_roe = _ai_percent_ratio('roe_percent', 'roe') if has_ai_fin_fetch else None
+            ai_de = normalize_debt_to_equity(ai_fin.get('debt_to_equity')) if has_ai_fin_fetch else None
+            ai_dy = _ai_percent_ratio('dividend_yield_percent', 'dividend_yield') if has_ai_fin_fetch else None
             
-            # 接取剛增加的三項防禦/主力籌碼指標
-            ai_fcf = s_float(ai_fin.get('free_cash_flow')) if has_ai_fin_fetch else None
-            ai_cr = s_float(ai_fin.get('current_ratio')) if has_ai_fin_fetch else None
-            ai_shares = s_float(ai_fin.get('shares_outstanding')) if has_ai_fin_fetch else None
+            # 接取剛增加的三項防禦/主力籌碼指標；s_float 已支援 {value, source, date} 物件格式。
+            ai_fcf = _ai_num_field('free_cash_flow') if has_ai_fin_fetch else None
+            ai_cr = _ai_num_field('current_ratio') if has_ai_fin_fetch else None
+            ai_shares = _ai_num_field('shares_outstanding') if has_ai_fin_fetch else None
         
-            # 🚀 接收 AI 抓到的目標價、MoM 與 Dividend Yield，並覆蓋錯誤資料
-            # 2.2 target-price safety：target_price 改定位為「AI 最新單一目標價補充」，
-            # 不再充當 target_price_avg，避免把單一券商/新聞目標價誤當法人平均。
-            ai_latest_target_price = s_float(ai_fin.get('ai_latest_target_price') or ai_fin.get('target_price')) if has_ai_fin_fetch else None
-            ai_target_price = ai_latest_target_price  # 向下相容：僅作補充顯示，不作平均價。
-            ai_hi_val = s_float(ai_fin.get('target_price_high')) if has_ai_fin_fetch else None
-            ai_me_val = s_float(ai_fin.get('target_price_avg')) if has_ai_fin_fetch else None
-            ai_lo_val = s_float(ai_fin.get('target_price_low')) if has_ai_fin_fetch else None
-            # yfinance/info 備援：有些標的 AI 只抓到 analyst_count 或 latest target，
-            # 但 info 已有 targetHigh/Mean/Low；法人目標價面板不可因此空白。
-            sys_target_high = s_float(info.get('targetHighPrice')) if isinstance(info, dict) else None
-            sys_target_mean = s_float(info.get('targetMeanPrice') or info.get('targetMedianPrice')) if isinstance(info, dict) else None
-            sys_target_low = s_float(info.get('targetLowPrice')) if isinstance(info, dict) else None
-            panel_hi_val = ai_hi_val if ai_hi_val is not None else sys_target_high
-            panel_me_val = ai_me_val if ai_me_val is not None else sys_target_mean
-            panel_lo_val = ai_lo_val if ai_lo_val is not None else sys_target_low
-            target_price_source_label = ("AI/法人聯網" if (ai_hi_val is not None or ai_me_val is not None or ai_lo_val is not None) else ("系統/info" if (panel_hi_val is not None or panel_me_val is not None or panel_lo_val is not None) else "無"))
+            # 🚀 法人目標價分層：high/avg/low 才是正式法人區間；target_price 只作 AI 最新目標價補充。
+            ai_latest_target_price = _ai_num_field('ai_latest_target_price') or _ai_num_field('target_price') if has_ai_fin_fetch else None
+            ai_target_price = ai_latest_target_price
+            sys_hi_val = s_float(info.get('targetHighPrice')) if isinstance(info, dict) else None
+            sys_me_val = s_float(info.get('targetMeanPrice')) if isinstance(info, dict) else None
+            sys_lo_val = s_float(info.get('targetLowPrice')) if isinstance(info, dict) else None
+            ai_hi_val = _ai_num_field('target_price_high') if has_ai_fin_fetch else None
+            ai_me_val = _ai_num_field('target_price_avg') if has_ai_fin_fetch else None
+            ai_lo_val = _ai_num_field('target_price_low') if has_ai_fin_fetch else None
+            # 系統/yfinance 目標價是正式備援；不使用 target_price 冒充平均。
+            ai_hi_val = ai_hi_val if ai_hi_val is not None else sys_hi_val
+            ai_me_val = ai_me_val if ai_me_val is not None else sys_me_val
+            ai_lo_val = ai_lo_val if ai_lo_val is not None else sys_lo_val
             ai_analyst_count = ai_fin.get('target_price_analyst_count') if has_ai_fin_fetch else None
-            ai_target_rationale = str(ai_fin.get('target_price_rationale') or ai_fin.get('ai_latest_target_price_rationale') or "").strip() if has_ai_fin_fetch else ""
+            ai_target_rationale = str(ai_fin.get('target_price_rationale') or ai_fin.get('ai_latest_target_price_note') or "").strip() if has_ai_fin_fetch else ""
 
             # 17-C-9c-hotfix45：法人目標價「面板」與「打包提示詞」同步修正。
             # 有些標的的 AI JSON 沒回 target_price_analyst_count，但 yfinance/info 會有 numberOfAnalystOpinions；
@@ -576,7 +581,7 @@ def render_main_page(sidebar_state=None):
                 sys_analyst_count,
             )
             ai_mom = _ai_percent_ratio('monthly_revenue_mom_percent') if has_ai_fin_fetch else None
-            if ai_mom is not None: 
+            if ai_mom is not None:
                 latest_mom_val = ai_mom * 100
 
             # ==========================================
@@ -647,12 +652,7 @@ def render_main_page(sidebar_state=None):
             ai_period_val = f"({raw_ai_period})" if raw_ai_period else ""
         
             # 🚀 在目標價 html 生成前，先宣告給 prompt 用的純文字變數，絕對防禦 NameError
-            ai_latest_target_field = "ai_latest_target_price" if isinstance(ai_fin, dict) and ai_fin.get("ai_latest_target_price") is not None else "target_price"
-            try:
-                ai_latest_target_source_detail = format_ai_source_detail(ai_fin, ai_latest_target_field, raw_ai_period, "AI最新目標價") if has_ai_fin_fetch else ""
-            except Exception:
-                ai_latest_target_source_detail = raw_ai_period if raw_ai_period else ""
-            ai_tp_str = f"{ai_latest_target_price:.1f}" if ai_latest_target_price is not None else "未捕捉到"
+            ai_tp_str = f"{ai_target_price:.1f}" if ai_target_price is not None else "未捕捉到"
             target_price_html = ""
             cap_warning_html = ""
 
@@ -682,10 +682,7 @@ def render_main_page(sidebar_state=None):
             
             if sys_f_eps_calc is None and t_eps is not None and earn_growth is not None and -1 <= earn_growth <= 5:
                 sys_f_eps_calc = t_eps * (1 + earn_growth)
-                sys_forward_eps_source_text = "由系統 TTM EPS × earningsGrowth 反推（非法人共識）"
             sys_forward_eps_system = sys_f_eps_calc
-            if sys_forward_eps_system is None:
-                sys_forward_eps_source_text = "系統未取得 Forward EPS"
 
             # ==========================================
             # ⚙️ Dynamic Cap 2.0 專用採用值（第 17-B-3）
@@ -886,7 +883,7 @@ def render_main_page(sidebar_state=None):
             eps_source_text = f"海外系統或反推 ({eff_f_eps:.2f}元)" if eff_f_eps is not None else "系統預估 (無資料)"
             
             # 使用新的排版函數呼叫
-            f_eps_display = build_cmp_dual_str(t_eps, sys_f_eps_calc, ai_t_eps, ai_f_eps_calc, 'num', 'num', 'AI推估', show_ai_missing=has_ai_fin_fetch, period=ai_period_val if (ai_t_eps is not None or ai_f_eps_calc is not None) else '')
+            f_eps_display = build_cmp_dual_str(t_eps, sys_f_eps_calc, ai_t_eps, ai_f_eps_calc, 'num', 'num', 'AI推估', show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
     
             sys_forward_pe = s_float(info.get('forwardPE'))
             if sys_forward_pe is None and eff_f_eps is not None and eff_f_eps > 0: sys_forward_pe = curr_p / eff_f_eps
@@ -1143,13 +1140,13 @@ def render_main_page(sidebar_state=None):
             orig_fpe_str = f"{sys_forward_pe:.1f}x" if sys_forward_pe is not None else "N/A"
             fpe_str = f"{orig_fpe_str}<br><span style='color:#FFD700; font-size:0.85rem;'>(AI推估: {ai_fpe:.1f}x{time_str})</span>" if ai_fpe is not None else orig_fpe_str
         
-            pe_str = build_cmp_str(pe_ratio, ai_pe, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val if ai_pe is not None else '')
+            pe_str = build_cmp_str(pe_ratio, ai_pe, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
             # ✅ 顯示字串只吃 validate_and_correct_financial_metrics() 校正後的 display_* 變數。
-            rg_str = build_cmp_str(display_rev_growth, display_ai_yoy, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val if display_ai_yoy is not None else '')
-            gm_om_str = build_cmp_dual_str(display_gross_margin, display_operating_margin, display_ai_gross_margin, display_ai_operating_margin, 'pct', 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val if (display_ai_gross_margin is not None or display_ai_operating_margin is not None) else '')
-            roe_str = build_cmp_str(roe, ai_roe, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val if ai_roe is not None else '')
-            de_str = build_cmp_str(display_debt_to_equity, display_ai_debt_to_equity, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val if display_ai_debt_to_equity is not None else '')
-            pb_str = build_cmp_str(pb_ratio, ai_pb, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val if ai_pb is not None else '')
+            rg_str = build_cmp_str(display_rev_growth, display_ai_yoy, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            gm_om_str = build_cmp_dual_str(display_gross_margin, display_operating_margin, display_ai_gross_margin, display_ai_operating_margin, 'pct', 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            roe_str = build_cmp_str(roe, ai_roe, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            de_str = build_cmp_str(display_debt_to_equity, display_ai_debt_to_equity, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            pb_str = build_cmp_str(pb_ratio, ai_pb, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
         
             rg_color = "#ff4d4d" if eff_rg and eff_rg > 0 else ("#00cc66" if eff_rg and eff_rg < 0 else "#fff")
             roe_eval = " <span style='color:#00cc66; font-size:0.8rem; margin-left:5px;' title='大於15%視為資金運用效率極佳 (已透過恆等式校正)'>⭐ 優質</span>" if eff_roe is not None and eff_roe >= 0.15 else ""
@@ -1273,7 +1270,7 @@ def render_main_page(sidebar_state=None):
                 debug_eps = eff_f_eps if eff_f_eps else (ai_f_eps_calc if ai_f_eps_calc else 0)
 
                 _rows = [
-                    ("🎯 1. 公式合理估值", f"系統 Forward EPS × formula cap｜EPS來源：{sys_forward_eps_source_text}｜非買賣目標", eff_f_eps, formula_pe_cap, sys_target_price_est, "#ffffff"),
+                    ("🎯 1. 公式合理估值", "系統 EPS × formula cap，非買賣目標", eff_f_eps, formula_pe_cap, sys_target_price_est, "#ffffff"),
                     ("🤖 2. AI估值", "AI / 法人 EPS × formula cap，需看來源可信度", ai_f_eps_calc, formula_pe_cap, ai_target_price_est, "#FCD34D"),
                     ("📅 3. FY1年度估值", f"FY1 EPS × formula cap｜{fy1_year_text}", ai_forward_eps_fy1, formula_pe_cap, fy1_formula_target_price, "#93C5FD"),
                     ("📆 4. FY2第二年度估值", f"FY2 EPS × formula cap｜{fy2_year_text}｜僅供市場先行定價判斷", ai_forward_eps_fy2, formula_pe_cap, fy2_formula_target_price, "#A7F3D0"),
@@ -1313,7 +1310,7 @@ def render_main_page(sidebar_state=None):
                         公式合理估值保留系統 EPS 口徑；AI估值獨立顯示；FY1 是年度主估值參考；FY2 只用於市場先行定價判斷；FY3 為高風險遠期情境，不可直接當買點。
                     </div>
                     <div style='background:#2c2c2c; padding:4px 8px; border-radius:4px; margin-top:4px;'>
-                        <small style='color:#00bfff;'>🐛 [底層運算除錯] 系統EPS: {_fmt_eps(eff_f_eps)}｜AI EPS: {_fmt_eps(ai_f_eps_calc)}｜FY1 EPS: {_fmt_eps(ai_forward_eps_fy1)}｜FY2 EPS: {_fmt_eps(ai_forward_eps_fy2)}｜FY3 EPS: {_fmt_eps(ai_forward_eps_fy3)}｜系統Forward EPS來源: {sys_forward_eps_source_text}｜EPS 年期/來源: {eps_period_note}｜公式倍率: {_fmt_cap(formula_pe_cap)}｜使用者手動倍率: {_fmt_cap(manual_cap_for_calc)}｜樂觀倍率: {_fmt_cap(extreme_pe_cap_for_calc)}</small>
+                        <small style='color:#00bfff;'>🐛 [底層運算除錯] 系統EPS: {_fmt_eps(eff_f_eps)}｜AI EPS: {_fmt_eps(ai_f_eps_calc)}｜FY1 EPS: {_fmt_eps(ai_forward_eps_fy1)}｜FY2 EPS: {_fmt_eps(ai_forward_eps_fy2)}｜FY3 EPS: {_fmt_eps(ai_forward_eps_fy3)}｜EPS 年期/來源: {eps_period_note}｜公式倍率: {_fmt_cap(formula_pe_cap)}｜使用者手動倍率: {_fmt_cap(manual_cap_for_calc)}｜樂觀倍率: {_fmt_cap(extreme_pe_cap_for_calc)}</small>
                     </div>
                     {implied_html}{cap_warning_html}
                     </div>
@@ -1663,14 +1660,12 @@ def render_main_page(sidebar_state=None):
             # ✅ hotfix：建立「法人目標價面板快照」，後面的打包提示詞只讀這個快照，
             # 避免提示詞重新抓其他來源造成與面板顯示不同步。
             target_panel_for_prompt = {
-                "high": panel_hi_val,
-                "mean": panel_me_val,
-                "low": panel_lo_val,
+                "high": ai_hi_val,
+                "mean": ai_me_val,
+                "low": ai_lo_val,
                 "analyst_count": ai_analyst_count,
-                "latest_target_price": ai_latest_target_price,
-                "latest_target_source_detail": ai_latest_target_source_detail,
                 "confidence": locals().get("target_confidence", classify_target_price_confidence(ai_analyst_count)),
-                "source": f"法人目標價面板顯示值：{target_price_source_label} target_price_high-target_price_avg-target_price_low" if (panel_hi_val is not None and panel_me_val is not None and panel_lo_val is not None) else (f"法人目標價面板顯示值：{target_price_source_label} target_price_avg" if panel_me_val is not None else "無完整法人目標價區間"),
+                "source": "法人目標價面板顯示值：AI/法人聯網 target_price_high-target_price_avg-target_price_low" if (ai_hi_val is not None and ai_me_val is not None and ai_lo_val is not None) else ("法人目標價面板顯示值：AI/法人聯網平均目標價" if ai_me_val is not None else "無可用法人目標價"),
                 "rationale": ai_target_rationale,
             }
 
@@ -1681,34 +1676,31 @@ def render_main_page(sidebar_state=None):
             st.markdown(f"#### 🎯 法人預估目標價 (分析師統計：{analyst_count_display} 位｜可信度：<span style='color:{conf_color};'>{conf_label}</span>)", unsafe_allow_html=True)
             st.caption(target_confidence.get("message", "分析師樣本數不足時，不宜視為強共識。"))
         
-            if panel_hi_val is not None and panel_me_val is not None and panel_lo_val is not None:
+            if ai_hi_val is not None and ai_me_val is not None and ai_lo_val is not None:
                 v1, v2, v3 = st.columns(3)
-                v1.markdown(f"<div style='background:#ffebee;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>最高價</small><br><b>{panel_hi_val:.1f}</b></div>", unsafe_allow_html=True)
-                upside = ((panel_me_val / curr_p) - 1) * 100 if curr_p else 0
-                v2.markdown(f"<div style='background:#fff3e0;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>平均價</small><br><b>{panel_me_val:.1f}</b><br><small>空間: {upside:+.1f}%</small></div>", unsafe_allow_html=True)
-                v3.markdown(f"<div style='background:#e8f5e9;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>最低價</small><br><b>{panel_lo_val:.1f}</b></div>", unsafe_allow_html=True)
-                if ai_latest_target_price is not None:
-                    st.caption(f"🆕 AI 最新目標價補充：{ai_latest_target_price:.1f}｜來源/日期：{ai_latest_target_source_detail or '未揭露'}｜限制：最新捕捉值，不一定等於法人平均。")
+                v1.markdown(f"<div style='background:#ffebee;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>最高價</small><br><b>{ai_hi_val:.1f}</b></div>", unsafe_allow_html=True)
+                upside = ((ai_me_val / curr_p) - 1) * 100 if curr_p else 0
+                v2.markdown(f"<div style='background:#fff3e0;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>平均價</small><br><b>{ai_me_val:.1f}</b><br><small>空間: {upside:+.1f}%</small></div>", unsafe_allow_html=True)
+                v3.markdown(f"<div style='background:#e8f5e9;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>最低價</small><br><b>{ai_lo_val:.1f}</b></div>", unsafe_allow_html=True)
                 if ai_target_rationale:
-                    st.caption(f"📌 法人/最新目標價核心理由：{ai_target_rationale}")
+                    st.caption(f"📌 法人目標價核心理由：{ai_target_rationale}")
                 st.markdown("---")
-            elif panel_me_val is not None:
-                 upside_ai = ((panel_me_val / curr_p) - 1) * 100 if curr_p else 0
-                 st.markdown(f"<div style='background:#fff3e0;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>法人平均目標價 ({target_price_source_label})</small><br><b>{panel_me_val:.1f}</b><br><small>潛在空間: {upside_ai:+.1f}%</small></div>", unsafe_allow_html=True)
-                 if ai_latest_target_price is not None:
-                    st.caption(f"🆕 AI 最新目標價補充：{ai_latest_target_price:.1f}｜來源/日期：{ai_latest_target_source_detail or '未揭露'}｜限制：最新捕捉值，不一定等於法人平均。")
+            elif ai_me_val is not None:
+                 upside_ai = ((ai_me_val / curr_p) - 1) * 100 if curr_p else 0
+                 st.markdown(f"<div style='background:#fff3e0;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>法人平均目標價（target_price_avg / 系統備援）</small><br><b>{ai_me_val:.1f}</b><br><small>潛在空間: {upside_ai:+.1f}%</small></div>", unsafe_allow_html=True)
                  if ai_target_rationale:
-                    st.caption(f"📌 法人/最新目標價核心理由：{ai_target_rationale}")
+                    st.caption(f"📌 法人目標價核心理由：{ai_target_rationale}")
+                 if ai_latest_target_price is not None and abs(ai_latest_target_price - ai_me_val) > 1e-6:
+                    st.caption(f"🆕 AI 最新目標價補充：{ai_latest_target_price:.1f}（最新捕捉值，不一定等於法人平均）")
                  st.markdown("---")
             elif ai_latest_target_price is not None:
-                 upside_latest = ((ai_latest_target_price / curr_p) - 1) * 100 if curr_p else 0
-                 st.markdown(f"<div style='background:#fff3e0;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>🆕 AI 最新目標價補充（非法人平均）</small><br><b>{ai_latest_target_price:.1f}</b><br><small>潛在空間: {upside_latest:+.1f}%</small></div>", unsafe_allow_html=True)
-                 st.caption(f"來源/日期：{ai_latest_target_source_detail or '未揭露'}｜限制：此為最新捕捉值，不等於法人平均，不直接納入估值與燈號。")
+                 upside_ai = ((ai_latest_target_price / curr_p) - 1) * 100 if curr_p else 0
+                 st.markdown(f"<div style='background:#fff3e0;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>🆕 AI 最新目標價補充（非平均目標價）</small><br><b>{ai_latest_target_price:.1f}</b><br><small>潛在空間: {upside_ai:+.1f}%</small></div>", unsafe_allow_html=True)
                  if ai_target_rationale:
-                    st.caption(f"📌 最新目標價核心理由：{ai_target_rationale}")
+                    st.caption(f"📌 AI 最新目標價核心理由：{ai_target_rationale}")
                  st.markdown("---")
             else:
-                 st.markdown("<span style='color:gray;'>AI 目前尚未捕捉到法人目標價資料。</span>", unsafe_allow_html=True)
+                 st.markdown("<span style='color:gray;'>目前尚未捕捉到法人目標價區間或 AI 最新目標價。</span>", unsafe_allow_html=True)
                  st.markdown("---")
 
             # 🚀 主力籌碼追蹤雷達
@@ -1896,6 +1888,7 @@ def render_main_page(sidebar_state=None):
                 _target_panel.get("mean"),
                 locals().get("ai_me_val"),
                 ai_fin.get("target_price_avg") if isinstance(ai_fin, dict) else None,
+                ai_fin.get("target_price") if isinstance(ai_fin, dict) else None,
                 info.get("targetMeanPrice") if isinstance(info, dict) else None,
             )
             _tp_lo = _prompt_first_float(
@@ -2311,7 +2304,6 @@ def render_main_page(sidebar_state=None):
                 fy3_price=locals().get('fy3_formula_target_price'),
                 manual_price=locals().get('fy1_manual_target_price'),
                 optimistic_price=locals().get('fy1_optimistic_target_price'),
-                sys_forward_eps_source_text_val=locals().get('sys_forward_eps_source_text'),
             ):
                 """前瞻 PEG 大區塊的新版 7 層估值，同步打包到買進決策版與研究完整版。"""
                 try:
@@ -2328,9 +2320,8 @@ def render_main_page(sidebar_state=None):
                         t = _nullize_text(v)
                         return "年期未明" if t == "NULL" else t
 
-                    _sys_eps_src = _nullize_text(sys_forward_eps_source_text_val or '系統/外部資料源')
                     rows = [
-                        ("1. 公式合理估值", f"系統 Forward EPS × formula cap｜EPS來源={_sys_eps_src}｜非買賣目標", system_eps, formula_cap, system_price, "公式只計算估值價格，Forward EPS 是外部/系統輸入值；若來源不明或為反推，可信度需降級。"),
+                        ("1. 公式合理估值", "系統 EPS × formula cap，非買賣目標", system_eps, formula_cap, system_price, "保留系統抓取 EPS 口徑，作為原始系統估值。"),
                         ("2. AI估值", "AI / 法人 EPS × formula cap，需看來源可信度", ai_eps, formula_cap, ai_price, "用 AI 取得或校正後 EPS 獨立估值，不覆蓋系統估值。"),
                         ("3. FY1年度估值", f"FY1 EPS × formula cap｜{_y(fy1_year)}", fy1_eps, formula_cap, fy1_price, "一年預估 EPS 的年度主估值參考。"),
                         ("4. FY2第二年度估值", f"FY2 EPS × formula cap｜{_y(fy2_year)}", fy2_eps, formula_cap, fy2_price, "只用於判斷市場是否提前反映第二年獲利，不直接當買點。"),
@@ -2543,7 +2534,6 @@ def render_main_page(sidebar_state=None):
                 sys_fiscal_year_eps_val=locals().get('sys_fiscal_year_eps'),
                 ai_fiscal_year_eps_val=locals().get('ai_fiscal_year_eps'),
                 sys_forward_eps_system_val=locals().get('sys_forward_eps_system'),
-                sys_forward_eps_source_text_val=locals().get('sys_forward_eps_source_text'),
                 eff_f_eps_val=locals().get('eff_f_eps'),
                 ai_forward_eps_ai_val=locals().get('ai_forward_eps_ai'),
                 ai_forward_eps_consensus_val=locals().get('ai_forward_eps_consensus'),
@@ -2604,8 +2594,7 @@ def render_main_page(sidebar_state=None):
                         adopted = ai_fiscal_year_eps_val if s_float(ai_fiscal_year_eps_val) is not None else sys_fiscal_year_eps_val
                         lines.append(f"- 完整年度 EPS: 系統={_n(sys_fiscal_year_eps_val)} / AI={_n(ai_fiscal_year_eps_val)} / 採用={_n(adopted)}")
                     if _has(sys_forward_eps_system_val, eff_f_eps_val):
-                        _sys_eps_src = _nullize_text(sys_forward_eps_source_text_val or '系統/外部資料源')
-                        lines.append(f"- Forward EPS－系統估值採用值: {_num(eff_f_eps_val)}（用於『公式合理估值』；系統原始={_num(sys_forward_eps_system_val)}；來源={_sys_eps_src}）")
+                        lines.append(f"- Forward EPS－系統估值採用值: {_num(eff_f_eps_val)}（用於『公式合理估值』；系統原始={_num(sys_forward_eps_system_val)}）")
                     if _has(ai_forward_eps_ai_val):
                         lines.append(f"- Forward EPS－AI一般欄位: {_num(ai_forward_eps_ai_val)}")
                     if _has(ai_forward_eps_consensus_val):
@@ -2665,24 +2654,22 @@ def render_main_page(sidebar_state=None):
 
 
             def _prompt_target_price_panel_summary():
-                """法人目標價提示詞與畫面面板同源；target_price 只作最新補充，不充當平均價。"""
+                """法人目標價提示詞與畫面面板同源；沒有值的 AI 欄位不輸出 NULL。"""
                 try:
                     lines = []
                     if _nullize_text(prompt_hi_str) != "NULL" or _nullize_text(prompt_me_str) != "NULL" or _nullize_text(prompt_lo_str) != "NULL":
-                        lines.append(f"- 法人目標價高 / 均 / 低: {_nullize_text(prompt_hi_str)} / {_nullize_text(prompt_me_str)} / {_nullize_text(prompt_lo_str)}")
+                        lines.append(f"- 最高 / 平均 / 最低目標價: {_nullize_text(prompt_hi_str)} / {_nullize_text(prompt_me_str)} / {_nullize_text(prompt_lo_str)}")
                     if _nullize_text(prompt_analyst_count) != "NULL":
                         lines.append(f"- 分析師人數: {_nullize_text(prompt_analyst_count)}")
                     if isinstance(target_confidence, dict):
                         lines.append(f"- 目標價可信度: {_nullize_text(target_confidence.get('label'))}｜{_nullize_text(target_confidence.get('message'))}")
                     if _nullize_text(prompt_target_source) != "NULL":
-                        lines.append(f"- 法人目標價資料來源: {_nullize_text(prompt_target_source)}")
-                    latest_tp = locals().get('ai_latest_target_price', None)
-                    latest_src = locals().get('ai_latest_target_source_detail', '')
-                    if s_float(latest_tp) is not None:
-                        lines.append(f"- AI 最新目標價補充: {s_float(latest_tp):.1f}｜來源/日期={_nullize_text(latest_src)}｜限制=最新捕捉值，不一定等於法人平均，不直接納入估值與燈號。")
+                        lines.append(f"- 目標價資料來源: {_nullize_text(prompt_target_source)}")
+                    if _nullize_text(ai_tp_str) != "NULL":
+                        lines.append(f"- AI 最新目標價補充: {_nullize_text(ai_tp_str)}")
                     if _nullize_text(prompt_target_rationale) != "NULL":
-                        lines.append(f"- 法人/最新目標價核心理由: {_nullize_text(prompt_target_rationale)}")
-                    lines.append("- 使用限制: 法人目標價與 AI 最新目標價只能作估值背景，不可直接視為合理買進價；若已反映 FY2/FY3 EPS，需檢查 EPS、營收與毛利率是否落地。")
+                        lines.append(f"- 核心理由: {_nullize_text(prompt_target_rationale)}")
+                    lines.append("- 同步規則: 以法人目標價面板顯示值為準；若面板無系統值，才回填 AI 目標價；沒有資料的 AI 欄位不輸出 NULL。")
                     return "\n".join(lines) if lines else "無可用法人目標價面板資料，本次不納入法人目標價判斷。"
                 except Exception as e:
                     try:
@@ -2923,10 +2910,10 @@ def render_main_page(sidebar_state=None):
                         pass
                     return "NULL"
             context_str = f"""
-【0. WAY AI 投資戰情室 2.1 精簡判讀總覽】
+【0. WAY AI 投資戰情室 2.2 精簡判讀總覽】
 - 股票: {c_name} ({curr_id})
 - 最新收盤價: {_nullize_text(curr_p)} 元
-- 系統版本: 2.1
+- 系統版本: 2.2
 - 最終操作燈號: {_nullize_text(final_signal.get('signal') if isinstance(final_signal, dict) else 'NULL')}
 - 操作含義: {_nullize_text(final_signal.get('advice') if isinstance(final_signal, dict) else 'NULL')}
 - 資料可信度 / 估值可信度 / 操作可信度: {_nullize_text(final_signal.get('data_confidence') if isinstance(final_signal, dict) else 'NULL')} / {_nullize_text(final_signal.get('valuation_confidence') if isinstance(final_signal, dict) else 'NULL')} / {_nullize_text(final_signal.get('operation_confidence') if isinstance(final_signal, dict) else 'NULL')}
@@ -3034,7 +3021,7 @@ def render_main_page(sidebar_state=None):
 【0. 系統判讀總覽】
 - 股票: {c_name} ({curr_id})
 - 最新收盤價: {_nullize_text(curr_p)} 元
-- 系統版本: 2.1
+- 系統版本: 2.2
 - 最終操作燈號: {_nullize_text(final_signal.get('signal') if isinstance(final_signal, dict) else 'NULL')}
 - 系統建議: {_nullize_text(final_signal.get('advice') if isinstance(final_signal, dict) else 'NULL')}
 - 資料 / 估值 / 操作可信度: {_nullize_text(final_signal.get('data_confidence') if isinstance(final_signal, dict) else 'NULL')} / {_nullize_text(final_signal.get('valuation_confidence') if isinstance(final_signal, dict) else 'NULL')} / {_nullize_text(final_signal.get('operation_confidence') if isinstance(final_signal, dict) else 'NULL')}
@@ -3112,10 +3099,10 @@ def render_main_page(sidebar_state=None):
 """
 
 
-            full_prompt_for_copy = f"""你是台股研究總監 + 交易策略專家。請用繁體中文、條列、可執行結論，並嚴格使用下方 WAY AI 投資戰情室 2.1 數據。
+            full_prompt_for_copy = f"""你是台股研究總監 + 交易策略專家。請用繁體中文、條列、可執行結論，並嚴格使用下方 WAY AI 投資戰情室 2.2 數據。
 
 重要原則：
-1) 請優先尊重系統 2.1 已產出的「月營收公告月份、EPS 拆欄、分歧警告、資料品質報告、法人目標價可信度、公式估值/可操作估值分離、產業估值模型、Dynamic Cap 2.0、最終操作燈號」。
+1) 請優先尊重系統 2.2 已產出的「月營收公告月份、EPS 拆欄、分歧警告、資料品質報告、法人目標價可信度、公式估值/可操作估值分離、產業估值模型、Dynamic Cap 2.0、最終操作燈號」。
 2) 公式合理估值與公式極限價只代表模型輸出，不可直接當作買進目標；真正操作請以「可操作估值區間」與最終燈號為主。
 3) 若系統 / AI 分歧警告存在，必須先說明分歧對估值可信度與操作可信度的影響，不可直接給樂觀目標價。
 4) EPS 必須分清楚最新單季 EPS、TTM EPS、完整年度 EPS、系統 Forward EPS、AI Forward EPS、法人共識 Forward EPS，不可混用。
@@ -3127,7 +3114,7 @@ def render_main_page(sidebar_state=None):
 10) 研究完整版請額外輸出「模型庫回饋建議」：這不是買賣建議，而是協助日後修正 stock_mapping.py、industry_taxonomy.py、dynamic_cap_model.py 或法人目標價可信度規則；AI 回饋只能作為候選清單，不可直接覆蓋模型庫。
 
 任務要求：
-1) 先做「2.1 資料品質盤點」：逐項說明哪些欄位是系統/AI/推估/NULL，並指出最影響結論的 3 個資料風險。
+1) 先做「2.2 資料品質盤點」：逐項說明哪些欄位是系統/AI/推估/NULL，並指出最影響結論的 3 個資料風險。
 2) 解讀「分歧警告」：EPS / YoY / PEG / 合理價 / D/E 若有警告，請說明是否會讓估值降級。
 3) 解讀「產業估值模型」：說明這檔股票適合用哪些估值指標，不適合用哪些指標。
 4) 解讀「公式估值 vs 可操作估值」：請分開說明公式合理價、公式極限價、可操作估值區間，不可混成同一個目標價。
@@ -3143,7 +3130,7 @@ def render_main_page(sidebar_state=None):
 
 輸出格式（必須照做）：
 - [投資結論一句話]
-- [2.1 資料品質與分歧警告]
+- [2.2 資料品質與分歧警告]
 - [產業估值模型解讀]
 - [公式估值 vs 可操作估值]
 - [公司優缺點]
@@ -3153,14 +3140,14 @@ def render_main_page(sidebar_state=None):
 - [下月追蹤清單]
 - [模型庫回饋建議｜研究用途，非買賣建議]
 
-以下是系統面板 2.1 精簡打包數據（只保留會影響外部 AI 判斷的採用值、分歧、估值層級、產業模型、Dynamic Cap 與燈號；無資料為 NULL）。若出現數據不合理，可上網查詢並說明不合理原因，但不可忽略系統已標示的分歧與資料品質警告：
+以下是系統面板 2.2 精簡打包數據（只保留會影響外部 AI 判斷的採用值、分歧、估值層級、產業模型、Dynamic Cap 與燈號；無資料為 NULL）。若出現數據不合理，可上網查詢並說明不合理原因，但不可忽略系統已標示的分歧與資料品質警告：
 {context_str}
 """
 
             research_prompt_for_copy = full_prompt_for_copy
             buy_decision_prompt_for_copy = f"""你是台股研究總監 + 交易策略專家。請用繁體中文、條列、可執行結論，協助我判斷這檔股票「現在是否值得買進」。
 
-請優先尊重 WAY AI 投資戰情室 2.1 的判讀，尤其是：月營收公告月份、EPS 拆欄、分歧警告、資料品質、法人目標價可信度、公式估值/可操作估值分離、產業估值模型、Dynamic Cap 2.0、最終操作燈號。
+請優先尊重 WAY AI 投資戰情室 2.2 的判讀，尤其是：月營收公告月份、EPS 拆欄、分歧警告、資料品質、法人目標價可信度、公式估值/可操作估值分離、產業估值模型、Dynamic Cap 2.0、最終操作燈號。
 
 重要規則：
 - 不可把公式合理估值或公式極限價直接當買進目標。
@@ -3186,7 +3173,7 @@ def render_main_page(sidebar_state=None):
 11. [EPS 年期判斷]：請先用 TTM EPS 判斷目前實際獲利估值，再說明目前股價與法人目標價比較像用 FY1、FY2 還是 FY3 EPS 定價；FY1/FY2/FY3 是預估年度 EPS 序列，不是查詢日後1/2/3年。若用 FY2/FY3 才合理，請說明風險與是否能作為買進依據。
 12. [產業模型是否需更新]：請根據「17-C-9c-hotfix44 單次快照稽核」回答：不建議更新模型 / 暫時觀察 / 建議檢查 hybrid 權重 / 建議檢查 primary_taxon / 建議檢查整個產業倍率。若建議檢查，請說明是市場過熱、法人過度樂觀、EPS/營收尚未落地，還是公司營運型態已改變；不可因單次現價高於 hard ceiling 就直接調高模型。
 
-以下是 WAY AI 投資戰情室 2.1「買進決策版」系統資料。這不是完整研究資料包，只保留會直接影響買進判斷的採用值、系統值/AI值、分歧、估值層級、產業模型、Dynamic Cap 與燈號。若資料不合理，可上網查證，但不可忽略系統標示的資料品質與分歧警告：
+以下是 WAY AI 投資戰情室 2.2「買進決策版」系統資料。這不是完整研究資料包，只保留會直接影響買進判斷的採用值、系統值/AI值、分歧、估值層級、產業模型、Dynamic Cap 與燈號。若資料不合理，可上網查證，但不可忽略系統標示的資料品質與分歧警告：
 {decision_context_str}
 """
             

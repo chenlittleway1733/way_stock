@@ -49,29 +49,31 @@ def log_exception(source, context, exc=None):
 # ==========================================
 def s_float(val, default=None):
     """安全轉 float。
-    2.2 data-safety：AI 常回傳「27.64%」、「1,234.5」、「380元」或欄位物件 {value: ...}；
-    此函式只抽取可明確辨識的第一個數字，不把整段文字當正式語意判斷。
+
+    2.2 資料治理補強：AI 有時會把欄位回成物件，例如
+    {"value": 27.64, "source": "AI聯網搜尋"}。
+    主流程只需要數值時，優先抽 value / value_percent / ai_value，
+    避免面板顯示「AI 找不到數據」但 debug 裡其實有值。
     """
     try:
         if val is None:
             return default
         if isinstance(val, dict):
-            if "value" in val:
-                return s_float(val.get("value"), default)
+            for k in ("value", "value_percent", "ai_value", "adopted_value", "number", "data"):
+                if k in val and val.get(k) not in (None, "", "null", "NULL", "N/A"):
+                    return s_float(val.get(k), default)
             return default
         if isinstance(val, str):
             txt = val.strip()
-            if not txt or txt.lower() in {"none", "null", "nan", "n/a", "na", "無資料", "查無資料"}:
+            if txt in ("", "null", "NULL", "None", "N/A", "無資料", "AI找不到數據"):
                 return default
-            txt = txt.replace(',', '')
-            m = re.search(r'[-+]?\d+(?:\.\d+)?', txt)
-            if not m:
-                return default
-            v = float(m.group(0))
-        else:
-            v = float(val)
-        if math.isnan(v) or math.isinf(v):
-            return default
+            # 保留負號、小數點，移除百分號、逗號、元、倍等文字。
+            m = re.search(r"-?\d+(?:,\d{3})*(?:\.\d+)?", txt)
+            if m:
+                txt = m.group(0).replace(',', '')
+            val = txt
+        v = float(val)
+        if math.isnan(v) or math.isinf(v): return default
         return v
     except (TypeError, ValueError, OverflowError):
         return default
@@ -105,16 +107,16 @@ def p_dual(o1, o2, a1, a2, suffix="AI捉取"):
 
 def build_cmp_str(orig, ai_val, fmt="pct", suffix="AI推估", show_ai_missing=False, period=""):
     s = to_val_str(orig, fmt)
-    has_ai_value = ai_val is not None and not pd.isna(ai_val)
-    if has_ai_value:
+    has_ai = ai_val is not None and not pd.isna(ai_val)
+    if has_ai:
         ai_text = to_val_str(float(ai_val), fmt)
     elif show_ai_missing:
         ai_text = "AI找不到數據"
     else:
         return s
 
-    # 2.2 data-safety：AI 沒有值時，不顯示全域期間，避免「AI找不到數據, 2026Q1」誤導。
-    time_str = f", {period}" if (period and has_ai_value) else ""
+    # 沒有 AI 數值時，不顯示全域期間，避免「AI找不到數據, 2026年4月」誤導。
+    time_str = f", {period}" if (period and has_ai) else ""
     s += f"<br><span style='color:#FFD700; font-size:0.85rem;'>({suffix}: {ai_text}{time_str})</span>"
     return s
 
@@ -131,8 +133,8 @@ def build_cmp_dual_str(o1, o2, a1, a2, fmt1="num", fmt2="num", suffix="AI推估"
         sa1 = "AI找不到數據"
     if sa2 == "N/A":
         sa2 = "AI找不到數據"
-
-    # 2.2 data-safety：AI 沒有值時，不顯示全域期間。
+        
+    # 兩個 AI 值都缺時，不顯示期間；至少有一個 AI 值時才帶欄位期間。
     time_str = f", {period}" if (period and has_ai) else ""
     s += f"<br><span style='color:#FFD700; font-size:0.85rem;'>({suffix}: {sa1} / {sa2}{time_str})</span>"
     return s
@@ -198,46 +200,6 @@ def get_ai_source_url(ai_fin, field_key):
     meta = get_ai_field_source_meta(ai_fin, field_key)
     return str(meta.get("source_url") or meta.get("url") or meta.get("link") or "").strip()
 
-def unwrap_ai_value_objects(ai_fin):
-    """
-    將 AI 可能回傳的欄位物件攤平成 top-level 數值。
-    例如：monthly_revenue_yoy_percent={value:730.14, source:...}
-    轉為 monthly_revenue_yoy_percent=730.14，並把來源資訊併入 _sources。
-    這可避免 UI 顯示「AI找不到數據」但 debug 其實有 value 的問題。
-    """
-    if not isinstance(ai_fin, dict):
-        return ai_fin
-    data = dict(ai_fin)
-    sources = data.get('_sources') or data.get('_ai_source_trace') or data.get('field_sources') or {}
-    if not isinstance(sources, dict):
-        sources = {}
-
-    def _coerce_value(v):
-        if isinstance(v, str):
-            fv = s_float(v)
-            return fv if fv is not None else v
-        return v
-
-    for key, val in list(data.items()):
-        if key.startswith('_'):
-            continue
-        if isinstance(val, dict) and 'value' in val:
-            value = _coerce_value(val.get('value'))
-            meta = dict(val)
-            meta.pop('value', None)
-            if 'field' not in meta:
-                meta['field'] = key
-            sources[key] = {**meta, **(sources.get(key, {}) if isinstance(sources.get(key), dict) else {})}
-            data[key] = value
-
-    # 若來源追蹤表有 value 但 top-level 缺值，也回填 top-level。
-    for key, meta in list(sources.items()):
-        if isinstance(meta, dict) and data.get(key) in (None, '', 'null') and 'value' in meta:
-            data[key] = _coerce_value(meta.get('value'))
-
-    data['_sources'] = sources
-    return data
-
 def build_ai_source_trace_report(ai_fin):
     """把 AI 回傳的逐欄來源整理成 DataFrame，供 UI 檢視。"""
     if not isinstance(ai_fin, dict):
@@ -254,7 +216,7 @@ def build_ai_source_trace_report(ai_fin):
         rows.append({
             "欄位代碼": key,
             "欄位名稱": meta.get("label") or key,
-            "AI值": format_quality_value(ai_fin.get(key) if ai_fin.get(key) not in (None, "", "null") else meta.get("value"), "num"),
+            "AI值": format_quality_value(ai_fin.get(key), "num"),
             "來源": meta.get("source") or meta.get("publisher") or "—",
             "發布日/期間": meta.get("published_date") or meta.get("date") or meta.get("data_date") or meta.get("period") or ai_fin.get("data_period") or "—",
             "來源網址": meta.get("source_url") or meta.get("url") or meta.get("link") or "—",
@@ -766,7 +728,7 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
     if not isinstance(ai_fin, dict):
         return ai_fin
 
-    data = unwrap_ai_value_objects(dict(ai_fin))
+    data = dict(ai_fin)
     warnings = []
     invalid_fields = []
     label = f"{stock_name} ({stock_id})" if stock_name and stock_id else (stock_name or stock_id or "目前標的")
