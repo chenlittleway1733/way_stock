@@ -2014,11 +2014,13 @@ def render_main_page(sidebar_state=None):
                     keep = []
                     for _, row in df.iterrows():
                         code = _nullize_text(row.get("欄位代碼", "")).strip()
+                        code_norm = code.lower().strip()
                         name = _nullize_text(row.get("欄位名稱", ""))
-                        # 2.2：legacy 欄位只留 debug，不進買進決策/研究提示詞主資料，避免外部 AI 誤用。
-                        if code in legacy_field_codes or "legacy" in name.lower():
-                            continue
                         row_text = " ".join([_nullize_text(row.get(c, "")) for c in df.columns])
+                        row_text_l = row_text.lower()
+                        # 2.2：legacy 欄位只留 debug，不進買進決策/研究提示詞主資料，避免外部 AI 誤用。
+                        if code_norm in legacy_field_codes or "legacy" in name.lower() or "legacy" in row_text_l:
+                            continue
                         if any(k.lower() in row_text.lower() for k in keywords):
                             parts = []
                             for col in df.columns:
@@ -2289,21 +2291,39 @@ def render_main_page(sidebar_state=None):
                     if not isinstance(pack, dict):
                         return "NULL"
                     s = pack.get("summary", {}) or {}
+                    def _fmt_year(v):
+                        x = s_float(v)
+                        if x is not None and 1900 <= x <= 2200:
+                            return str(int(round(x)))
+                        t = _nullize_text(v)
+                        if re.match(r"^\d{4}\.0$", t):
+                            return t[:-2]
+                        return t
+                    def _fmt_num(v, digits=2):
+                        x = s_float(v)
+                        if x is None:
+                            return "NULL"
+                        return f"{x:.{digits}f}"
+                    def _fmt_label(label, year_key):
+                        t = _nullize_text(label)
+                        if t != "NULL":
+                            return re.sub(r"(\d{4})\.0", r"\1", t)
+                        return _fmt_year(s.get(year_key))
                     lines = [
                         f"- FY 定義: {_nullize_text(s.get('fy_definition'))}",
-                        f"- TTM EPS: {_nullize_text(s.get('ttm_eps'))}｜近四季已實現 EPS，用於目前實際獲利估值",
-                        f"- FY1 EPS: {_nullize_text(s.get('fy1_eps'))}｜{_nullize_text(s.get('fy1_label'))}",
-                        f"- FY2 EPS: {_nullize_text(s.get('fy2_eps'))}｜{_nullize_text(s.get('fy2_label'))}",
-                        f"- FY3 EPS: {_nullize_text(s.get('fy3_eps'))}｜{_nullize_text(s.get('fy3_label'))}",
-                        f"- EPS 年份/期間: 近四季 / {_nullize_text(s.get('fy1_year'))} / {_nullize_text(s.get('fy2_year'))} / {_nullize_text(s.get('fy3_year'))}",
+                        f"- TTM EPS: {_fmt_num(s.get('ttm_eps'))}｜近四季已實現 EPS，用於目前實際獲利估值",
+                        f"- FY1 EPS: {_fmt_num(s.get('fy1_eps'))}｜{_fmt_label(s.get('fy1_label'), 'fy1_year')}",
+                        f"- FY2 EPS: {_fmt_num(s.get('fy2_eps'))}｜{_fmt_label(s.get('fy2_label'), 'fy2_year')}",
+                        f"- FY3 EPS: {_fmt_num(s.get('fy3_eps'))}｜{_fmt_label(s.get('fy3_label'), 'fy3_year')}",
+                        f"- EPS 年份/期間: 近四季 / {_fmt_year(s.get('fy1_year'))} / {_fmt_year(s.get('fy2_year'))} / {_fmt_year(s.get('fy3_year'))}",
                         f"- EPS 年期基準: {_nullize_text(s.get('eps_basis'))}",
                         f"- EPS 來源備註: {_nullize_text(s.get('eps_source_note'))}",
-                        f"- 現價隱含 P/E（TTM/FY1/FY2/FY3）: {_nullize_text(s.get('market_pe_ttm'))}x / {_nullize_text(s.get('market_pe_fy1'))}x / {_nullize_text(s.get('market_pe_fy2'))}x / {_nullize_text(s.get('market_pe_fy3'))}x",
+                        f"- 現價隱含 P/E（TTM/FY1/FY2/FY3）: {_fmt_num(s.get('market_pe_ttm'))}x / {_fmt_num(s.get('market_pe_fy1'))}x / {_fmt_num(s.get('market_pe_fy2'))}x / {_fmt_num(s.get('market_pe_fy3'))}x",
                         f"- 市場 EPS 年期判讀: {_nullize_text(s.get('market_view'))}",
                         "- 請 AI 判斷：目前股價/法人目標價偏高，是因為 Dynamic Cap 倍率太低，還是因為市場已經在看 FY2/FY3 EPS？也請同時對照 TTM EPS，看目前實際獲利是否能支撐股價。",
                         "- 重要限制：FY1/FY2/FY3 是預估年度 EPS 序列，不是查詢日後1/2/3年；FY2 只能用來解釋市場先行，不等於可操作買點；FY3 只作高風險樂觀情境，不可直接作為買進目標。",
                     ]
-                    return "\\n".join(lines)
+                    return "\n".join(lines)
                 except Exception as e:
                     try:
                         log_exception("PromptPack", "_prompt_forward_eps_tier_core", e)
@@ -2313,7 +2333,7 @@ def render_main_page(sidebar_state=None):
 
 
             def _prompt_peg_valuation_layers(
-                system_eps=locals().get('eff_f_eps'),
+                system_eps=locals().get('sys_forward_eps_system'),
                 ai_eps=locals().get('ai_f_eps_calc'),
                 fy1_eps=locals().get('ai_forward_eps_fy1'),
                 fy2_eps=locals().get('ai_forward_eps_fy2'),
@@ -2345,8 +2365,18 @@ def render_main_page(sidebar_state=None):
                         x = s_float(v)
                         return "NULL" if x is None else f"{x:.1f}x"
                     def _y(v):
+                        x = s_float(v)
+                        if x is not None and 1900 <= x <= 2200:
+                            return str(int(round(x)))
                         t = _nullize_text(v)
+                        if re.match(r"^\d{4}\.0$", t):
+                            t = t[:-2]
                         return "年期未明" if t == "NULL" else t
+
+                    # 2.2 data-safety：純「系統公式合理估值」必須有系統 Forward EPS。
+                    # 若系統 Forward EPS 缺值，即使其他流程有 AI/FY1 估值，也不得放進第 1 列。
+                    if s_float(system_eps) is None:
+                        system_price = None
 
                     rows = [
                         ("1. 公式合理估值", "系統 Forward EPS × formula cap，非買賣目標", system_eps, formula_cap, system_price, "保留系統 Forward EPS 口徑；若 EPS/估值為 NULL，代表系統未取得 Forward EPS，不得用 AI/FY1 冒充系統公式。"),
@@ -2601,6 +2631,9 @@ def render_main_page(sidebar_state=None):
                         x = s_float(v)
                         return "NULL" if x is None else f"{x:.1f}元"
                     def _year(v):
+                        x = s_float(v)
+                        if x is not None and 1900 <= x <= 2200:
+                            return str(int(round(x)))
                         t = _nullize_text(v)
                         if t == "NULL":
                             return "年期未明"
@@ -2665,8 +2698,10 @@ def render_main_page(sidebar_state=None):
                         lines.append("- 估值倍率: " + "；".join(cap_parts))
 
                     price_parts = []
-                    if _price(sys_target_price_est_val) != "NULL":
-                        price_parts.append(f"系統公式={_price(sys_target_price_est_val)}")
+                    # 純系統公式只能用系統 Forward EPS；若系統 EPS 缺值，不得顯示由 AI/FY1 推出的價格。
+                    _sys_formula_price = sys_target_price_est_val if s_float(sys_forward_eps_system_val) is not None else None
+                    if _price(_sys_formula_price) != "NULL":
+                        price_parts.append(f"系統公式={_price(_sys_formula_price)}")
                     else:
                         price_parts.append("系統公式=NULL（系統 Forward EPS 缺值）")
                     for label, val in [
@@ -2810,14 +2845,20 @@ def render_main_page(sidebar_state=None):
                         pass
                     return "NULL"
 
-            def _prompt_panel_sync_audit():
+            def _prompt_panel_sync_audit(
+                target_hi=locals().get('prompt_hi_str'),
+                target_avg=locals().get('prompt_me_str'),
+                target_low=locals().get('prompt_lo_str'),
+                target_count=locals().get('prompt_analyst_count'),
+            ):
                 """提示詞與畫面面板同步自檢。"""
                 try:
+                    target_synced = any(_nullize_text(v) != "NULL" for v in [target_hi, target_avg, target_low, target_count])
                     checks = [
                         ("月營收公告月份", latest_rev_display_label not in (None, "", "公告月份：未知")),
                         ("EPS拆欄/FY1/FY2/FY3", eps_adopted_for_prompt not in (None, "", "NULL")),
                         ("Forward PEG 7層估值", _prompt_peg_valuation_layers() not in (None, "", "NULL")),
-                        ("法人目標價/分析師人數", locals().get("prompt_analyst_count") is not None),
+                        ("法人目標價/分析師人數", target_synced),
                         ("Dynamic Cap/可操作區間", isinstance(dynamic_cap_pack, dict) and bool(dynamic_cap_pack)),
                         ("最終操作燈號", isinstance(final_signal, dict) and bool(final_signal.get('signal'))),
                         ("ETF摘要", True),
