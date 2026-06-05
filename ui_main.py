@@ -3186,6 +3186,179 @@ def render_main_page(sidebar_state=None):
 以下是 WAY AI 投資戰情室 2.2「買進決策版」系統資料。這不是完整研究資料包，只保留會直接影響買進判斷的採用值、系統值/AI值、分歧、估值層級、產業模型、Dynamic Cap 與燈號。若資料不合理，可上網查證，但不可忽略系統標示的資料品質與分歧警告：
 {decision_context_str}
 """
+
+
+            def _build_prompt_technical_suffix(mode: str) -> str:
+                """打包提示詞用：依使用者勾選加入技術面摘要與線圖輔助規則。
+                注意：技術面只輔助進出場節奏，不覆蓋基本面、資料品質、Dynamic Cap 與最終燈號。
+                """
+                try:
+                    mode_text = str(mode or "")
+                    if mode_text.startswith("不加入"):
+                        return ""
+
+                    tech_lines = []
+                    try:
+                        tech_df = hist.copy() if 'hist' in locals() and hist is not None else pd.DataFrame()
+                        if tech_df is None or tech_df.empty:
+                            raise ValueError("hist empty")
+                        for c in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                            if c not in tech_df.columns:
+                                tech_df[c] = 0.0
+                        tech_df = tech_df.copy()
+                        tech_df['MA5'] = tech_df['Close'].rolling(5).mean()
+                        tech_df['MA10'] = tech_df['Close'].rolling(10).mean()
+                        tech_df['MA20'] = tech_df['Close'].rolling(20).mean()
+                        tech_df['MA60'] = tech_df['Close'].rolling(60).mean()
+                        tech_df['Vol_MA20'] = tech_df['Volume'].rolling(20).mean()
+                        h9 = tech_df['High'].rolling(9).max()
+                        l9 = tech_df['Low'].rolling(9).min()
+                        denom = h9 - l9
+                        denom = denom.mask(denom == 0, 1e-9)
+                        rsv = (tech_df['Close'] - l9) / denom * 100
+                        K, D = [50.0], [50.0]
+                        for v in rsv.fillna(50):
+                            K.append(K[-1] * (2/3) + float(v) * (1/3))
+                            D.append(D[-1] * (2/3) + K[-1] * (1/3))
+                        tech_df['K'] = K[1:]
+                        tech_df['D'] = D[1:]
+                        plot_tech = tech_df.tail(120).copy()
+
+                        def _last(col, fallback=None):
+                            try:
+                                v = plot_tech[col].dropna().iloc[-1]
+                                return float(v)
+                            except Exception:
+                                return fallback
+
+                        close_v = _last('Close', curr_p if 'curr_p' in locals() else None)
+                        ma5_v = _last('MA5', None)
+                        ma10_v = _last('MA10', None)
+                        ma20_v = _last('MA20', None)
+                        ma60_v = _last('MA60', None)
+                        k_v = _last('K', None)
+                        d_v = _last('D', None)
+                        vol_v = _last('Volume', None)
+                        vol20_v = _last('Vol_MA20', None)
+                        vol_ratio = None
+                        try:
+                            if vol_v is not None and vol20_v not in (None, 0):
+                                vol_ratio = vol_v / vol20_v
+                        except Exception:
+                            vol_ratio = None
+
+                        recent20 = plot_tech.tail(20)
+                        recent60 = plot_tech.tail(60)
+                        high20 = float(recent20['High'].max()) if not recent20.empty else None
+                        low20 = float(recent20['Low'].min()) if not recent20.empty else None
+                        high60 = float(recent60['High'].max()) if not recent60.empty else None
+                        low60 = float(recent60['Low'].min()) if not recent60.empty else None
+
+                        ma_stack = "資料不足"
+                        if close_v is not None and ma5_v is not None and ma10_v is not None and ma20_v is not None and ma60_v is not None:
+                            if close_v > ma5_v > ma10_v > ma20_v > ma60_v:
+                                ma_stack = "強多頭排列（收盤價 > 5MA > 10MA > 20MA > 60MA）"
+                            elif close_v < ma5_v < ma10_v < ma20_v < ma60_v:
+                                ma_stack = "空頭排列（收盤價 < 5MA < 10MA < 20MA < 60MA）"
+                            elif close_v >= ma20_v:
+                                ma_stack = "偏多整理（收盤價仍在20MA上方）"
+                            else:
+                                ma_stack = "偏弱整理（收盤價低於20MA）"
+
+                        above5_days = None
+                        try:
+                            above5_days = int((plot_tech.tail(10)['Close'] > plot_tech.tail(10)['MA5']).sum())
+                        except Exception:
+                            above5_days = None
+
+                        bias5 = None
+                        bias20 = None
+                        try:
+                            if close_v is not None and ma5_v not in (None, 0):
+                                bias5 = (close_v / ma5_v - 1) * 100
+                            if close_v is not None and ma20_v not in (None, 0):
+                                bias20 = (close_v / ma20_v - 1) * 100
+                        except Exception:
+                            pass
+                        heat_text = "資料不足"
+                        if bias20 is not None:
+                            if abs(bias20) >= 15:
+                                heat_text = "短線乖離偏大，追價風險高"
+                            elif abs(bias20) >= 8:
+                                heat_text = "乖離略高，宜等拉回或站穩再評估"
+                            else:
+                                heat_text = "乖離尚可，仍需搭配量價與基本面"
+
+                        kd_text = "資料不足"
+                        if k_v is not None and d_v is not None:
+                            kd_text = f"K={k_v:.1f}；D={d_v:.1f}；" + ("KD偏多" if k_v >= d_v else "KD偏弱")
+                            if k_v >= 80:
+                                kd_text += "；K值高檔"
+                            elif k_v <= 20:
+                                kd_text += "；K值低檔"
+
+                        support_candidates = [x for x in [ma5_v, ma10_v, ma20_v, ma60_v, low20] if x is not None]
+                        pressure_candidates = [x for x in [high20, high60] if x is not None]
+                        support_text = "、".join([f"{x:.2f}" for x in support_candidates[:5]]) if support_candidates else "NULL"
+                        pressure_text = "、".join([f"{x:.2f}" for x in pressure_candidates[:3]]) if pressure_candidates else "NULL"
+
+                        ret10 = None
+                        try:
+                            last10 = plot_tech['Close'].dropna().tail(11)
+                            if len(last10) >= 11 and last10.iloc[0] != 0:
+                                ret10 = (last10.iloc[-1] / last10.iloc[0] - 1) * 100
+                        except Exception:
+                            pass
+                        wash_text = "資料不足"
+                        if ret10 is not None and above5_days is not None:
+                            if ret10 > 0 and above5_days >= 7:
+                                wash_text = "偏多續攻或高檔強勢整理；需觀察是否量縮回測不破5MA/10MA"
+                            elif ret10 < 0 and close_v is not None and ma20_v is not None and close_v < ma20_v:
+                                wash_text = "轉弱風險升高；需觀察是否跌破20MA後反彈無力"
+                            else:
+                                wash_text = "區間整理；需搭配量價與支撐壓力確認"
+
+                        tech_lines.extend([
+                            "【15. 技術面與進出場節奏（日線摘要，選配）】",
+                            "- 技術週期/資料範圍: 日線 / 近 120 根 K 線",
+                            f"- 收盤價與均線: 收盤={_nullize_text(f'{close_v:.2f}' if close_v is not None else None)}；5MA={_nullize_text(f'{ma5_v:.2f}' if ma5_v is not None else None)}；10MA={_nullize_text(f'{ma10_v:.2f}' if ma10_v is not None else None)}；20MA={_nullize_text(f'{ma20_v:.2f}' if ma20_v is not None else None)}；60MA={_nullize_text(f'{ma60_v:.2f}' if ma60_v is not None else None)}",
+                            f"- 均線結構: {ma_stack}",
+                            f"- 沿線上攻: 近10日有 {_nullize_text(above5_days)} 日收在 5MA 之上",
+                            f"- 乖離與追價風險: 距5MA={_nullize_text(f'{bias5:.2f}%' if bias5 is not None else None)}；距20MA={_nullize_text(f'{bias20:.2f}%' if bias20 is not None else None)}；{heat_text}",
+                            f"- KD 狀態: {kd_text}",
+                            f"- 量價結構: 量能/20日均量={_nullize_text(f'{vol_ratio:.2f}x' if vol_ratio is not None else None)}",
+                            f"- 支撐平台: {support_text}",
+                            f"- 賣壓/壓力區: {pressure_text}",
+                            f"- 洗盤或出貨初判: {wash_text}",
+                            "- 回測買點節奏: 不宜只因技術面追價；優先觀察回測 5MA / 10MA / 20MA 是否量縮守住，再搭配基本面與估值確認。",
+                            "- 技術面結論: 技術面只判斷進出場節奏、追價風險、支撐壓力與停損停利，不可覆蓋基本面、資料品質、Dynamic Cap、可操作估值區間與系統最終燈號。",
+                        ])
+                    except Exception as e:
+                        tech_lines.extend([
+                            "【15. 技術面與進出場節奏（日線摘要，選配）】",
+                            "- 技術面摘要: 目前無法由系統資料自動產生，請改以畫面技術線圖輔助判讀。",
+                            "- 使用限制: 技術面只輔助進出場節奏，不可覆蓋基本面、資料品質、Dynamic Cap 與最終燈號。",
+                        ])
+
+                    if "線圖輔助規則" in mode_text:
+                        tech_lines.extend([
+                            "",
+                            "【16. 技術線圖輔助規則（另附圖時使用）】",
+                            "請外部 AI 若看到另附 K 線圖，只能依下列規則輔助判讀：",
+                            "1. 是否沿 5MA / 10MA 強勢上攻。",
+                            "2. 是否有高檔賣壓區。",
+                            "3. 是否有明顯支撐平台。",
+                            "4. 是否屬於洗盤後續攻，還是出貨轉弱。",
+                            "5. 是否短線乖離過大，不宜追高。",
+                            "6. 是否適合等回測 5MA / 10MA / 20MA。",
+                            "7. 量縮拉回若守均線，偏健康；放量跌破均線，需提高風險權重。",
+                            "8. KD 高檔只代表短線偏熱，不等於基本面轉弱；KD 低檔也不等於可買。",
+                            "9. 技術面可輔助停利停損與分批節奏，但不可覆蓋月營收、EPS、法人目標價、資料品質、Dynamic Cap 與最終燈號。",
+                            "10. 若技術面與基本面衝突，請以資料品質、估值安全邊際與最終燈號為主。",
+                        ])
+                    return "\n".join(tech_lines).strip()
+                except Exception:
+                    return ""
             
             # 第 17-C-2：打包提示詞分成「買進決策版 / 研究完整版」
             with st.expander("📋 點此複製【打包提示詞】至 Gemini Advanced 或 ChatGPT 發問", expanded=True):
@@ -3195,8 +3368,18 @@ def render_main_page(sidebar_state=None):
                     horizontal=True,
                     key=f"prompt_pack_mode_{curr_id}",
                 )
+                technical_pack_mode = st.radio(
+                    "技術面打包選項",
+                    ["不加入技術面", "加入技術面摘要", "加入技術面摘要 + 技術線圖輔助規則"],
+                    horizontal=True,
+                    key=f"prompt_technical_pack_mode_{curr_id}",
+                )
+
                 selected_prompt_for_copy = buy_decision_prompt_for_copy if prompt_mode.startswith("買進決策版") else research_prompt_for_copy
-                st.caption("買進決策版只保留會影響是否買進的採用值、系統/AI差異、估值層級、產業模型、Dynamic Cap 與燈號；研究完整版保留較完整資料品質與來源摘要。")
+                technical_suffix_for_copy = _build_prompt_technical_suffix(technical_pack_mode)
+                if technical_suffix_for_copy:
+                    selected_prompt_for_copy = selected_prompt_for_copy.rstrip() + "\n\n" + technical_suffix_for_copy
+                st.caption("買進決策版只保留會影響是否買進的採用值、系統/AI差異、估值層級、產業模型、Dynamic Cap 與燈號；研究完整版保留較完整資料品質與來源摘要。技術面可選擇不加入、加入摘要，或加入摘要與線圖輔助規則。")
 
                 # 用 json.dumps 包裝提示詞，避免換行、引號或特殊符號造成 JavaScript 失效。
                 safe_prompt_js = json.dumps(selected_prompt_for_copy, ensure_ascii=False)
