@@ -1955,6 +1955,8 @@ def build_forward_eps_tiered_valuation_report(
         if y is None or str(y).strip() in ["", "未標示", "None", "nan"]:
             return "年期未明"
         s = str(y).strip()
+        if re.match(r"^\d{4}\.0$", s):
+            s = s[:-2]
         if s.endswith("E"):
             return s
         if re.match(r"^\d{4}$", s):
@@ -2022,15 +2024,23 @@ def build_forward_eps_tiered_valuation_report(
     elif cp_pe_ttm is not None and hard is not None and cp_pe_ttm > hard and cp_pe_fy1 is not None and cp_pe_fy1 <= hard:
         market_view = "用 TTM EPS 看偏高，但用 FY1 EPS 看可回到 hard 內；市場可能已反映 FY1 成長。"
 
+    def clean_year_value(y):
+        if y is None:
+            return None
+        s = str(y).strip()
+        if re.match(r"^\d{4}\.0$", s):
+            return s[:-2]
+        return y
+
     summary = {
         "fy_definition": fy_definition,
         "ttm_eps": ttm,
         "fy1_eps": fy1,
         "fy2_eps": fy2,
         "fy3_eps": fy3,
-        "fy1_year": fy1_year,
-        "fy2_year": fy2_year,
-        "fy3_year": fy3_year,
+        "fy1_year": clean_year_value(fy1_year),
+        "fy2_year": clean_year_value(fy2_year),
+        "fy3_year": clean_year_value(fy3_year),
         "fy1_label": fy1_label,
         "fy2_label": fy2_label,
         "fy3_label": fy3_label,

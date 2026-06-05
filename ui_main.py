@@ -985,6 +985,8 @@ def render_main_page(sidebar_state=None):
                     if y is None or str(y).strip() in ["", "None", "nan"]:
                         return "年期未明"
                     s = str(y).strip()
+                    if re.match(r"^\d{4}\.0$", s):
+                        s = s[:-2]
                     return f"{s}E" if re.match(r"^\d{4}$", s) else s
                 except Exception:
                     return "年期未明"
@@ -1034,13 +1036,13 @@ def render_main_page(sidebar_state=None):
                 formula_pe_cap = min(formula_pe_cap, soft_pe_cap)
             extreme_pe_cap_for_calc = soft_pe_cap if soft_pe_cap is not None else operable_pe_cap
 
-            # 2.2：公式合理估值 = Forward EPS × formula_cap。
+            # 2.2：公式合理估值 = 「系統 Forward EPS」× formula_cap。
             # Forward EPS 是輸入值，不是公式產生；若系統/yfinance Forward EPS 缺值，
-            # 允許用 AI/FY1 EPS 作「補值公式價」，但必須在說明中標示來源，不能冒充純系統值。
-            formula_eps_for_display = eff_f_eps if eff_f_eps is not None else ai_f_eps_calc
-            formula_eps_source_note = "系統 Forward EPS" if eff_f_eps is not None else ("AI/FY1 Forward EPS 補值" if ai_f_eps_calc is not None else "無 Forward EPS")
-            if formula_eps_for_display is not None and formula_eps_for_display > 0 and formula_pe_cap is not None:
-                sys_target_price_est = formula_eps_for_display * formula_pe_cap
+            # 純系統公式合理估值必須為 NULL，避免把 AI/FY1 估值誤標為系統公式。
+            formula_eps_for_display = eff_f_eps
+            formula_eps_source_note = "系統 Forward EPS" if eff_f_eps is not None else "系統 Forward EPS 缺值，未計算純系統公式合理估值"
+            if eff_f_eps is not None and eff_f_eps > 0 and formula_pe_cap is not None:
+                sys_target_price_est = eff_f_eps * formula_pe_cap
                 is_capped = False
             else:
                 sys_target_price_est = None; is_capped = False
@@ -1150,9 +1152,16 @@ def render_main_page(sidebar_state=None):
             orig_peg_str = f"{orig_peg:.2f}" if orig_peg is not None else ("分母為負" if real_cg is not None and real_cg <= 0 else "N/A")
             peg_str_disp = f"{orig_peg_str}<br><span style='color:#FFD700; font-size:0.85rem;'>(AI推估: {ai_peg:.2f}{time_str})</span>" if ai_peg is not None else orig_peg_str
         
-            # 3. 前瞻 P/E
-            orig_fpe_str = f"{sys_forward_pe:.1f}x" if sys_forward_pe is not None else "N/A"
-            fpe_str = f"{orig_fpe_str}<br><span style='color:#FFD700; font-size:0.85rem;'>(AI推估: {ai_fpe:.1f}x{time_str})</span>" if ai_fpe is not None else orig_fpe_str
+            # 3. 前瞻 P/E：主值顯示採用值；若系統 Forward P/E 缺值但 AI/FY1 可反推，避免主欄 N/A、資料品質卻顯示可用。
+            if sys_forward_pe is not None:
+                orig_fpe_str = f"{sys_forward_pe:.1f}x"
+                fpe_str = f"{orig_fpe_str}<br><span style='color:#FFD700; font-size:0.85rem;'>(AI推估: {ai_fpe:.1f}x{time_str})</span>" if ai_fpe is not None else orig_fpe_str
+            elif ai_fpe is not None:
+                orig_fpe_str = f"{ai_fpe:.1f}x"
+                fpe_str = f"{orig_fpe_str}<br><span style='color:#FFD700; font-size:0.85rem;'>(採用 AI/FY1 EPS 反推{time_str})</span>"
+            else:
+                orig_fpe_str = "N/A"
+                fpe_str = orig_fpe_str
         
             pe_str = build_cmp_str(pe_ratio, ai_pe, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
             # ✅ 顯示字串只吃 validate_and_correct_financial_metrics() 校正後的 display_* 變數。
@@ -1270,7 +1279,7 @@ def render_main_page(sidebar_state=None):
                     cap_warning_html += "<br><span style='color:#ff4d4d; font-weight:bold;'>現價已高於 FY1 樂觀年度情境價，追高風險極大！</span>"
 
                 tp_est_str = (
-                    f"公式合理估值(系統EPS×formula cap): {sys_tp_str}；"
+                    f"公式合理估值(系統Forward EPS×formula cap): {sys_tp_str}；"
                     f"AI估值(AI EPS×formula cap): {ai_tp_txt}；"
                     f"FY1年度估值(FY1 EPS×formula cap): {fy1_formula_txt}；"
                     f"FY2第二年度估值(FY2 EPS×formula cap): {fy2_formula_txt}；"
@@ -1284,7 +1293,7 @@ def render_main_page(sidebar_state=None):
                 debug_eps = eff_f_eps if eff_f_eps else (ai_f_eps_calc if ai_f_eps_calc else 0)
 
                 _rows = [
-                    ("🎯 1. 公式合理估值", f"{formula_eps_source_note} × formula cap，非買賣目標", formula_eps_for_display, formula_pe_cap, sys_target_price_est, "#ffffff"),
+                    ("🎯 1. 公式合理估值", f"{formula_eps_source_note}｜系統 Forward EPS × formula cap，非買賣目標", formula_eps_for_display, formula_pe_cap, sys_target_price_est, "#ffffff"),
                     ("🤖 2. AI估值", "AI / 法人 EPS × formula cap，需看來源可信度", ai_f_eps_calc, formula_pe_cap, ai_target_price_est, "#FCD34D"),
                     ("📅 3. FY1年度估值", f"FY1 EPS × formula cap｜{fy1_year_text}", ai_forward_eps_fy1, formula_pe_cap, fy1_formula_target_price, "#93C5FD"),
                     ("📆 4. FY2第二年度估值", f"FY2 EPS × formula cap｜{fy2_year_text}｜僅供市場先行定價判斷", ai_forward_eps_fy2, formula_pe_cap, fy2_formula_target_price, "#A7F3D0"),
@@ -1321,7 +1330,7 @@ def render_main_page(sidebar_state=None):
                     {_valuation_rows_html}
                     <div style='background:#111827; color:#E5E7EB; padding:7px 9px; border-radius:6px; margin-top:7px; line-height:1.55;'>
                         <b>使用規則</b><br>
-                        公式合理估值保留系統 EPS 口徑；AI估值獨立顯示；FY1 是年度主估值參考；FY2 只用於市場先行定價判斷；FY3 為高風險遠期情境，不可直接當買點。
+                        公式合理估值只使用系統 Forward EPS；系統 Forward EPS 缺值時為 NULL，AI估值獨立顯示；FY1 是年度主估值參考；FY2 只用於市場先行定價判斷；FY3 為高風險遠期情境，不可直接當買點。
                     </div>
                     <div style='background:#2c2c2c; padding:4px 8px; border-radius:4px; margin-top:4px;'>
                         <small style='color:#00bfff;'>🐛 [底層運算除錯] 系統EPS: {_fmt_eps(eff_f_eps)}｜AI EPS: {_fmt_eps(ai_f_eps_calc)}｜FY1 EPS: {_fmt_eps(ai_forward_eps_fy1)}｜FY2 EPS: {_fmt_eps(ai_forward_eps_fy2)}｜FY3 EPS: {_fmt_eps(ai_forward_eps_fy3)}｜EPS 年期/來源: {eps_period_note}｜公式倍率: {_fmt_cap(formula_pe_cap)}｜使用者手動倍率: {_fmt_cap(manual_cap_for_calc)}｜樂觀倍率: {_fmt_cap(extreme_pe_cap_for_calc)}</small>
@@ -2001,8 +2010,14 @@ def render_main_page(sidebar_state=None):
                     if df is None or getattr(df, "empty", True):
                         return "NULL"
                     keywords = ["eps", "forward", "gross", "margin", "roe", "debt", "d/e", "revenue", "yoy", "target", "price", "毛利", "營益", "目標", "負債", "營收", "分歧", "校正", "採用"]
+                    legacy_field_codes = {"trailing_eps", "forward_eps", "yoy", "mom", "revenue_yoy", "revenue_mom", "rev_growth", "monthly_revenue_yoy", "monthly_revenue_mom", "gross_margin", "operating_margin", "roe", "dividend_yield"}
                     keep = []
                     for _, row in df.iterrows():
+                        code = _nullize_text(row.get("欄位代碼", "")).strip()
+                        name = _nullize_text(row.get("欄位名稱", ""))
+                        # 2.2：legacy 欄位只留 debug，不進買進決策/研究提示詞主資料，避免外部 AI 誤用。
+                        if code in legacy_field_codes or "legacy" in name.lower():
+                            continue
                         row_text = " ".join([_nullize_text(row.get(c, "")) for c in df.columns])
                         if any(k.lower() in row_text.lower() for k in keywords):
                             parts = []
@@ -2334,7 +2349,7 @@ def render_main_page(sidebar_state=None):
                         return "年期未明" if t == "NULL" else t
 
                     rows = [
-                        ("1. 公式合理估值", "系統 EPS × formula cap，非買賣目標", system_eps, formula_cap, system_price, "保留系統抓取 EPS 口徑，作為原始系統估值。"),
+                        ("1. 公式合理估值", "系統 Forward EPS × formula cap，非買賣目標", system_eps, formula_cap, system_price, "保留系統 Forward EPS 口徑；若 EPS/估值為 NULL，代表系統未取得 Forward EPS，不得用 AI/FY1 冒充系統公式。"),
                         ("2. AI估值", "AI / 法人 EPS × formula cap，需看來源可信度", ai_eps, formula_cap, ai_price, "用 AI 取得或校正後 EPS 獨立估值，不覆蓋系統估值。"),
                         ("3. FY1年度估值", f"FY1 EPS × formula cap｜{_y(fy1_year)}", fy1_eps, formula_cap, fy1_price, "一年預估 EPS 的年度主估值參考。"),
                         ("4. FY2第二年度估值", f"FY2 EPS × formula cap｜{_y(fy2_year)}", fy2_eps, formula_cap, fy2_price, "只用於判斷市場是否提前反映第二年獲利，不直接當買點。"),
@@ -2345,7 +2360,7 @@ def render_main_page(sidebar_state=None):
                     lines = []
                     for title, formula, eps, cap, price, note in rows:
                         lines.append(f"- {title}: {_p(price)}｜{formula}｜EPS={_e(eps)}｜倍率={_c(cap)}｜判讀={note}")
-                    lines.append("- 使用規則: 公式合理估值保留系統 EPS；AI估值獨立顯示；FY1 是年度主估值參考；FY2 只解釋市場先行定價；FY3 是高風險遠期情境；手動/樂觀年度情境以 FY1 EPS 計算。")
+                    lines.append("- 使用規則: 公式合理估值只使用系統 Forward EPS；系統 Forward EPS 缺值時為 NULL，AI估值獨立顯示；FY1 是年度主估值參考；FY2 只解釋市場先行定價；FY3 是高風險遠期情境；手動/樂觀年度情境以 FY1 EPS 計算。")
                     return "\n".join(lines)
                 except Exception as e:
                     try:
@@ -2587,7 +2602,11 @@ def render_main_page(sidebar_state=None):
                         return "NULL" if x is None else f"{x:.1f}元"
                     def _year(v):
                         t = _nullize_text(v)
-                        return "年期未明" if t == "NULL" else t
+                        if t == "NULL":
+                            return "年期未明"
+                        if re.match(r"^\d{4}\.0$", t):
+                            return t[:-2]
+                        return t
 
                     _fy1_annual = fy1_eps_for_annual_val
                     if _fy1_annual is None:
@@ -2606,8 +2625,10 @@ def render_main_page(sidebar_state=None):
                     if _has(sys_fiscal_year_eps_val, ai_fiscal_year_eps_val):
                         adopted = ai_fiscal_year_eps_val if s_float(ai_fiscal_year_eps_val) is not None else sys_fiscal_year_eps_val
                         lines.append(f"- 完整年度 EPS: 系統={_n(sys_fiscal_year_eps_val)} / AI={_n(ai_fiscal_year_eps_val)} / 採用={_n(adopted)}")
-                    if _has(sys_forward_eps_system_val, eff_f_eps_val):
-                        lines.append(f"- Forward EPS－系統估值採用值: {_num(eff_f_eps_val)}（用於『公式合理估值』；系統原始={_num(sys_forward_eps_system_val)}）")
+                    if _has(sys_forward_eps_system_val):
+                        lines.append(f"- Forward EPS－系統估值採用值: {_num(sys_forward_eps_system_val)}（用於『公式合理估值』；來源=系統/yfinance forwardEps 或系統反推）")
+                    else:
+                        lines.append("- Forward EPS－系統估值採用值: NULL（系統未取得 Forward EPS；純系統公式合理估值不計算，請改看 AI估值 / FY1年度估值）")
                     if _has(ai_forward_eps_ai_val):
                         lines.append(f"- Forward EPS－AI一般欄位: {_num(ai_forward_eps_ai_val)}")
                     if _has(ai_forward_eps_consensus_val):
@@ -2644,8 +2665,12 @@ def render_main_page(sidebar_state=None):
                         lines.append("- 估值倍率: " + "；".join(cap_parts))
 
                     price_parts = []
+                    if _price(sys_target_price_est_val) != "NULL":
+                        price_parts.append(f"系統公式={_price(sys_target_price_est_val)}")
+                    else:
+                        price_parts.append("系統公式=NULL（系統 Forward EPS 缺值）")
                     for label, val in [
-                        ("系統公式", sys_target_price_est_val), ("AI估值", ai_target_price_est_val),
+                        ("AI估值", ai_target_price_est_val),
                         ("FY1", fy1_formula_target_price_val), ("FY2", fy2_formula_target_price_val),
                         ("FY3", fy3_formula_target_price_val), ("手動年度", fy1_manual_target_price_val),
                         ("樂觀年度", fy1_optimistic_target_price_val),
@@ -2654,7 +2679,7 @@ def render_main_page(sidebar_state=None):
                             price_parts.append(f"{label}={_price(val)}")
                     if price_parts:
                         lines.append("- 新版估值結果: " + "；".join(price_parts))
-                    lines.append("- 重要規則: 公式合理估值保留系統 EPS 口徑；AI估值獨立顯示；FY1 是年度主估值參考；FY2 僅判斷市場是否先行定價；FY3 為高風險遠期情境；手動/樂觀年度情境以 FY1 EPS 為主。")
+                    lines.append("- 重要規則: 公式合理估值只使用系統 Forward EPS；系統 Forward EPS 缺值時為 NULL，AI估值獨立顯示；FY1 是年度主估值參考；FY2 僅判斷市場是否先行定價；FY3 為高風險遠期情境；手動/樂觀年度情境以 FY1 EPS 為主。")
                     return "\n".join(lines) if lines else "無可用 EPS 面板資料，提示詞不納入 EPS 估值判斷。"
                 except Exception as e:
                     try:
