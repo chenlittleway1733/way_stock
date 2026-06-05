@@ -714,19 +714,11 @@ AI_FINANCIAL_FIELD_LABELS = {
     "forward_eps_fy_source_note": "Forward EPS 年期來源備註",
     "forward_eps_fy_basis": "Forward EPS 年期基準/可靠度",
     "pb": "股價淨值比 P/B",
-    "monthly_revenue_yoy_percent": "最新公告月份單月營收 YoY（百分比數字）",
-    "monthly_revenue_mom_percent": "最新公告月份單月營收 MoM（百分比數字）",
-    "accumulated_revenue_yoy_percent": "累計營收 YoY（百分比數字）",
-    "gross_margin_percent": "毛利率（百分比數字）",
-    "operating_margin_percent": "營益率（百分比數字）",
-    "roe_percent": "ROE（百分比數字）",
-    "dividend_yield_percent": "預估現金殖利率（百分比數字）",
-    "gross_margin": "毛利率（legacy）",
-    "operating_margin": "營益率（legacy）",
-    "roe": "ROE（legacy）",
-    "yoy": "營收/獲利成長率 YoY/CAGR（legacy）",
-    "target_price": "目標價（legacy/補充）",
-    "ai_latest_target_price": "AI 最新目標價補充",
+    "gross_margin": "毛利率",
+    "operating_margin": "營益率",
+    "roe": "ROE",
+    "yoy": "營收/獲利成長率 YoY/CAGR",
+    "target_price": "目標價",
     "target_price_high": "目標價高標",
     "target_price_avg": "目標價均值",
     "target_price_low": "目標價低標",
@@ -788,93 +780,6 @@ def _normalize_ai_source_metadata(parsed):
 
     parsed["_ai_source_trace"] = trace
     parsed["source_summary"] = "已要求 AI 逐欄回傳來源、發布日期與網址；若單欄來源缺漏，請以原始回報與 source_urls 交叉檢查。"
-    return parsed
-
-
-def _ai_value_present(data, key):
-    """判斷 AI 欄位是否已有可採用值；支援數字、字串與 {value: ...} 物件。"""
-    if not isinstance(data, dict):
-        return False
-    v = data.get(key)
-    if v in (None, "", "null", "NULL", "N/A", "無資料", "AI找不到數據"):
-        return False
-    if isinstance(v, dict):
-        for sub_key in ("value", "value_percent", "ai_value", "adopted_value", "number", "data"):
-            if s_float(v.get(sub_key)) is not None:
-                return True
-        return any(str(x).strip() for x in v.values() if x not in (None, "", "null", "NULL", "N/A"))
-    return s_float(v) is not None or bool(str(v).strip())
-
-
-def _detect_missing_ai_financial_groups(parsed):
-    """
-    2.2 missing-field follow-up：找出主查詢/目標價補查後仍缺漏的資料群。
-    注意：這裡只判斷 canonical 欄位，不因 legacy 欄位存在就視為已補齊。
-    """
-    if not isinstance(parsed, dict):
-        return []
-
-    def has_any(keys):
-        return any(_ai_value_present(parsed, k) for k in keys)
-
-    groups = []
-    group_defs = [
-        ("revenue", ["monthly_revenue_yoy_percent", "monthly_revenue_mom_percent", "accumulated_revenue_yoy_percent"]),
-        ("eps", ["latest_quarter_eps", "ttm_eps", "fiscal_year_eps", "forward_eps_ai", "forward_eps_consensus", "forward_eps_fy1", "forward_eps_fy2"]),
-        ("margin_roe", ["gross_margin_percent", "operating_margin_percent", "roe_percent"]),
-        ("valuation", ["pe", "pb"]),
-        ("target_price", ["target_price_high", "target_price_avg", "target_price_low", "target_price_analyst_count", "ai_latest_target_price"]),
-        ("financial_health", ["debt_to_equity", "free_cash_flow", "current_ratio", "dividend_yield_percent", "shares_outstanding"]),
-    ]
-    for name, keys in group_defs:
-        # 該群完全沒有可用值才補查，避免為了單一非核心空值增加不必要呼叫。
-        if not has_any(keys):
-            groups.append(name)
-
-    return groups
-
-
-def _merge_missing_followup_result(parsed, follow_json):
-    """只把缺漏欄位由 follow-up 回填，不覆蓋已存在正式值。"""
-    if not isinstance(parsed, dict) or not isinstance(follow_json, dict):
-        return parsed
-
-    allowed_fields = [
-        "pe", "pb",
-        "latest_quarter_eps", "ttm_eps", "fiscal_year_eps",
-        "forward_eps_ai", "forward_eps_consensus", "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3",
-        "forward_eps_fy1_year", "forward_eps_fy2_year", "forward_eps_fy3_year", "forward_eps_fy_source_note", "forward_eps_fy_basis",
-        "monthly_revenue_yoy_percent", "monthly_revenue_mom_percent", "accumulated_revenue_yoy_percent",
-        "gross_margin_percent", "operating_margin_percent", "roe_percent",
-        "debt_to_equity", "free_cash_flow", "current_ratio", "dividend_yield_percent", "shares_outstanding",
-        "target_price_high", "target_price_avg", "target_price_low", "target_price_analyst_count",
-        "ai_latest_target_price", "target_price_rationale", "target_price_date", "target_price_source",
-    ]
-
-    for k in allowed_fields:
-        if not _ai_value_present(parsed, k) and follow_json.get(k) not in (None, "", "null", "NULL", "N/A", "無資料"):
-            parsed[k] = follow_json.get(k)
-
-    # 合併來源，不覆蓋已存在來源。
-    parsed.setdefault("_sources", {})
-    raw_sources = follow_json.get("_sources") or follow_json.get("field_sources") or {}
-    if isinstance(parsed.get("_sources"), dict):
-        if isinstance(raw_sources, dict):
-            for k, v in raw_sources.items():
-                if k not in parsed["_sources"] and v:
-                    parsed["_sources"][k] = v
-        # 若 follow-up 用總體來源欄位，幫已回填欄位補簡單來源。
-        src_name = follow_json.get("source") or follow_json.get("target_price_source") or follow_json.get("data_source") or "AI 缺漏欄位補查"
-        src_date = follow_json.get("published_date") or follow_json.get("target_price_date") or follow_json.get("data_period") or ""
-        for k in allowed_fields:
-            if _ai_value_present(parsed, k) and k not in parsed["_sources"]:
-                parsed["_sources"][k] = {
-                    "source": src_name,
-                    "published_date": src_date,
-                    "source_url": "",
-                    "note": "2.2 missing-field 小型補查"
-                }
-
     return parsed
 
 
@@ -947,27 +852,8 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     - forward_eps_fy_source_note：簡述 EPS 年期資料來源與可靠度，例如「券商共識」、「單一券商」、「AI依成長率推估」。
     - trailing_eps 與 forward_eps 為向下相容 legacy 欄位，trailing_eps 可同 ttm_eps，forward_eps 可同 forward_eps_consensus 或 forward_eps_ai。
 
-    必須嚴格回傳包含上述財務欄位的 JSON 格式。
-    【2.2 百分比硬性規則】所有百分比欄位請使用 *_percent，直接填百分比數字，不要填小數：
-    - 27.64% 請填 monthly_revenue_yoy_percent=27.64，不可填 0.2764。
-    - 6.53% 請填 monthly_revenue_mom_percent=6.53，不可填 0.0653。
-    - 毛利率 17.96% 請填 gross_margin_percent=17.96。
-    - 營益率 7.36% 請填 operating_margin_percent=7.36。
-    - ROE 9.53% 請填 roe_percent=9.53。
-    - 殖利率 2.5% 請填 dividend_yield_percent=2.5。
-    舊欄位 yoy、mom、gross_margin、operating_margin、roe、dividend_yield 可省略或填 null，不要用舊欄位承載百分比。
-
-    【法人目標價硬性規則】請分開回傳：
-    - target_price_high：法人最高目標價。
-    - target_price_avg：法人平均/共識目標價，只有資料明確寫平均或均值才填。
-    - target_price_low：法人最低目標價。
-    - target_price_analyst_count：分析師樣本數。
-    - ai_latest_target_price：最新單一券商/新聞捕捉到的目標價補充，不等於平均目標價。
-    - target_price_rationale：法人共識或最新上修核心理由。
-    若只有單一目標價，請填 ai_latest_target_price，不要冒充 target_price_avg。
-
-    數值請直接輸出數字。若查無資料，該欄位請填 null。
-    請務必搜尋近期各大券商對該公司的最新目標價、高/均/低區間、分析師人數與發布日期。
+    必須嚴格回傳包含上述財務欄位的 JSON 格式。百分比請轉換為小數（例如 25.5% 寫成 0.255，衰退5%寫成 -0.05），數值請直接輸出數字。若查無資料，該欄位請填 null。
+    請務必搜尋近期各大券商對該公司的最新目標價。
 
     重要：除了 18 個財務欄位，請額外回傳「_sources」物件，逐欄標示每個數值的來源。
     _sources 內每個欄位必須包含：
@@ -979,10 +865,10 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
 
     注意：本函式只負責財報與估值校對，不要查詢 ETF 持股；ETF 持股由獨立按鈕 get_etf_holders_from_ai() 執行。
     JSON 格式範例：
-    {{"pe": 15.2, "latest_quarter_eps": 1.35, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin_percent": 25.5, "operating_margin_percent": 12.3, "roe_percent": 15.0, "monthly_revenue_yoy_percent": 35.0, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "monthly_revenue_mom_percent": 1.5, "dividend_yield_percent": 3.2, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
+    {{"pe": 15.2, "latest_quarter_eps": 1.35, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin": 0.255, "operating_margin": 0.123, "roe": 0.15, "yoy": 0.35, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "mom": 0.015, "dividend_yield": 0.032, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
     絕對不要輸出 markdown 標記或其他文字。"""
 
-    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報與估值資料。任務分三段：1) 最新月營收 YoY/MoM 與累計營收 YoY；2) 最新財報 EPS、TTM EPS、FY1/FY2/FY3 法人 EPS；3) 法人目標價 high/avg/low、分析師人數、最新單一目標價與核心理由。請務必標示每個欄位的資料期間、發布日期與來源；不要查詢 ETF 持股。"
+    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、營收 MoM、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。請務必確認並標示出 EPS 對應年度、資料發布日期與來源！不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
 
     def _make_config(search_enabled=True):
         kwargs = {
@@ -1089,107 +975,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
                 parsed.update({k: v for k, v in marker_data.items() if v is not None and parsed.get(k) is None})
                 parsed = _normalize_ai_source_metadata(parsed)
                 parsed = validate_ai_financial_json(parsed, stock_id=stock_id, stock_name=stock_name)
-
-                # 2.2 目標價穩定性補強：若主要財報查詢沒有完整 high/avg/low 或分析師人數，
-                # 追加一次「只查法人目標價」的小型查詢，避免主查詢任務太多導致漏欄位。
-                target_followup_attempt = None
-                try:
-                    need_target_followup = not (
-                        s_float(parsed.get("target_price_high")) is not None
-                        and s_float(parsed.get("target_price_avg")) is not None
-                        and s_float(parsed.get("target_price_low")) is not None
-                        and s_float(parsed.get("target_price_analyst_count")) is not None
-                    )
-                    if need_target_followup:
-                        tp_prompt = (
-                            f"請啟用搜尋引擎，只查詢台股 {stock_name} ({stock_id}) 最新法人目標價資料。"
-                            "請只回 JSON，不要 markdown。欄位必須包含："
-                            "target_price_high, target_price_avg, target_price_low, target_price_analyst_count, "
-                            "ai_latest_target_price, target_price_rationale, target_price_date, target_price_source。"
-                            "target_price_avg 只有資料明確寫平均/均值/共識才填；單一券商最新目標價請填 ai_latest_target_price。"
-                            "請盡量找 Yahoo Finance/yfinance 共識、券商目標價彙整、新聞報導中的高低區間與分析師樣本數。"
-                        )
-                        tp_resp = client.models.generate_content(
-                            model=candidate_model,
-                            contents=tp_prompt,
-                            config=types.GenerateContentConfig(response_mime_type="application/json", tools=[{"google_search": {}}])
-                        )
-                        tp_text = tp_resp.text or ""
-                        ts, te = tp_text.find('{'), tp_text.rfind('}')
-                        if ts != -1 and te != -1:
-                            tp_json = json.loads(tp_text[ts:te+1])
-                            if isinstance(tp_json, dict):
-                                tp_json = validate_ai_financial_json(tp_json, stock_id=stock_id, stock_name=stock_name)
-                                for k in ["target_price_high", "target_price_avg", "target_price_low", "target_price_analyst_count", "ai_latest_target_price", "target_price_rationale"]:
-                                    if parsed.get(k) in (None, "", "null", "NULL") and tp_json.get(k) not in (None, "", "null", "NULL"):
-                                        parsed[k] = tp_json.get(k)
-                                # 不覆蓋原 _sources，但補充 target 欄位來源
-                                parsed.setdefault("_sources", {})
-                                if isinstance(parsed.get("_sources"), dict):
-                                    for k in ["target_price_high", "target_price_avg", "target_price_low", "target_price_analyst_count", "ai_latest_target_price"]:
-                                        if k not in parsed["_sources"] and tp_json.get(k) not in (None, "", "null", "NULL"):
-                                            parsed["_sources"][k] = {
-                                                "source": tp_json.get("target_price_source") or "AI 目標價補查",
-                                                "published_date": tp_json.get("target_price_date") or "",
-                                                "source_url": "",
-                                                "note": "2.2 目標價小型補查"
-                                            }
-                                target_followup_attempt = "ok"
-                except Exception as e:
-                    target_followup_attempt = f"failed: {str(e)[:160]}"
-                    log_exception("Gemini", "get_financials_from_ai:target_price_followup", e)
-
-                # 2.2 通用缺漏資料小型補查：不只目標價，若營收/EPS/毛利率/ROE/健康欄位整群缺漏，
-                # 再追加一次「只查缺漏欄位」的短查詢。避免主查詢任務過多時，台積電/欣興這類大公司仍漏資料。
-                missing_field_followup_attempt = None
-                missing_field_followup_groups = []
-                missing_field_followup_prompt = None
-                try:
-                    missing_field_followup_groups = _detect_missing_ai_financial_groups(parsed)
-                    # target_price 已有專用補查；若仍缺 target，可併入本次通用補查。
-                    if missing_field_followup_groups:
-                        group_desc = {
-                            "revenue": "最新公告月份單月營收 YoY/MoM、累計營收 YoY；請用 monthly_revenue_yoy_percent / monthly_revenue_mom_percent / accumulated_revenue_yoy_percent，百分比直接填 27.64，不填 0.2764。",
-                            "eps": "最新單季 EPS、TTM EPS、完整年度 EPS、FY1/FY2/FY3 法人預估 EPS 與對應年度。",
-                            "margin_roe": "最新季報毛利率、營益率、ROE；請用 gross_margin_percent / operating_margin_percent / roe_percent。",
-                            "valuation": "歷史本益比 pe、股價淨值比 pb；若可得也請在 _sources 說明資料源。",
-                            "target_price": "法人目標價 high/avg/low、分析師人數、AI 最新單一目標價補充與核心理由。",
-                            "financial_health": "D/E、自由現金流 free_cash_flow、流動比率 current_ratio、殖利率 dividend_yield_percent、股本/總發行股數 shares_outstanding。",
-                        }
-                        missing_items = "\n".join([f"- {g}: {group_desc.get(g, g)}" for g in missing_field_followup_groups])
-                        missing_field_followup_prompt = (
-                            f"請啟用搜尋引擎，只補查台股 {stock_name} ({stock_id}) 下列缺漏資料群。"
-                            "這是第二輪小型補查，不要重做完整分析，不要查 ETF 持股。請只回 JSON，不要 markdown。\n"
-                            f"缺漏資料群：\n{missing_items}\n\n"
-                            "硬性規則：百分比欄位一律用 *_percent 並填百分比數字，例如 27.64% 填 27.64；"
-                            "單一目標價只填 ai_latest_target_price，不可冒充 target_price_avg；"
-                            "target_price_avg 只有明確寫平均/均值/共識才填。"
-                            "每個回填欄位都請在 _sources 中標示 source、published_date、source_url、note。"
-                        )
-                        mf_resp = client.models.generate_content(
-                            model=candidate_model,
-                            contents=missing_field_followup_prompt,
-                            config=types.GenerateContentConfig(response_mime_type="application/json", tools=[{"google_search": {}}])
-                        )
-                        mf_text = mf_resp.text or ""
-                        ms, me = mf_text.find('{'), mf_text.rfind('}')
-                        if ms != -1 and me != -1:
-                            mf_json = json.loads(mf_text[ms:me+1])
-                            if isinstance(mf_json, dict):
-                                mf_json = validate_ai_financial_json(mf_json, stock_id=stock_id, stock_name=stock_name)
-                                parsed = _merge_missing_followup_result(parsed, mf_json)
-                                parsed = validate_ai_financial_json(parsed, stock_id=stock_id, stock_name=stock_name)
-                                missing_field_followup_attempt = "ok"
-                        if missing_field_followup_attempt is None:
-                            missing_field_followup_attempt = "no_json"
-                except Exception as e:
-                    missing_field_followup_attempt = f"failed: {str(e)[:160]}"
-                    log_exception("Gemini", "get_financials_from_ai:missing_field_followup", e)
-
                 parsed = _normalize_ai_source_metadata(parsed)
-                parsed["target_followup_attempt"] = target_followup_attempt
-                parsed["missing_field_followup_attempt"] = missing_field_followup_attempt
-                parsed["missing_field_followup_groups"] = missing_field_followup_groups
                 parsed["model_used"] = used_model
                 parsed["ai_search_enabled"] = bool(used_search)
                 parsed["fallback_reason"] = fallback_reason
@@ -1202,11 +988,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
                     "google_search_enabled": bool(used_search),
                     "fallback_reason": fallback_reason or "無",
                     "retry_policy": "Pro Only same-model retry: delays 0s, 3s, 8s; no downgrade.",
-                    "target_followup_attempt": target_followup_attempt,
-                    "missing_field_followup_attempt": missing_field_followup_attempt,
-                    "missing_field_followup_groups": missing_field_followup_groups,
                     "prompt": prompt_text,
-                    "missing_field_followup_prompt": missing_field_followup_prompt,
                 }, ensure_ascii=False, indent=2)
             return parsed
         except json.JSONDecodeError:
@@ -1517,101 +1299,48 @@ def get_finmind_financial_health(stock_id, fm_key=""):
             vals_l = dict(zip(df_latest['type'].astype(str).str.strip(), df_latest['value']))
             vals_p = dict(zip(df_prev['type'].astype(str).str.strip(), df_prev['value']))
             
-            def _norm_key_text(x):
-                return re.sub(r"[\s　()（）,，:：/／\-]+", "", str(x or "")).lower()
-
             def get_val(v_dict, *keys):
-                """FinMind 財報科目名稱容錯抓取。
-
-                2.2 系統財務健康 fallback：FinMind 科目常因 IFRS 版本、產業別、
-                中英文/括號差異而抓不到；此處統一正規化後比對，並避免用「資產」
-                這類過廣關鍵字誤抓流動資產。
-                """
-                if not v_dict:
-                    return 0.0
-                normalized = [(_norm_key_text(k), k, v) for k, v in v_dict.items()]
-                for raw_key in keys:
-                    key = _norm_key_text(raw_key)
-                    if not key:
-                        continue
-                    # 先精準/包含比對；科目名稱通常比關鍵字長。
-                    for nk, original_k, raw_v in normalized:
-                        if nk == key or key in nk:
-                            try:
-                                return float(str(raw_v).replace(',', '').replace('%', ''))
+                for k in keys:
+                    for v_key in v_dict.keys():
+                        if k in v_key:
+                            try: return float(str(v_dict[v_key]).replace(',', '').replace('%', ''))
                             except Exception as e:
-                                log_exception("FinMind", f"get_finmind_financial_health:get_val:{stock_id}:{original_k}", e)
-                    # 再反向比對，支援 key 是完整英文科目、v_key 是縮寫情境。
-                    for nk, original_k, raw_v in normalized:
-                        if nk and nk in key:
-                            try:
-                                return float(str(raw_v).replace(',', '').replace('%', ''))
-                            except Exception as e:
-                                log_exception("FinMind", f"get_finmind_financial_health:get_val:{stock_id}:{original_k}", e)
+                                log_exception("FinMind", f"get_finmind_financial_health:get_val:{stock_id}", e)
                 return 0.0
-
-            rev_keys = ('營業收入合計', '營業收入淨額', '營業收入', '收入合計', '營收', 'revenue', 'sales')
-            gp_keys = ('營業毛利毛損', '營業毛利', '毛利', 'grossprofit')
-            op_keys = ('營業利益損失', '營業利益', '營業淨利', 'operatingincome', 'operatingprofit')
-            ni_keys = ('本期淨利淨損', '本期淨利', '稅後淨利', '繼續營業單位本期淨利', 'netincome')
-            ta_keys = ('資產總計', '資產總額', '資產合計', 'totalassets', 'assets')
-            tl_keys = ('負債總計', '負債總額', '負債合計', 'totalliabilities', 'liabilities')
-            eq_keys = ('權益總計', '權益總額', '權益合計', '股東權益總計', '歸屬於母公司業主之權益合計', 'totalequity', 'stockholdersequity', 'shareholdersequity')
-            ca_keys = ('流動資產合計', '流動資產', 'currentassets')
-            cl_keys = ('流動負債合計', '流動負債', 'currentliabilities')
-            ltd_keys = ('非流動負債合計', '非流動負債', '長期借款', 'longtermdebt', 'noncurrentliabilities')
-            cfo_keys = ('營業活動之淨現金流入流出', '營業活動之現金流量', '營業活動之淨現金流入', '營業活動之淨現金', 'cashflowfromoperatingactivities', 'operatingcashflow')
-            capex_keys = ('取得不動產廠房及設備', '購置不動產廠房及設備', '資本支出', 'capitalexpenditure', 'capitalexpenditures')
-            shares_keys = ('普通股股本', '股本', 'commonstock', 'ordinarysharecapital')
-
-            rev_l = get_val(vals_l, *rev_keys)
-            gp_l = get_val(vals_l, *gp_keys)
-            op_l = get_val(vals_l, *op_keys)
-            ni_l = get_val(vals_l, *ni_keys)
-            ta_l = get_val(vals_l, *ta_keys)
-            tl_l = get_val(vals_l, *tl_keys)
-            eq_l = get_val(vals_l, *eq_keys)
-            ca_l = get_val(vals_l, *ca_keys)
-            cl_l = get_val(vals_l, *cl_keys)
-            ltd_l = get_val(vals_l, *ltd_keys)
-            cfo_l = get_val(vals_l, *cfo_keys)
-            capex_l = get_val(vals_l, *capex_keys)
-            shares_l = get_val(vals_l, *shares_keys)
+                
+            rev_l = get_val(vals_l, '營業收入', '淨收益', '收益')
+            gp_l = get_val(vals_l, '營業毛利', '毛利')
+            op_l = get_val(vals_l, '營業利益')
+            ni_l = get_val(vals_l, '本期淨利', '淨利')
+            ta_l = get_val(vals_l, '資產總計', '資產總額', '資產')
+            tl_l = get_val(vals_l, '負債總')
+            eq_l = get_val(vals_l, '權益總')
+            ca_l = get_val(vals_l, '流動資產')
+            cl_l = get_val(vals_l, '流動負債')
+            ltd_l = get_val(vals_l, '非流動負債', '長期借款')
+            cfo_l = get_val(vals_l, '營業活動之淨現金流入', '營業活動之現金流量', '營業活動之淨現金')
+            if cfo_l == 0: cfo_l = op_l 
+            shares_l = get_val(vals_l, '普通股股本', '股本')
             
-            rev_p = get_val(vals_p, *rev_keys)
-            gp_p = get_val(vals_p, *gp_keys)
-            ni_p = get_val(vals_p, *ni_keys)
-            ta_p = get_val(vals_p, *ta_keys)
-            ca_p = get_val(vals_p, *ca_keys)
-            cl_p = get_val(vals_p, *cl_keys)
-            ltd_p = get_val(vals_p, *ltd_keys)
-            shares_p = get_val(vals_p, *shares_keys)
+            rev_p = get_val(vals_p, '營業收入', '淨收益', '收益')
+            gp_p = get_val(vals_p, '營業毛利', '毛利')
+            ni_p = get_val(vals_p, '本期淨利', '淨利')
+            ta_p = get_val(vals_p, '資產總計', '資產總額', '資產')
+            ca_p = get_val(vals_p, '流動資產')
+            cl_p = get_val(vals_p, '流動負債')
+            ltd_p = get_val(vals_p, '非流動負債', '長期借款')
+            shares_p = get_val(vals_p, '普通股股本', '股本')
             
-            res_dict = {
-                "_finmind_latest_date": str(pd.Timestamp(latest_date).date()) if latest_date is not None else "",
-            }
+            if ta_l <= 0 or ta_p <= 0: return {}
+
+            res_dict = {}
             if rev_l > 0:
-                # 毛利率 / 營益率直接由損益表計算；不可因資產負債表缺值而整包回傳空白。
-                res_dict['grossMargins'] = gp_l / rev_l if gp_l != 0 else None
-                res_dict['operatingMargins'] = op_l / rev_l if op_l != 0 else None
-            if eq_l > 0 and tl_l >= 0:
-                res_dict['debtToEquity'] = tl_l / eq_l
-            if eq_l > 0 and ni_l != 0:
-                res_dict['returnOnEquity'] = ni_l / eq_l
-            if cl_l > 0 and ca_l >= 0:
-                res_dict['currentRatio'] = ca_l / cl_l
-            # FinMind 若有現金流/資本支出，優先估 FCF；若只有 CFO，至少回 CFO 供畫面參考。
-            if cfo_l != 0:
-                if capex_l != 0:
-                    res_dict['freeCashflow'] = cfo_l - abs(capex_l)
-                    res_dict['capex'] = capex_l
-                else:
-                    res_dict['freeCashflow'] = cfo_l
-                res_dict['cfo_l'] = cfo_l
-
-            f_score = None
+                res_dict['grossMargins'] = gp_l / rev_l
+                res_dict['operatingMargins'] = op_l / rev_l
+            if eq_l > 0: res_dict['debtToEquity'] = tl_l / eq_l
+                
+            f_score = 0
             if ta_l > 0 and ta_p > 0:
-                f_score = 0
                 roa_l, roa_p = ni_l / ta_l, ni_p / ta_p
                 if roa_l > 0: f_score += 1                 
                 if cfo_l > 0: f_score += 1                 
@@ -1629,13 +1358,9 @@ def get_finmind_financial_health(stock_id, fm_key=""):
                 at_p = rev_p / ta_p
                 if at_l > at_p: f_score += 1               
                 
-            if f_score is not None:
-                res_dict['f_score'] = f_score
-            elif res_dict:
-                res_dict['f_score'] = None
-            if cfo_l != 0:
-                res_dict['cfo_l'] = cfo_l
-            return {k: v for k, v in res_dict.items() if v is not None}
+            res_dict['f_score'] = f_score
+            res_dict['cfo_l'] = cfo_l
+            return res_dict
     except Exception as e:
         log_exception("FinMind", f"get_finmind_financial_health:{stock_id}", e)
         log_data_health("FinMind", False, f"ERR:{str(e)[:120]}")
@@ -1728,7 +1453,7 @@ def get_fallback_info(stock_id):
         json_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', text)
         if json_match:
             data = json.loads(json_match.group(1))
-            keys_to_find = ['peRatio', 'trailingPE', 'forwardPE', 'forwardPeRatio', 'pbRatio', 'priceToBook', 'eps', 'trailingEps', 'forwardEps', 'dividendYield', 'trailingAnnualDividendYield', 'targetHighPrice', 'targetMeanPrice', 'targetLowPrice', 'numberOfAnalystOpinions', 'grossMargins', 'operatingMargins', 'returnOnEquity', 'debtToEquity', 'totalDebt', 'totalStockholderEquity', 'revenueGrowth', 'earningsGrowth', 'freeCashflow', 'freeCashFlow', 'operatingCashflow', 'currentRatio']
+            keys_to_find = ['peRatio', 'trailingPE', 'pbRatio', 'priceToBook', 'eps', 'trailingEps', 'dividendYield', 'targetHighPrice', 'targetMeanPrice', 'targetLowPrice', 'grossMargins', 'operatingMargins', 'returnOnEquity']
             found_data = {}
             
             def find_keys(node):
@@ -1747,31 +1472,15 @@ def get_fallback_info(stock_id):
             find_keys(data)
             
             info['trailingPE'] = found_data.get('peRatio') or found_data.get('trailingPE')
-            info['forwardPE'] = found_data.get('forwardPE') or found_data.get('forwardPeRatio')
             info['priceToBook'] = found_data.get('pbRatio') or found_data.get('priceToBook')
             info['trailingEps'] = found_data.get('eps') or found_data.get('trailingEps')
-            info['forwardEps'] = found_data.get('forwardEps')
-            info['dividendYield'] = found_data.get('dividendYield') or found_data.get('trailingAnnualDividendYield')
-            info['trailingAnnualDividendYield'] = found_data.get('trailingAnnualDividendYield')
+            info['dividendYield'] = found_data.get('dividendYield')
             info['targetHighPrice'] = found_data.get('targetHighPrice')
             info['targetMeanPrice'] = found_data.get('targetMeanPrice')
             info['targetLowPrice'] = found_data.get('targetLowPrice')
-            info['numberOfAnalystOpinions'] = found_data.get('numberOfAnalystOpinions')
             info['grossMargins'] = found_data.get('grossMargins')
             info['operatingMargins'] = found_data.get('operatingMargins')
             info['returnOnEquity'] = found_data.get('returnOnEquity')
-            info['debtToEquity'] = found_data.get('debtToEquity')
-            info['totalDebt'] = found_data.get('totalDebt')
-            info['totalStockholderEquity'] = found_data.get('totalStockholderEquity')
-            if info.get('debtToEquity') is None and info.get('totalDebt') is not None and info.get('totalStockholderEquity') not in (None, 0):
-                try:
-                    info['debtToEquity'] = float(info['totalDebt']) / float(info['totalStockholderEquity']) * 100.0
-                except Exception:
-                    pass
-            info['revenueGrowth'] = found_data.get('revenueGrowth')
-            info['earningsGrowth'] = found_data.get('earningsGrowth')
-            info['freeCashflow'] = found_data.get('freeCashflow') or found_data.get('freeCashFlow') or found_data.get('operatingCashflow')
-            info['currentRatio'] = found_data.get('currentRatio')
             
         sec_match = re.search(r'href="/class-quote\?category=([^"&]+)', text)
         if sec_match: info['sector'] = urllib.parse.unquote(sec_match.group(1))

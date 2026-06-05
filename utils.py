@@ -48,30 +48,8 @@ def log_exception(source, context, exc=None):
 # 1. 全局安全轉換與排版函數
 # ==========================================
 def s_float(val, default=None):
-    """安全轉 float。
-
-    2.2 資料治理補強：AI 有時會把欄位回成物件，例如
-    {"value": 27.64, "source": "AI聯網搜尋"}。
-    主流程只需要數值時，優先抽 value / value_percent / ai_value，
-    避免面板顯示「AI 找不到數據」但 debug 裡其實有值。
-    """
     try:
-        if val is None:
-            return default
-        if isinstance(val, dict):
-            for k in ("value", "value_percent", "ai_value", "adopted_value", "number", "data"):
-                if k in val and val.get(k) not in (None, "", "null", "NULL", "N/A"):
-                    return s_float(val.get(k), default)
-            return default
-        if isinstance(val, str):
-            txt = val.strip()
-            if txt in ("", "null", "NULL", "None", "N/A", "無資料", "AI找不到數據"):
-                return default
-            # 保留負號、小數點，移除百分號、逗號、元、倍等文字。
-            m = re.search(r"-?\d+(?:,\d{3})*(?:\.\d+)?", txt)
-            if m:
-                txt = m.group(0).replace(',', '')
-            val = txt
+        if val is None: return default
         v = float(val)
         if math.isnan(v) or math.isinf(v): return default
         return v
@@ -107,16 +85,14 @@ def p_dual(o1, o2, a1, a2, suffix="AI捉取"):
 
 def build_cmp_str(orig, ai_val, fmt="pct", suffix="AI推估", show_ai_missing=False, period=""):
     s = to_val_str(orig, fmt)
-    has_ai = ai_val is not None and not pd.isna(ai_val)
-    if has_ai:
+    if ai_val is not None and not pd.isna(ai_val):
         ai_text = to_val_str(float(ai_val), fmt)
     elif show_ai_missing:
         ai_text = "AI找不到數據"
     else:
         return s
-
-    # 沒有 AI 數值時，不顯示全域期間，避免「AI找不到數據, 2026年4月」誤導。
-    time_str = f", {period}" if (period and has_ai) else ""
+    
+    time_str = f", {period}" if period else ""
     s += f"<br><span style='color:#FFD700; font-size:0.85rem;'>({suffix}: {ai_text}{time_str})</span>"
     return s
 
@@ -134,8 +110,7 @@ def build_cmp_dual_str(o1, o2, a1, a2, fmt1="num", fmt2="num", suffix="AI推估"
     if sa2 == "N/A":
         sa2 = "AI找不到數據"
         
-    # 兩個 AI 值都缺時，不顯示期間；至少有一個 AI 值時才帶欄位期間。
-    time_str = f", {period}" if (period and has_ai) else ""
+    time_str = f", {period}" if period else ""
     s += f"<br><span style='color:#FFD700; font-size:0.85rem;'>({suffix}: {sa1} / {sa2}{time_str})</span>"
     return s
 
@@ -390,8 +365,11 @@ def infer_quality_status(adopted_value, system_value=None, ai_value=None, is_sta
     if is_stale:
         return "⚠️ 可能過期"
     high_risk_keywords = ["校驗失敗", "不合理", "已排除", "NULL", "過舊", "錯置", "幻覺"]
+    divergence_keywords = ["分歧", "差距", "口徑", "不一致"]
     if any(k in note_text for k in high_risk_keywords):
         return "⚠️ 已校正/需留意"
+    if any(k in note_text for k in divergence_keywords):
+        return "⚠️ 系統/AI分歧"
     if system_value is not None and ai_value is not None:
         return "✅ 系統+AI交叉"
     return "✅ 可用"
@@ -753,9 +731,7 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
         "trailing_eps", "forward_eps",
         "latest_quarter_eps", "ttm_eps", "fiscal_year_eps",
         "forward_eps_system", "forward_eps_ai", "forward_eps_consensus",
-        "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3",
-        "forward_eps_fy1_year", "forward_eps_fy2_year", "forward_eps_fy3_year",
-        "pb", "target_price", "ai_latest_target_price", "target_price_high",
+        "pb", "target_price", "target_price_high",
         "target_price_avg", "target_price_low", "target_price_analyst_count", "free_cash_flow",
         "current_ratio", "shares_outstanding"
     ]
@@ -772,23 +748,6 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
         data["forward_eps_ai"] = data.get("forward_eps")
     if data.get("forward_eps") is None:
         data["forward_eps"] = data.get("forward_eps_consensus") or data.get("forward_eps_ai") or data.get("forward_eps_system")
-
-    # 2.2 正式百分比欄位：*_percent 是唯一可信 AI 百分比輸入；
-    # 這裡轉成內部 ratio 給舊計算函式使用，但保留原始 percent 數字供 UI/來源追蹤。
-    percent_to_ratio = {
-        "monthly_revenue_yoy_percent": "yoy",
-        "monthly_revenue_mom_percent": "mom",
-        "gross_margin_percent": "gross_margin",
-        "operating_margin_percent": "operating_margin",
-        "roe_percent": "roe",
-        "dividend_yield_percent": "dividend_yield",
-    }
-    for pfield, rfield in percent_to_ratio.items():
-        if pfield in data:
-            pv = s_float(data.get(pfield))
-            data[pfield] = pv
-            if pv is not None:
-                data[rfield] = pv / 100.0
 
     # 百分比/比率欄位標準化。AI 常把 25.5% 寫成 25.5，這裡轉為 0.255。
     ratio_fields = ["gross_margin", "operating_margin", "roe", "yoy", "mom", "dividend_yield"]
@@ -876,13 +835,14 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
         data["target_price_high"], data["target_price_low"] = lo, hi
         add_warning("target_price_high", f"{label} AI 目標價 high/low 順序錯置，已交換。")
 
-    # 2.2：target_price 只作「AI 最新目標價補充」，不可冒充法人平均。
-    # 若只有 target_price，轉存 ai_latest_target_price；若 target_price_avg 存在，兩者分開保留。
+    # target_price 若缺漏，用 avg 補；若和 avg 差太大，以 avg 為主，避免 target_price 抓到個別券商極端值。
     avg = data.get("target_price_avg")
     tp = data.get("target_price")
-    latest_tp = data.get("ai_latest_target_price")
-    if latest_tp is None and tp is not None:
-        data["ai_latest_target_price"] = tp
+    if tp is None and avg is not None:
+        data["target_price"] = avg
+    elif tp is not None and avg is not None and avg > 0 and abs(tp - avg) / avg > 0.5:
+        data["target_price"] = avg
+        add_warning("target_price", f"{label} AI target_price 與平均目標價差距超過 50%，已改採 target_price_avg。")
 
     cnt = data.get("target_price_analyst_count")
     if cnt is not None:
@@ -1955,8 +1915,6 @@ def build_forward_eps_tiered_valuation_report(
         if y is None or str(y).strip() in ["", "未標示", "None", "nan"]:
             return "年期未明"
         s = str(y).strip()
-        if re.match(r"^\d{4}\.0$", s):
-            s = s[:-2]
         if s.endswith("E"):
             return s
         if re.match(r"^\d{4}$", s):
@@ -2024,23 +1982,15 @@ def build_forward_eps_tiered_valuation_report(
     elif cp_pe_ttm is not None and hard is not None and cp_pe_ttm > hard and cp_pe_fy1 is not None and cp_pe_fy1 <= hard:
         market_view = "用 TTM EPS 看偏高，但用 FY1 EPS 看可回到 hard 內；市場可能已反映 FY1 成長。"
 
-    def clean_year_value(y):
-        if y is None:
-            return None
-        s = str(y).strip()
-        if re.match(r"^\d{4}\.0$", s):
-            return s[:-2]
-        return y
-
     summary = {
         "fy_definition": fy_definition,
         "ttm_eps": ttm,
         "fy1_eps": fy1,
         "fy2_eps": fy2,
         "fy3_eps": fy3,
-        "fy1_year": clean_year_value(fy1_year),
-        "fy2_year": clean_year_value(fy2_year),
-        "fy3_year": clean_year_value(fy3_year),
+        "fy1_year": fy1_year,
+        "fy2_year": fy2_year,
+        "fy3_year": fy3_year,
         "fy1_label": fy1_label,
         "fy2_label": fy2_label,
         "fy3_label": fy3_label,
