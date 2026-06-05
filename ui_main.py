@@ -2001,7 +2001,7 @@ def render_main_page(sidebar_state=None):
                                 if note != "NULL":
                                     parts.append(f"備註={note}")
                             rows.append("- " + "；".join(parts))
-                        if len(rows) >= 14:
+                        if len(rows) >= 20:
                             break
                     return "\n".join(rows) if rows else _prompt_df(df, max_rows=8)
                 except Exception as e:
@@ -2029,6 +2029,9 @@ def render_main_page(sidebar_state=None):
                         row_text_l = row_text.lower()
                         # 2.2：legacy / 純年份中繼欄位只留 debug，不進買進決策/研究提示詞主資料，避免外部 AI 誤用。
                         if code_norm in legacy_field_codes or code_norm in meta_year_codes or "legacy" in name.lower() or "legacy" in row_text_l:
+                            continue
+                        # PE 若只是 AI 依舊股價/不同現價自行推算，容易和系統現價口徑衝突；只留 debug，不進正式提示詞。
+                        if code_norm == "pe" and any(k in row_text for k in ["推算", "近期股價", "股價", "依據"]):
                             continue
                         # 空值且無可查證來源的欄位不輸出，例如 forward_eps_system 無值時不再放進摘要。
                         ai_val_text = _nullize_text(row.get("AI值", ""))
@@ -2208,6 +2211,11 @@ def render_main_page(sidebar_state=None):
                     de = _get_input(cap_inputs, "debt_to_equity")
                     rev_yoy = _get_input(cap_inputs, "revenue_yoy")
                     fcf = _get_input(cap_inputs, "free_cash_flow")
+
+                    # 2.2：若 D/E 已進入 Dynamic Cap inputs，但 adoption notes 沒有列出，補上採用狀態，避免提示詞看起來像未採用。
+                    if _fmt_pct(de) != "NULL" and "D/E" not in notes and "負債" not in notes:
+                        extra_de_note = "D/E：Dynamic Cap 納入 D/E 參考值；若系統缺值，視為 AI 補齊，需確認負債/權益口徑。"
+                        notes = extra_de_note if notes == "無" else (notes + "；" + extra_de_note)
 
                     # 共同核心摘要，買進版與研究版都需要，但避免 raw dict。
                     lines = []
@@ -2827,13 +2835,16 @@ def render_main_page(sidebar_state=None):
             def _prompt_defense_panel_summary():
                 """同步防禦力與財務健康卡片。"""
                 try:
-                    return "\n".join([
+                    lines = [
                         f"- 殖利率: {_nullize_text(dy_str)}",
                         f"- FCF: {_nullize_text(fcf_str)}",
                         f"- 流動比率: {_nullize_text(cr_str)}",
                         f"- F-Score: {_nullize_text(fs_str)}",
-                        f"- 備註: 以上數值用於長線/存股防禦力，仍需搭配資料品質與現金流來源確認。",
-                    ])
+                    ]
+                    if _nullize_text(fcf_str) == "NULL":
+                        lines.append("- FCF 缺值: 本次防禦力判斷不納入自由現金流，避免把缺值誤判為現金流惡化。")
+                    lines.append("- 備註: 以上數值用於長線/存股防禦力，仍需搭配資料品質與現金流來源確認。")
+                    return "\n".join(lines)
                 except Exception:
                     return "NULL"
 
@@ -2907,7 +2918,7 @@ def render_main_page(sidebar_state=None):
 
 若符合下列任一條件，請啟動模型落差診斷：
 - 現價高於系統可操作區間高標 20% 以上。
-- 現價高於 FY1 公式估值 30% 以上。
+- 現價高於 FY1年度估值 / AI-FY1估值 30% 以上；若系統公式合理估值為 NULL，不得用系統公式價判斷。
 - 法人平均目標價與系統可操作區間中值差距超過 30%。
 - 法人最高目標價與最低目標價差距超過平均目標價 60%。
 - 現價用 FY1 EPS 看高於 hard ceiling，但用 FY2 / FY3 EPS 看可解釋。
@@ -2939,7 +2950,7 @@ def render_main_page(sidebar_state=None):
 
 若符合下列任一條件，請啟動買進風險檢查：
 - 現價高於系統可操作區間高標 20% 以上。
-- 現價高於 FY1 公式估值 30% 以上。
+- 現價高於 FY1年度估值 / AI-FY1估值 30% 以上；若系統公式合理估值為 NULL，不得用系統公式價判斷。
 - 現價只能用 FY2 / FY3 EPS 才能解釋。
 - 法人平均目標價與系統可操作區間中值差距超過 30%。
 - 法人最高目標價與最低目標價差距超過平均目標價 60%。
