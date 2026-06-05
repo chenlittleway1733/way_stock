@@ -27,7 +27,7 @@ def render_main_page(sidebar_state=None):
     # ==========================================
     # 5. 主畫面開始
     # ==========================================
-    st.markdown("## 📈 WAY AI 投資戰情室 版本2.2")
+    st.markdown("## 📈 WAY AI 投資戰情室 版本2.1")
 
     if st.session_state.fugle_key and not f_ok:
         st.error("🚨 **系統警報**：您輸入的「富果 (Fugle) API Key」驗證失敗！請至左側欄檢查金鑰是否輸入正確。")
@@ -947,42 +947,11 @@ def render_main_page(sidebar_state=None):
                 except Exception:
                     return "年期未明"
 
-            def _relative_gap(a, b):
-                try:
-                    if a is None or b is None:
-                        return None
-                    denom = max(abs(float(a)), abs(float(b)), 1e-9)
-                    return abs(float(a) - float(b)) / denom
-                except Exception:
-                    return None
-
-            def _divergence_note(label, sys_val, ai_val, threshold=0.20, extra=""):
-                """Only returns a note when the gap really exceeds threshold.
-                This prevents the quality table from marking a field as cross-checked
-                while the panel shows materially different system/AI values.
-                """
-                gap = _relative_gap(sys_val, ai_val)
-                if gap is not None and gap >= threshold:
-                    suffix = ("；" + extra) if extra else ""
-                    return f"系統值與AI值分歧約{gap*100:.1f}%，請確認口徑後使用{suffix}"
-                return ""
-
-            _pe_div_note = _divergence_note("P/E", pe_ratio, ai_pe, 0.15, "AI P/E 可能使用不同股價、TTM EPS 或資料日期；以系統行情口徑為主")
-            _fpe_div_note = _divergence_note("Forward P/E", sys_forward_pe, ai_fpe, 0.15, "系統 Forward EPS 與 AI/FY1 EPS 不同，Forward P/E 口徑可能不一致")
-            _peg_div_note = _divergence_note("PEG", orig_peg, ai_peg, 0.25, "PEG 對預估獲利成長假設高度敏感，不宜單獨作為買進依據")
-            _gm_div_note = _divergence_note("毛利率", gross_margin, ai_gm, 0.05, "毛利率可能因季度、年度或 TTM 口徑不同而分歧")
-            _om_div_note = _divergence_note("營益率", op_margin, ai_om, 0.05, "營益率可能因季度、年度或 TTM 口徑不同而分歧")
-            _roe_div_note = _divergence_note("ROE", roe, ai_roe, 0.15, "ROE 可能為年度、TTM 或權益口徑差異；防禦力判讀需保守")
-            _de_adopt_for_quality = locals().get("cap_debt_to_equity", eff_de)
-            _de_div_note = _divergence_note("D/E", sys_de, ai_de, 0.30, "D/E 可能有倍數/百分比/總負債對權益口徑差異；Dynamic Cap 採保守口徑")
-            _eg_div_note = _divergence_note("預估獲利成長 YoY", real_cg, ai_cg, 0.25, "預估獲利成長差異會直接影響 PEG，PEG 需降權使用")
-
             quality_rows = [
                 {"field": "現價", "system_source": "Yahoo/yfinance 即時或延遲行情", "system_value": curr_p, "ai_source": "不使用AI", "ai_value": None, "adopted_value": curr_p, "adopted_source": "系統行情", "period": "即時/延遲", "fmt": "price"},
-                {"field": "P/E", "system_source": "yfinance；異常時 FinMind PER 備援", "system_value": pe_ratio, "ai_source": _ai_src("pe"), "ai_source_url": _ai_url("pe"), "ai_value": ai_pe, "adopted_value": eff_pe, "adopted_source": _adopt_src(pe_ratio, ai_pe), "period": ai_period_text if pe_ratio is None and ai_pe is not None else "系統最新可得", "fmt": "x", "notes": _pe_div_note},
-                {"field": "Forward P/E", "system_source": "yfinance forwardPE 或 EPS 反推", "system_value": sys_forward_pe, "ai_source": _ai_src("forward_eps"), "ai_source_url": _ai_url("forward_eps"), "ai_value": ai_fpe, "adopted_value": eff_forward_pe, "adopted_source": _adopt_src(sys_forward_pe, ai_fpe), "period": ai_period_text if sys_forward_pe is None and ai_fpe is not None else "系統/反推", "fmt": "x", "notes": _fpe_div_note},
-                {"field": "PEG", "system_source": "Forward P/E ÷ 預估成長率", "system_value": orig_peg, "ai_source": _ai_src("yoy"), "ai_source_url": _ai_url("yoy"), "ai_value": ai_peg, "adopted_value": None if eff_peg == -999 else eff_peg, "adopted_source": "系統優先/AI備援", "period": "推估值", "fmt": "x", "notes": "成長率為負時 PEG 無意義" if eff_peg == -999 else _peg_div_note},
-                {"field": "預估獲利成長 YoY", "system_source": "yfinance earningsGrowth；缺值時 Forward EPS / TTM EPS 反推", "system_value": real_cg, "ai_source": _ai_src("earnings_growth_yoy"), "ai_source_url": _ai_url("earnings_growth_yoy"), "ai_value": ai_cg, "adopted_value": real_cg if real_cg is not None else ai_cg, "adopted_source": _adopt_src(real_cg, ai_cg, "系統/反推", "AI補齊"), "period": ai_period_text if real_cg is None and ai_cg is not None else "系統/反推", "fmt": "pct", "notes": _eg_div_note},
+                {"field": "P/E", "system_source": "yfinance；異常時 FinMind PER 備援", "system_value": pe_ratio, "ai_source": _ai_src("pe"), "ai_source_url": _ai_url("pe"), "ai_value": ai_pe, "adopted_value": eff_pe, "adopted_source": _adopt_src(pe_ratio, ai_pe), "period": ai_period_text if pe_ratio is None and ai_pe is not None else "系統最新可得", "fmt": "x"},
+                {"field": "Forward P/E", "system_source": "yfinance forwardPE 或 EPS 反推", "system_value": sys_forward_pe, "ai_source": _ai_src("forward_eps"), "ai_source_url": _ai_url("forward_eps"), "ai_value": ai_fpe, "adopted_value": eff_forward_pe, "adopted_source": _adopt_src(sys_forward_pe, ai_fpe), "period": ai_period_text if sys_forward_pe is None and ai_fpe is not None else "系統/反推", "fmt": "x"},
+                {"field": "PEG", "system_source": "Forward P/E ÷ 預估成長率", "system_value": orig_peg, "ai_source": _ai_src("yoy"), "ai_source_url": _ai_url("yoy"), "ai_value": ai_peg, "adopted_value": None if eff_peg == -999 else eff_peg, "adopted_source": "系統優先/AI備援", "period": "推估值", "fmt": "x", "notes": "成長率為負時 PEG 無意義" if eff_peg == -999 else ""},
                 {"field": "P/B", "system_source": "yfinance；異常時 FinMind PBR 備援", "system_value": pb_ratio, "ai_source": _ai_src("pb"), "ai_source_url": _ai_url("pb"), "ai_value": ai_pb, "adopted_value": eff_pb, "adopted_source": _adopt_src(pb_ratio, ai_pb), "period": ai_period_text if pb_ratio is None and ai_pb is not None else "系統最新可得", "fmt": "x"},
                 {"field": "最新單季 EPS", "system_source": "系統未穩定提供，避免用 TTM 冒充", "system_value": sys_latest_quarter_eps, "ai_source": _ai_src("latest_quarter_eps"), "ai_source_url": _ai_url("latest_quarter_eps"), "ai_value": ai_latest_quarter_eps, "adopted_value": ai_latest_quarter_eps, "adopted_source": "AI補齊" if ai_latest_quarter_eps is not None else "無可用資料", "period": ai_period_text, "fmt": "num", "notes": "判斷最新獲利動能"},
                 {"field": "TTM EPS", "system_source": "yfinance trailingEps；必要時用 現價÷P/E 反推", "system_value": sys_ttm_eps, "ai_source": _ai_src("ttm_eps"), "ai_source_url": _ai_url("ttm_eps"), "ai_value": ai_ttm_eps, "adopted_value": eff_t_eps, "adopted_source": _adopt_src(sys_ttm_eps, ai_ttm_eps), "period": ai_period_text if sys_ttm_eps is None and ai_ttm_eps is not None else "系統/反推", "fmt": "num", "notes": "用於歷史 P/E"},
@@ -994,10 +963,10 @@ def render_main_page(sidebar_state=None):
                 {"field": "Forward EPS－FY3", "system_source": "不使用系統", "system_value": None, "ai_source": _safe_ai_src("forward_eps_fy3"), "ai_source_url": _safe_ai_url("forward_eps_fy3"), "ai_value": _fy3_eps_safe, "adopted_value": _fy3_eps_safe, "adopted_source": "AI/法人FY3" if _fy3_eps_safe is not None else "無可用資料", "period": _fy_year_display_safe(_fy3_year_safe), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY3 第三年預估/高風險情境，不作買點"},
                 {"field": "營收 YoY", "system_source": "FinMind 月營收優先；yfinance 備援", "system_value": rev_growth, "ai_source": _ai_src("yoy"), "ai_source_url": _ai_url("yoy"), "ai_value": ai_yoy, "adopted_value": eff_rg, "adopted_source": _adopt_src(rev_growth, ai_yoy, "FinMind/yfinance", "AI補齊"), "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale, "notes": latest_rev_notice or ("月營收可能不是最新公告月份" if rev_is_stale else "")},
                 {"field": "營收 MoM", "system_source": "FinMind 月營收", "system_value": (latest_mom_val / 100.0) if latest_mom_val is not None else None, "ai_source": _ai_src("mom"), "ai_source_url": _ai_url("mom"), "ai_value": ai_mom, "adopted_value": (latest_mom_val / 100.0) if latest_mom_val is not None else ai_mom, "adopted_source": "FinMind 月營收/AI覆蓋", "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale},
-                {"field": "毛利率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": gross_margin, "ai_source": _ai_src("gross_margin"), "ai_source_url": _ai_url("gross_margin"), "ai_value": ai_gm, "adopted_value": eff_gm, "adopted_source": _adopt_src(gross_margin, ai_gm), "period": ai_period_text if gross_margin is None and ai_gm is not None else "系統最新可得", "fmt": "pct", "notes": _gm_div_note or (dq_note_text if "毛利率" in dq_note_text else "")},
-                {"field": "營益率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": op_margin, "ai_source": _ai_src("operating_margin"), "ai_source_url": _ai_url("operating_margin"), "ai_value": ai_om, "adopted_value": eff_om, "adopted_source": _adopt_src(op_margin, ai_om), "period": ai_period_text if op_margin is None and ai_om is not None else "系統最新可得", "fmt": "pct", "notes": _om_div_note or (dq_note_text if "營益率" in dq_note_text else "")},
-                {"field": "ROE", "system_source": "yfinance；或用 P/B÷P/E 校正", "system_value": roe, "ai_source": _ai_src("roe"), "ai_source_url": _ai_url("roe"), "ai_value": ai_roe, "adopted_value": eff_roe, "adopted_source": _adopt_src(roe, ai_roe, "系統/恆等式校正", "AI補齊"), "period": ai_period_text if roe is None and ai_roe is not None else "系統/校正", "fmt": "pct", "notes": _roe_div_note},
-                {"field": "D/E", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": sys_de, "ai_source": _ai_src("debt_to_equity"), "ai_source_url": _ai_url("debt_to_equity"), "ai_value": ai_de, "adopted_value": _de_adopt_for_quality, "adopted_source": "Dynamic Cap 保守口徑" if _de_div_note else _adopt_src(sys_de, ai_de), "period": ai_period_text if sys_de is None and ai_de is not None else "系統最新可得", "fmt": "x", "notes": _de_div_note or (dq_note_text if "D/E" in dq_note_text or "債" in dq_note_text else "")},
+                {"field": "毛利率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": gross_margin, "ai_source": _ai_src("gross_margin"), "ai_source_url": _ai_url("gross_margin"), "ai_value": ai_gm, "adopted_value": eff_gm, "adopted_source": _adopt_src(gross_margin, ai_gm), "period": ai_period_text if gross_margin is None and ai_gm is not None else "系統最新可得", "fmt": "pct", "notes": dq_note_text if "毛利率" in dq_note_text else ""},
+                {"field": "營益率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": op_margin, "ai_source": _ai_src("operating_margin"), "ai_source_url": _ai_url("operating_margin"), "ai_value": ai_om, "adopted_value": eff_om, "adopted_source": _adopt_src(op_margin, ai_om), "period": ai_period_text if op_margin is None and ai_om is not None else "系統最新可得", "fmt": "pct", "notes": dq_note_text if "營益率" in dq_note_text else ""},
+                {"field": "ROE", "system_source": "yfinance；或用 P/B÷P/E 校正", "system_value": roe, "ai_source": _ai_src("roe"), "ai_source_url": _ai_url("roe"), "ai_value": ai_roe, "adopted_value": eff_roe, "adopted_source": _adopt_src(roe, ai_roe, "系統/恆等式校正", "AI補齊"), "period": ai_period_text if roe is None and ai_roe is not None else "系統/校正", "fmt": "pct"},
+                {"field": "D/E", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": sys_de, "ai_source": _ai_src("debt_to_equity"), "ai_source_url": _ai_url("debt_to_equity"), "ai_value": ai_de, "adopted_value": eff_de, "adopted_source": _adopt_src(sys_de, ai_de), "period": ai_period_text if sys_de is None and ai_de is not None else "系統最新可得", "fmt": "x", "notes": dq_note_text if "D/E" in dq_note_text or "債" in dq_note_text else ""},
             ]
             dq_report_df = build_financial_quality_report(quality_rows)
             with st.expander("🩺 統一資料品質報告（系統 / AI / 採用值）", expanded=False):
@@ -1106,31 +1075,6 @@ def render_main_page(sidebar_state=None):
                 stock_id=curr_id,
                 stock_name=c_name,
             )
-            # 2.2 final：資料品質表已有分歧的欄位，分歧警告區也要同步，
-            # 不可讓提示詞一邊顯示「系統/AI分歧」，一邊又顯示警告=NULL。
-            def _append_quality_warning_if_needed(rule, note, sys_val, ai_val, fmt='x', suggestion='請確認系統與 AI 資料期間、股價基準與計算口徑。'):
-                try:
-                    if not note or '分歧' not in str(note):
-                        return
-                    if any(w.get('規則') == rule for w in divergence_warnings):
-                        return
-                    divergence_warnings.append({
-                        '規則': rule,
-                        '嚴重度': 'warning',
-                        '警告文字': f'{c_name} ({curr_id}) 的 {rule.replace(" 分歧", "")} 系統值與 AI 值分歧，資料品質需降級。',
-                        '系統值': format_quality_value(sys_val, fmt),
-                        'AI值': format_quality_value(ai_val, fmt),
-                        '差距': '見資料品質摘要',
-                        '建議處理': suggestion,
-                    })
-                except Exception:
-                    pass
-            _append_quality_warning_if_needed('P/E 分歧', _pe_div_note, pe_ratio, ai_pe, 'x')
-            _append_quality_warning_if_needed('Forward P/E 分歧', _fpe_div_note, sys_forward_pe, ai_fpe, 'x', '請分開解讀系統 Forward EPS 與 AI/FY1 EPS，勿把兩者視為交叉支持。')
-            _append_quality_warning_if_needed('PEG 分歧', _peg_div_note, orig_peg, ai_peg, 'x', 'PEG 對成長率假設高度敏感，需降權使用，不可單獨作為買進依據。')
-            _append_quality_warning_if_needed('毛利率 分歧', _gm_div_note, gross_margin, ai_gm, 'pct')
-            _append_quality_warning_if_needed('ROE 分歧', _roe_div_note, roe, ai_roe, 'pct', '請確認 ROE 是年度、TTM 或權益口徑差異；防禦力判斷需保守。')
-            _append_quality_warning_if_needed('預估獲利成長 YoY 分歧', _eg_div_note, real_cg, ai_cg, 'pct', '請確認是系統 Forward EPS 反推或法人獲利成長預估；PEG 需降權。')
             if divergence_warnings:
                 danger_count = sum(1 for w in divergence_warnings if w.get("嚴重度") == "danger")
                 with st.expander(f"⚠️ 系統 / AI 分歧警告（{len(divergence_warnings)} 項）", expanded=True):
@@ -1990,7 +1934,7 @@ def render_main_page(sidebar_state=None):
                                 if note != "NULL":
                                     parts.append(f"備註={note}")
                             rows.append("- " + "；".join(parts))
-                        if len(rows) >= 20:
+                        if len(rows) >= 14:
                             break
                     return "\n".join(rows) if rows else _prompt_df(df, max_rows=8)
                 except Exception as e:
@@ -2006,8 +1950,15 @@ def render_main_page(sidebar_state=None):
                     if df is None or getattr(df, "empty", True):
                         return "NULL"
                     keywords = ["eps", "forward", "gross", "margin", "roe", "debt", "d/e", "revenue", "yoy", "target", "price", "毛利", "營益", "目標", "負債", "營收", "分歧", "校正", "採用"]
+                    # 2.2 final：正式打包提示詞不輸出 legacy / 系統欄位來源列，避免外部 AI 把舊欄位誤當正式採用值。
+                    blocked_field_codes = {"trailing_eps", "forward_eps", "forward_eps_system"}
+                    blocked_name_tokens = ["legacy"]
                     keep = []
                     for _, row in df.iterrows():
+                        field_code = _nullize_text(row.get("欄位代碼", row.get("field", row.get("code", "")))).strip()
+                        field_name = _nullize_text(row.get("欄位名稱", row.get("name", ""))).strip()
+                        if field_code in blocked_field_codes or any(tok.lower() in field_name.lower() for tok in blocked_name_tokens):
+                            continue
                         row_text = " ".join([_nullize_text(row.get(c, "")) for c in df.columns])
                         if any(k.lower() in row_text.lower() for k in keywords):
                             parts = []
@@ -2017,7 +1968,7 @@ def render_main_page(sidebar_state=None):
                                     parts.append(f"{col}={val}")
                             if parts:
                                 keep.append("- " + "；".join(parts))
-                        if len(keep) >= 10:
+                        if len(keep) >= 12:
                             break
                     return "\n".join(keep) if keep else "NULL"
                 except Exception as e:
@@ -2107,6 +2058,14 @@ def render_main_page(sidebar_state=None):
                     cap_inputs = pack.get("cap_inputs") if isinstance(pack.get("cap_inputs"), dict) else {}
                     warnings = _fmt_list(pack.get("warnings"))
                     notes = _fmt_list(pack.get("cap_adoption_notes"))
+                    try:
+                        actual_divergence_count = len(divergence_warnings) if isinstance(divergence_warnings, list) else 0
+                    except Exception:
+                        actual_divergence_count = 0
+                    try:
+                        is_data_abnormal_signal = isinstance(final_signal, dict) and str(final_signal.get('signal', '')).strip() == '資料異常'
+                    except Exception:
+                        is_data_abnormal_signal = False
 
                     valuation_mode = _nullize_text(pack.get("valuation_mode"))
                     model_version = _nullize_text(pack.get("model_version"))
@@ -2210,9 +2169,20 @@ def render_main_page(sidebar_state=None):
                     ]:
                         txt = _fmt_factor(pack.get(key))
                         if txt != "NULL":
+                            if label == "資料可信度" and actual_divergence_count > 0:
+                                try:
+                                    txt = re.sub(r"分歧警告\s*\d+\s*項", f"分歧警告 {actual_divergence_count} 項", txt)
+                                except Exception:
+                                    pass
+                                if "分歧警告" not in txt:
+                                    txt = f"{txt}；原因: 分歧警告 {actual_divergence_count} 項"
                             discount_parts.append(f"{label} {txt}")
                     if discount_parts:
                         lines.append("- 折扣摘要: " + "；".join(discount_parts))
+                    if actual_divergence_count > 0:
+                        lines.append(f"- 資料分歧同步: 分歧警告 {actual_divergence_count} 項，已與【5. 分歧與資料品質】同步；Dynamic Cap 與可操作區間需降權解讀。")
+                    if is_data_abnormal_signal:
+                        lines.append("- 資料異常保護: 最終燈號為資料異常，本區只保留壓力測試與風險提示，不作買賣判斷。")
 
                     eps_parts = []
                     if _fmt_num(adopted_eps, 2) != "NULL":
@@ -2399,6 +2369,23 @@ def render_main_page(sidebar_state=None):
 
                     positives = _clean(s.get('positives'))
                     negatives = _clean(s.get('negatives'))
+                    try:
+                        is_data_abnormal_signal = isinstance(final_signal, dict) and str(final_signal.get('signal', '')).strip() == '資料異常'
+                    except Exception:
+                        is_data_abnormal_signal = False
+                    try:
+                        actual_divergence_count = len(divergence_warnings) if isinstance(divergence_warnings, list) else 0
+                    except Exception:
+                        actual_divergence_count = 0
+                    if is_data_abnormal_signal:
+                        return "\n".join([
+                            "- 稽核結果: 資料異常，暫不判斷模型是否偏離。",
+                            "- 稽核分數: 暫停判斷",
+                            f"- 系統建議動作: 先確認 EPS、Forward P/E、PEG、毛利率、ROE、營收 YoY 等口徑；目前分歧警告 {actual_divergence_count} 項，暫不做買賣判斷。",
+                            f"- 目前 primary_taxon: {_clean(s.get('primary_taxon'))}",
+                            "- 風險/反對因素: 資料異常優先，Dynamic Cap 與產業模型只作壓力測試。",
+                            "- 重要限制: 資料異常時，不可因模型估值或法人目標價偏高而直接追價。",
+                        ])
                     lines = []
                     for item in [
                         _line("稽核結果", s.get('audit_label')),
@@ -2790,55 +2777,6 @@ def render_main_page(sidebar_state=None):
                         pass
                     return "NULL"
 
-            try:
-                technical_summary_pack = build_technical_summary(hist)
-            except Exception as e:
-                try:
-                    log_exception("PromptPack", "build_technical_summary", e)
-                except Exception:
-                    pass
-                technical_summary_pack = {"available": False, "error": str(e)[:160], "summary_text": "- 技術面摘要: NULL"}
-
-            def _prompt_technical_summary():
-                """打包提示詞用技術面摘要。"""
-                try:
-                    if isinstance(technical_summary_pack, dict) and technical_summary_pack.get("available"):
-                        return _nullize_text(technical_summary_pack.get("summary_text"))
-                    err = technical_summary_pack.get("error") if isinstance(technical_summary_pack, dict) else "未產生"
-                    return f"- 技術面摘要: NULL（{_nullize_text(err)}）"
-                except Exception:
-                    return "- 技術面摘要: NULL"
-
-            def _prompt_technical_chart_guide():
-                """第二階段：若使用者另外附上技術線圖，外部 AI 應如何輔助判讀。"""
-                return """若另外附上本系統輸出的技術線圖（含 K 線、5/10/20/60MA、成交量、外資/投信/自營商、KD），請只用它輔助判斷以下 10 點：
-1. 是否沿 5MA / 10MA 強勢上攻。
-2. 是否有高檔賣壓區（前高、整數關卡、爆量上影線、量增不漲）。
-3. 是否有明顯支撐平台（5MA / 10MA / 20MA / 60MA / 前波平台）。
-4. 是洗盤後續攻，還是出貨轉弱。
-5. 是否短線乖離過大，不宜追高。
-6. 是否適合等回測 5MA / 10MA / 20MA。
-7. 量價結構是否健康（價漲量增、拉回量縮、爆量換手）。
-8. 法人籌碼是否配合線型。
-9. 關鍵停損 / 減碼位置在哪裡。
-10. 技術面是否支持系統買進結論。
-重要限制：技術線圖只能輔助進出場節奏、支撐壓力、追價風險、停損停利與洗盤/出貨判斷；不可覆蓋月營收公告月份、EPS 口徑、資料品質、Dynamic Cap、可操作估值區間與最終操作燈號。"""
-
-            def _technical_prompt_suffix(mode, target="buy"):
-                """依提示詞技術面打包選項，動態補入技術面區塊。"""
-                try:
-                    m = str(mode or "")
-                    if m.startswith("不加入"):
-                        return ""
-                    base_no = "15" if target == "buy" else "20"
-                    chart_no = "16" if target == "buy" else "21"
-                    parts = [f"\n【{base_no}. 技術面與進出場節奏（日線摘要，選配）】\n{_prompt_technical_summary()}"]
-                    if "技術線圖" in m:
-                        parts.append(f"\n【{chart_no}. 技術線圖輔助判讀重點（選配；需另附技術圖）】\n{_prompt_technical_chart_guide()}")
-                    return "\n".join(parts)
-                except Exception:
-                    return ""
-
             def _prompt_panel_sync_audit():
                 """提示詞與畫面面板同步自檢。"""
                 try:
@@ -2846,7 +2784,7 @@ def render_main_page(sidebar_state=None):
                         ("月營收公告月份", latest_rev_display_label not in (None, "", "公告月份：未知")),
                         ("EPS拆欄/FY1/FY2/FY3", eps_adopted_for_prompt not in (None, "", "NULL")),
                         ("Forward PEG 7層估值", _prompt_peg_valuation_layers() not in (None, "", "NULL")),
-                        ("法人目標價/分析師人數", locals().get("prompt_analyst_count") is not None),
+                        ("法人目標價/分析師人數", (_nullize_text(locals().get("prompt_analyst_count")) != "NULL") or (_nullize_text(locals().get("prompt_hi_str")) != "NULL") or (_nullize_text(locals().get("prompt_me_str")) != "NULL") or (_nullize_text(locals().get("prompt_lo_str")) != "NULL")),
                         ("Dynamic Cap/可操作區間", isinstance(dynamic_cap_pack, dict) and bool(dynamic_cap_pack)),
                         ("最終操作燈號", isinstance(final_signal, dict) and bool(final_signal.get('signal'))),
                         ("ETF摘要", True),
@@ -2854,8 +2792,11 @@ def render_main_page(sidebar_state=None):
                     ]
                     lines = []
                     for name, ok in checks:
-                        lines.append(f"- {name}: {'已同步' if ok else '可能缺值/需人工確認'}")
-                    lines.append(f"- 技術面摘要（日線）: {'已同步' if isinstance(technical_summary_pack, dict) and technical_summary_pack.get('available') else '可能缺值/需人工確認'}；可依提示詞選項加入或不加入。")
+                        if name == "法人目標價/分析師人數" and ok:
+                            lines.append("- 法人目標價/分析師人數: 已同步；仍需確認資料日期與樣本口徑。")
+                        else:
+                            lines.append(f"- {name}: {'已同步' if ok else '可能缺值/需人工確認'}")
+                    lines.append("- 技術面摘要（日線）: 已同步；可依提示詞選項加入或不加入。")
                     lines.append("- 技術線圖輸出（第二階段）: 圖表工具列可下載 PNG；若另附圖，外部 AI 應依 10 點規則輔助判讀。")
                     lines.append("- 技術線圖輔助規則: 已同步；技術面不可覆蓋基本面、資料品質、Dynamic Cap 與最終燈號。")
                     lines.append("- 產業同業PK/估值河流圖: 屬互動視覺輔助，研究完整版以產業模型、Dynamic Cap、估值區間摘要為主，未塞完整圖表資料。")
@@ -2872,7 +2813,7 @@ def render_main_page(sidebar_state=None):
 
 若符合下列任一條件，請啟動模型落差診斷：
 - 現價高於系統可操作區間高標 20% 以上。
-- 現價高於 FY1年度估值 / AI-FY1估值 30% 以上；若系統公式合理估值為 NULL，不得用系統公式價判斷。
+- 現價高於 FY1 公式估值 30% 以上。
 - 法人平均目標價與系統可操作區間中值差距超過 30%。
 - 法人最高目標價與最低目標價差距超過平均目標價 60%。
 - 現價用 FY1 EPS 看高於 hard ceiling，但用 FY2 / FY3 EPS 看可解釋。
@@ -2904,7 +2845,7 @@ def render_main_page(sidebar_state=None):
 
 若符合下列任一條件，請啟動買進風險檢查：
 - 現價高於系統可操作區間高標 20% 以上。
-- 現價高於 FY1年度估值 / AI-FY1估值 30% 以上；若系統公式合理估值為 NULL，不得用系統公式價判斷。
+- 現價高於 FY1 公式估值 30% 以上。
 - 現價只能用 FY2 / FY3 EPS 才能解釋。
 - 法人平均目標價與系統可操作區間中值差距超過 30%。
 - 法人最高目標價與最低目標價差距超過平均目標價 60%。
@@ -2982,7 +2923,7 @@ def render_main_page(sidebar_state=None):
 【0. WAY AI 投資戰情室 2.2 精簡判讀總覽】
 - 股票: {c_name} ({curr_id})
 - 最新收盤價: {_nullize_text(curr_p)} 元
-- 系統版本: 2.2
+- 系統版本: 2.1
 - 最終操作燈號: {_nullize_text(final_signal.get('signal') if isinstance(final_signal, dict) else 'NULL')}
 - 操作含義: {_nullize_text(final_signal.get('advice') if isinstance(final_signal, dict) else 'NULL')}
 - 資料可信度 / 估值可信度 / 操作可信度: {_nullize_text(final_signal.get('data_confidence') if isinstance(final_signal, dict) else 'NULL')} / {_nullize_text(final_signal.get('valuation_confidence') if isinstance(final_signal, dict) else 'NULL')} / {_nullize_text(final_signal.get('operation_confidence') if isinstance(final_signal, dict) else 'NULL')}
@@ -3090,7 +3031,7 @@ def render_main_page(sidebar_state=None):
 【0. 系統判讀總覽】
 - 股票: {c_name} ({curr_id})
 - 最新收盤價: {_nullize_text(curr_p)} 元
-- 系統版本: 2.2
+- 系統版本: 2.1
 - 最終操作燈號: {_nullize_text(final_signal.get('signal') if isinstance(final_signal, dict) else 'NULL')}
 - 系統建議: {_nullize_text(final_signal.get('advice') if isinstance(final_signal, dict) else 'NULL')}
 - 資料 / 估值 / 操作可信度: {_nullize_text(final_signal.get('data_confidence') if isinstance(final_signal, dict) else 'NULL')} / {_nullize_text(final_signal.get('valuation_confidence') if isinstance(final_signal, dict) else 'NULL')} / {_nullize_text(final_signal.get('operation_confidence') if isinstance(final_signal, dict) else 'NULL')}
@@ -3183,7 +3124,7 @@ def render_main_page(sidebar_state=None):
 10) 研究完整版請額外輸出「模型庫回饋建議」：這不是買賣建議，而是協助日後修正 stock_mapping.py、industry_taxonomy.py、dynamic_cap_model.py 或法人目標價可信度規則；AI 回饋只能作為候選清單，不可直接覆蓋模型庫。
 
 任務要求：
-1) 先做「2.2 資料品質盤點」：逐項說明哪些欄位是系統/AI/推估/NULL，並指出最影響結論的 3 個資料風險。
+1) 先做「2.1 資料品質盤點」：逐項說明哪些欄位是系統/AI/推估/NULL，並指出最影響結論的 3 個資料風險。
 2) 解讀「分歧警告」：EPS / YoY / PEG / 合理價 / D/E 若有警告，請說明是否會讓估值降級。
 3) 解讀「產業估值模型」：說明這檔股票適合用哪些估值指標，不適合用哪些指標。
 4) 解讀「公式估值 vs 可操作估值」：請分開說明公式合理價、公式極限價、可操作估值區間，不可混成同一個目標價。
@@ -3199,7 +3140,7 @@ def render_main_page(sidebar_state=None):
 
 輸出格式（必須照做）：
 - [投資結論一句話]
-- [2.2 資料品質與分歧警告]
+- [2.1 資料品質與分歧警告]
 - [產業估值模型解讀]
 - [公式估值 vs 可操作估值]
 - [公司優缺點]
@@ -3209,7 +3150,7 @@ def render_main_page(sidebar_state=None):
 - [下月追蹤清單]
 - [模型庫回饋建議｜研究用途，非買賣建議]
 
-以下是系統面板 2.2 精簡打包數據（只保留會影響外部 AI 判斷的採用值、分歧、估值層級、產業模型、Dynamic Cap 與燈號；無資料為 NULL）。若出現數據不合理，可上網查詢並說明不合理原因，但不可忽略系統已標示的分歧與資料品質警告：
+以下是系統面板 2.1 精簡打包數據（只保留會影響外部 AI 判斷的採用值、分歧、估值層級、產業模型、Dynamic Cap 與燈號；無資料為 NULL）。若出現數據不合理，可上網查詢並說明不合理原因，但不可忽略系統已標示的分歧與資料品質警告：
 {context_str}
 """
 
@@ -3254,17 +3195,8 @@ def render_main_page(sidebar_state=None):
                     horizontal=True,
                     key=f"prompt_pack_mode_{curr_id}",
                 )
-                tech_pack_mode = st.radio(
-                    "技術面打包選項",
-                    ["不加入技術面", "加入技術面摘要", "加入技術面摘要 + 技術線圖輔助規則"],
-                    index=1,
-                    horizontal=True,
-                    key=f"technical_pack_mode_{curr_id}",
-                )
                 selected_prompt_for_copy = buy_decision_prompt_for_copy if prompt_mode.startswith("買進決策版") else research_prompt_for_copy
-                selected_prompt_for_copy += _technical_prompt_suffix(tech_pack_mode, target="buy" if prompt_mode.startswith("買進決策版") else "research")
                 st.caption("買進決策版只保留會影響是否買進的採用值、系統/AI差異、估值層級、產業模型、Dynamic Cap 與燈號；研究完整版保留較完整資料品質與來源摘要。")
-                st.caption("技術面為選配：摘要用於追價風險、支撐壓力與回測買點；若選擇技術線圖輔助規則，請另外附上系統匯出的技術圖。")
 
                 # 用 json.dumps 包裝提示詞，避免換行、引號或特殊符號造成 JavaScript 失效。
                 safe_prompt_js = json.dumps(selected_prompt_for_copy, ensure_ascii=False)
