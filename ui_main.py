@@ -1093,6 +1093,10 @@ def render_main_page(sidebar_state=None):
                 ai_yoy=ai_yoy,
                 system_peg=orig_peg,
                 ai_peg=ai_peg,
+                system_forward_pe=sys_forward_pe,
+                ai_forward_pe=ai_fpe,
+                system_growth_yoy=real_cg,
+                ai_growth_yoy=ai_cg,
                 system_fair_value=sys_target_price_est,
                 ai_fair_value=ai_target_price_est,
                 system_de=sys_de,
@@ -1102,6 +1106,43 @@ def render_main_page(sidebar_state=None):
                 stock_id=curr_id,
                 stock_name=c_name,
             )
+
+            # 2.2 final：分歧警告要回寫到資料品質摘要，避免提示詞出現「有分歧但仍標示系統+AI交叉」。
+            try:
+                _div_field_map = {
+                    "EPS 分歧": ["Forward EPS－系統", "Forward EPS－AI/共識", "Forward EPS－FY1"],
+                    "YoY 分歧": ["營收 YoY"],
+                    "Forward P/E 分歧": ["Forward P/E"],
+                    "PEG 分歧": ["PEG"],
+                    "PEG 矛盾": ["PEG"],
+                    "預估獲利成長 YoY 分歧": ["預估獲利成長 YoY"],
+                    "D/E 分歧": ["D/E"],
+                    "P/B 分歧": ["P/B"],
+                    "合理價分歧": ["Forward EPS－系統", "Forward EPS－AI/共識"],
+                }
+                _warn_fields = set()
+                for _w in (divergence_warnings or []):
+                    _rule = str(_w.get("規則", ""))
+                    for _f in _div_field_map.get(_rule, []):
+                        _warn_fields.add(_f)
+                if dq_report_df is not None and not getattr(dq_report_df, "empty", True) and _warn_fields:
+                    _field_col = next((c for c in dq_report_df.columns if "欄位" in str(c) or "項目" in str(c)), dq_report_df.columns[0])
+                    _status_col = next((c for c in dq_report_df.columns if "品質" in str(c) or "狀態" in str(c)), None)
+                    _note_col = next((c for c in dq_report_df.columns if "備註" in str(c)), None)
+                    if _status_col:
+                        _mask = dq_report_df[_field_col].astype(str).isin(_warn_fields)
+                        dq_report_df.loc[_mask, _status_col] = "⚠️ 系統/AI分歧"
+                    if _note_col:
+                        _mask = dq_report_df[_field_col].astype(str).isin(_warn_fields)
+                        dq_report_df.loc[_mask, _note_col] = dq_report_df.loc[_mask, _note_col].astype(str).apply(
+                            lambda x: (x if x and x != "—" else "") + ("；" if x and x != "—" else "") + "系統/AI 分歧，請降權解讀"
+                        )
+            except Exception as _e:
+                try:
+                    log_exception("PromptPack", "sync_divergence_to_quality_report", _e)
+                except Exception:
+                    pass
+
             if divergence_warnings:
                 danger_count = sum(1 for w in divergence_warnings if w.get("嚴重度") == "danger")
                 with st.expander(f"⚠️ 系統 / AI 分歧警告（{len(divergence_warnings)} 項）", expanded=True):
@@ -1253,7 +1294,7 @@ def render_main_page(sidebar_state=None):
                     cap_warning_html += "<br><span style='color:#ff4d4d; font-weight:bold;'>現價已高於 FY1 樂觀年度情境價，追高風險極大！</span>"
 
                 tp_est_str = (
-                    f"公式合理估值(系統EPS×formula cap): {sys_tp_str}；"
+                    f"公式合理估值(系統Forward EPS×formula cap): {sys_tp_str}；"
                     f"AI估值(AI EPS×formula cap): {ai_tp_txt}；"
                     f"FY1年度估值(FY1 EPS×formula cap): {fy1_formula_txt}；"
                     f"FY2第二年度估值(FY2 EPS×formula cap): {fy2_formula_txt}；"
@@ -1267,7 +1308,7 @@ def render_main_page(sidebar_state=None):
                 debug_eps = eff_f_eps if eff_f_eps else (ai_f_eps_calc if ai_f_eps_calc else 0)
 
                 _rows = [
-                    ("🎯 1. 公式合理估值", "系統 EPS × formula cap，非買賣目標", eff_f_eps, formula_pe_cap, sys_target_price_est, "#ffffff"),
+                    ("🎯 1. 公式合理估值", "系統 Forward EPS × formula cap，非買賣目標", eff_f_eps, formula_pe_cap, sys_target_price_est, "#ffffff"),
                     ("🤖 2. AI估值", "AI / 法人 EPS × formula cap，需看來源可信度", ai_f_eps_calc, formula_pe_cap, ai_target_price_est, "#FCD34D"),
                     ("📅 3. FY1年度估值", f"FY1 EPS × formula cap｜{fy1_year_text}", ai_forward_eps_fy1, formula_pe_cap, fy1_formula_target_price, "#93C5FD"),
                     ("📆 4. FY2第二年度估值", f"FY2 EPS × formula cap｜{fy2_year_text}｜僅供市場先行定價判斷", ai_forward_eps_fy2, formula_pe_cap, fy2_formula_target_price, "#A7F3D0"),
@@ -1304,7 +1345,7 @@ def render_main_page(sidebar_state=None):
                     {_valuation_rows_html}
                     <div style='background:#111827; color:#E5E7EB; padding:7px 9px; border-radius:6px; margin-top:7px; line-height:1.55;'>
                         <b>使用規則</b><br>
-                        公式合理估值保留系統 EPS 口徑；AI估值獨立顯示；FY1 是年度主估值參考；FY2 只用於市場先行定價判斷；FY3 為高風險遠期情境，不可直接當買點。
+                        公式合理估值只使用系統 Forward EPS；系統 Forward EPS 缺值時為 NULL，不得用 AI/FY1 冒充系統公式；AI估值獨立顯示；FY1 是年度主估值參考；FY2 只用於市場先行定價判斷；FY3 為高風險遠期情境，不可直接當買點。
                     </div>
                     <div style='background:#2c2c2c; padding:4px 8px; border-radius:4px; margin-top:4px;'>
                         <small style='color:#00bfff;'>🐛 [底層運算除錯] 系統EPS: {_fmt_eps(eff_f_eps)}｜AI EPS: {_fmt_eps(ai_f_eps_calc)}｜FY1 EPS: {_fmt_eps(ai_forward_eps_fy1)}｜FY2 EPS: {_fmt_eps(ai_forward_eps_fy2)}｜FY3 EPS: {_fmt_eps(ai_forward_eps_fy3)}｜EPS 年期/來源: {eps_period_note}｜公式倍率: {_fmt_cap(formula_pe_cap)}｜使用者手動倍率: {_fmt_cap(manual_cap_for_calc)}｜樂觀倍率: {_fmt_cap(extreme_pe_cap_for_calc)}</small>
@@ -1978,7 +2019,7 @@ def render_main_page(sidebar_state=None):
                         return "NULL"
                     keywords = ["eps", "forward", "gross", "margin", "roe", "debt", "d/e", "revenue", "yoy", "target", "price", "毛利", "營益", "目標", "負債", "營收", "分歧", "校正", "採用"]
                     # 2.2 final：正式打包提示詞不輸出 legacy / 系統欄位來源列，避免外部 AI 把舊欄位誤當正式採用值。
-                    blocked_field_codes = {"trailing_eps", "forward_eps", "forward_eps_system"}
+                    blocked_field_codes = {"trailing_eps", "forward_eps", "forward_eps_system", "forward_eps_fy1_year", "forward_eps_fy2_year", "forward_eps_fy3_year"}
                     blocked_name_tokens = ["legacy"]
                     keep = []
                     for _, row in df.iterrows():
@@ -2336,7 +2377,7 @@ def render_main_page(sidebar_state=None):
                         return "年期未明" if t == "NULL" else t
 
                     rows = [
-                        ("1. 公式合理估值", "系統 EPS × formula cap，非買賣目標", system_eps, formula_cap, system_price, "保留系統抓取 EPS 口徑，作為原始系統估值。"),
+                        ("1. 公式合理估值", "系統 Forward EPS × formula cap，非買賣目標", system_eps, formula_cap, system_price, "保留系統 Forward EPS 口徑；若 EPS/估值為 NULL，代表系統未取得 Forward EPS，不得用 AI/FY1 冒充系統公式。"),
                         ("2. AI估值", "AI / 法人 EPS × formula cap，需看來源可信度", ai_eps, formula_cap, ai_price, "用 AI 取得或校正後 EPS 獨立估值，不覆蓋系統估值。"),
                         ("3. FY1年度估值", f"FY1 EPS × formula cap｜{_y(fy1_year)}", fy1_eps, formula_cap, fy1_price, "一年預估 EPS 的年度主估值參考。"),
                         ("4. FY2第二年度估值", f"FY2 EPS × formula cap｜{_y(fy2_year)}", fy2_eps, formula_cap, fy2_price, "只用於判斷市場是否提前反映第二年獲利，不直接當買點。"),
@@ -2347,7 +2388,7 @@ def render_main_page(sidebar_state=None):
                     lines = []
                     for title, formula, eps, cap, price, note in rows:
                         lines.append(f"- {title}: {_p(price)}｜{formula}｜EPS={_e(eps)}｜倍率={_c(cap)}｜判讀={note}")
-                    lines.append("- 使用規則: 公式合理估值保留系統 EPS；AI估值獨立顯示；FY1 是年度主估值參考；FY2 只解釋市場先行定價；FY3 是高風險遠期情境；手動/樂觀年度情境以 FY1 EPS 計算。")
+                    lines.append("- 使用規則: 公式合理估值只使用系統 Forward EPS；系統 Forward EPS 缺值時為 NULL，不得用 AI/FY1 冒充系統公式；AI估值獨立顯示；FY1 是年度主估值參考；FY2 只解釋市場先行定價；FY3 是高風險遠期情境；手動/樂觀年度情境以 FY1 EPS 計算。")
                     return "\n".join(lines)
                 except Exception as e:
                     try:
@@ -2673,7 +2714,7 @@ def render_main_page(sidebar_state=None):
                             price_parts.append(f"{label}={_price(val)}")
                     if price_parts:
                         lines.append("- 新版估值結果: " + "；".join(price_parts))
-                    lines.append("- 重要規則: 公式合理估值保留系統 EPS 口徑；AI估值獨立顯示；FY1 是年度主估值參考；FY2 僅判斷市場是否先行定價；FY3 為高風險遠期情境；手動/樂觀年度情境以 FY1 EPS 為主。")
+                    lines.append("- 重要規則: 公式合理估值只使用系統 Forward EPS；系統 Forward EPS 缺值時為 NULL，不得用 AI/FY1 冒充系統公式；AI估值獨立顯示；FY1 是年度主估值參考；FY2 僅判斷市場是否先行定價；FY3 為高風險遠期情境；手動/樂觀年度情境以 FY1 EPS 為主。")
                     return "\n".join(lines) if lines else "無可用 EPS 面板資料，提示詞不納入 EPS 估值判斷。"
                 except Exception as e:
                     try:
@@ -2811,7 +2852,7 @@ def render_main_page(sidebar_state=None):
                         ("月營收公告月份", latest_rev_display_label not in (None, "", "公告月份：未知")),
                         ("EPS拆欄/FY1/FY2/FY3", eps_adopted_for_prompt not in (None, "", "NULL")),
                         ("Forward PEG 7層估值", _prompt_peg_valuation_layers() not in (None, "", "NULL")),
-                        ("法人目標價/分析師人數", (_nullize_text(locals().get("prompt_analyst_count")) != "NULL") or (_nullize_text(locals().get("prompt_hi_str")) != "NULL") or (_nullize_text(locals().get("prompt_me_str")) != "NULL") or (_nullize_text(locals().get("prompt_lo_str")) != "NULL")),
+                        ("法人目標價/分析師人數", (_nullize_text(prompt_analyst_count) != "NULL") or (_nullize_text(prompt_hi_str) != "NULL") or (_nullize_text(prompt_me_str) != "NULL") or (_nullize_text(prompt_lo_str) != "NULL")),
                         ("Dynamic Cap/可操作區間", isinstance(dynamic_cap_pack, dict) and bool(dynamic_cap_pack)),
                         ("最終操作燈號", isinstance(final_signal, dict) and bool(final_signal.get('signal'))),
                         ("ETF摘要", True),
@@ -2840,7 +2881,7 @@ def render_main_page(sidebar_state=None):
 
 若符合下列任一條件，請啟動模型落差診斷：
 - 現價高於系統可操作區間高標 20% 以上。
-- 現價高於 FY1 公式估值 30% 以上。
+- 現價高於 FY1年度估值 / AI-FY1估值 30% 以上；若系統公式合理估值為 NULL，不得用系統公式價判斷。
 - 法人平均目標價與系統可操作區間中值差距超過 30%。
 - 法人最高目標價與最低目標價差距超過平均目標價 60%。
 - 現價用 FY1 EPS 看高於 hard ceiling，但用 FY2 / FY3 EPS 看可解釋。
@@ -2872,7 +2913,7 @@ def render_main_page(sidebar_state=None):
 
 若符合下列任一條件，請啟動買進風險檢查：
 - 現價高於系統可操作區間高標 20% 以上。
-- 現價高於 FY1 公式估值 30% 以上。
+- 現價高於 FY1年度估值 / AI-FY1估值 30% 以上；若系統公式合理估值為 NULL，不得用系統公式價判斷。
 - 現價只能用 FY2 / FY3 EPS 才能解釋。
 - 法人平均目標價與系統可操作區間中值差距超過 30%。
 - 法人最高目標價與最低目標價差距超過平均目標價 60%。
@@ -2950,7 +2991,7 @@ def render_main_page(sidebar_state=None):
 【0. WAY AI 投資戰情室 2.2 精簡判讀總覽】
 - 股票: {c_name} ({curr_id})
 - 最新收盤價: {_nullize_text(curr_p)} 元
-- 系統版本: 2.1
+- 系統版本: 2.2
 - 最終操作燈號: {_nullize_text(final_signal.get('signal') if isinstance(final_signal, dict) else 'NULL')}
 - 操作含義: {_nullize_text(final_signal.get('advice') if isinstance(final_signal, dict) else 'NULL')}
 - 資料可信度 / 估值可信度 / 操作可信度: {_nullize_text(final_signal.get('data_confidence') if isinstance(final_signal, dict) else 'NULL')} / {_nullize_text(final_signal.get('valuation_confidence') if isinstance(final_signal, dict) else 'NULL')} / {_nullize_text(final_signal.get('operation_confidence') if isinstance(final_signal, dict) else 'NULL')}
@@ -3058,7 +3099,7 @@ def render_main_page(sidebar_state=None):
 【0. 系統判讀總覽】
 - 股票: {c_name} ({curr_id})
 - 最新收盤價: {_nullize_text(curr_p)} 元
-- 系統版本: 2.1
+- 系統版本: 2.2
 - 最終操作燈號: {_nullize_text(final_signal.get('signal') if isinstance(final_signal, dict) else 'NULL')}
 - 系統建議: {_nullize_text(final_signal.get('advice') if isinstance(final_signal, dict) else 'NULL')}
 - 資料 / 估值 / 操作可信度: {_nullize_text(final_signal.get('data_confidence') if isinstance(final_signal, dict) else 'NULL')} / {_nullize_text(final_signal.get('valuation_confidence') if isinstance(final_signal, dict) else 'NULL')} / {_nullize_text(final_signal.get('operation_confidence') if isinstance(final_signal, dict) else 'NULL')}
@@ -3151,7 +3192,7 @@ def render_main_page(sidebar_state=None):
 10) 研究完整版請額外輸出「模型庫回饋建議」：這不是買賣建議，而是協助日後修正 stock_mapping.py、industry_taxonomy.py、dynamic_cap_model.py 或法人目標價可信度規則；AI 回饋只能作為候選清單，不可直接覆蓋模型庫。
 
 任務要求：
-1) 先做「2.1 資料品質盤點」：逐項說明哪些欄位是系統/AI/推估/NULL，並指出最影響結論的 3 個資料風險。
+1) 先做「2.2 資料品質盤點」：逐項說明哪些欄位是系統/AI/推估/NULL，並指出最影響結論的 3 個資料風險。
 2) 解讀「分歧警告」：EPS / YoY / PEG / 合理價 / D/E 若有警告，請說明是否會讓估值降級。
 3) 解讀「產業估值模型」：說明這檔股票適合用哪些估值指標，不適合用哪些指標。
 4) 解讀「公式估值 vs 可操作估值」：請分開說明公式合理價、公式極限價、可操作估值區間，不可混成同一個目標價。
@@ -3167,7 +3208,7 @@ def render_main_page(sidebar_state=None):
 
 輸出格式（必須照做）：
 - [投資結論一句話]
-- [2.1 資料品質與分歧警告]
+- [2.2 資料品質與分歧警告]
 - [產業估值模型解讀]
 - [公式估值 vs 可操作估值]
 - [公司優缺點]
@@ -3177,7 +3218,7 @@ def render_main_page(sidebar_state=None):
 - [下月追蹤清單]
 - [模型庫回饋建議｜研究用途，非買賣建議]
 
-以下是系統面板 2.1 精簡打包數據（只保留會影響外部 AI 判斷的採用值、分歧、估值層級、產業模型、Dynamic Cap 與燈號；無資料為 NULL）。若出現數據不合理，可上網查詢並說明不合理原因，但不可忽略系統已標示的分歧與資料品質警告：
+以下是系統面板 2.2 精簡打包數據（只保留會影響外部 AI 判斷的採用值、分歧、估值層級、產業模型、Dynamic Cap 與燈號；無資料為 NULL）。若出現數據不合理，可上網查詢並說明不合理原因，但不可忽略系統已標示的分歧與資料品質警告：
 {context_str}
 """
 
