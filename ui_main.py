@@ -27,7 +27,7 @@ def render_main_page(sidebar_state=None):
     # ==========================================
     # 5. 主畫面開始
     # ==========================================
-    st.markdown("## 📈 WAY AI 投資戰情室 版本2.1")
+    st.markdown("## 📈 WAY AI 投資戰情室 版本2.2")
 
     if st.session_state.fugle_key and not f_ok:
         st.error("🚨 **系統警報**：您輸入的「富果 (Fugle) API Key」驗證失敗！請至左側欄檢查金鑰是否輸入正確。")
@@ -494,6 +494,9 @@ def render_main_page(sidebar_state=None):
                 if bound_stock_id != str(curr_id):
                     ai_fin = {}
                     st.session_state.ai_fetched_financials.pop(curr_id, None)
+            if isinstance(ai_fin, dict) and ai_fin:
+                ai_fin = unwrap_ai_value_objects(ai_fin)
+                st.session_state.ai_fetched_financials[curr_id] = ai_fin
             has_ai_fin_fetch = bool(ai_fin)
             ai_pe = s_float(ai_fin.get('pe')) if has_ai_fin_fetch else None
             ai_pb = s_float(ai_fin.get('pb')) if has_ai_fin_fetch else None
@@ -543,6 +546,15 @@ def render_main_page(sidebar_state=None):
             ai_hi_val = s_float(ai_fin.get('target_price_high')) if has_ai_fin_fetch else None
             ai_me_val = s_float(ai_fin.get('target_price_avg')) if has_ai_fin_fetch else None
             ai_lo_val = s_float(ai_fin.get('target_price_low')) if has_ai_fin_fetch else None
+            # yfinance/info 備援：有些標的 AI 只抓到 analyst_count 或 latest target，
+            # 但 info 已有 targetHigh/Mean/Low；法人目標價面板不可因此空白。
+            sys_target_high = s_float(info.get('targetHighPrice')) if isinstance(info, dict) else None
+            sys_target_mean = s_float(info.get('targetMeanPrice') or info.get('targetMedianPrice')) if isinstance(info, dict) else None
+            sys_target_low = s_float(info.get('targetLowPrice')) if isinstance(info, dict) else None
+            panel_hi_val = ai_hi_val if ai_hi_val is not None else sys_target_high
+            panel_me_val = ai_me_val if ai_me_val is not None else sys_target_mean
+            panel_lo_val = ai_lo_val if ai_lo_val is not None else sys_target_low
+            target_price_source_label = ("AI/法人聯網" if (ai_hi_val is not None or ai_me_val is not None or ai_lo_val is not None) else ("系統/info" if (panel_hi_val is not None or panel_me_val is not None or panel_lo_val is not None) else "無"))
             ai_analyst_count = ai_fin.get('target_price_analyst_count') if has_ai_fin_fetch else None
             ai_target_rationale = str(ai_fin.get('target_price_rationale') or ai_fin.get('ai_latest_target_price_rationale') or "").strip() if has_ai_fin_fetch else ""
 
@@ -874,7 +886,7 @@ def render_main_page(sidebar_state=None):
             eps_source_text = f"海外系統或反推 ({eff_f_eps:.2f}元)" if eff_f_eps is not None else "系統預估 (無資料)"
             
             # 使用新的排版函數呼叫
-            f_eps_display = build_cmp_dual_str(t_eps, sys_f_eps_calc, ai_t_eps, ai_f_eps_calc, 'num', 'num', 'AI推估', show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            f_eps_display = build_cmp_dual_str(t_eps, sys_f_eps_calc, ai_t_eps, ai_f_eps_calc, 'num', 'num', 'AI推估', show_ai_missing=has_ai_fin_fetch, period=ai_period_val if (ai_t_eps is not None or ai_f_eps_calc is not None) else '')
     
             sys_forward_pe = s_float(info.get('forwardPE'))
             if sys_forward_pe is None and eff_f_eps is not None and eff_f_eps > 0: sys_forward_pe = curr_p / eff_f_eps
@@ -1131,13 +1143,13 @@ def render_main_page(sidebar_state=None):
             orig_fpe_str = f"{sys_forward_pe:.1f}x" if sys_forward_pe is not None else "N/A"
             fpe_str = f"{orig_fpe_str}<br><span style='color:#FFD700; font-size:0.85rem;'>(AI推估: {ai_fpe:.1f}x{time_str})</span>" if ai_fpe is not None else orig_fpe_str
         
-            pe_str = build_cmp_str(pe_ratio, ai_pe, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            pe_str = build_cmp_str(pe_ratio, ai_pe, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val if ai_pe is not None else '')
             # ✅ 顯示字串只吃 validate_and_correct_financial_metrics() 校正後的 display_* 變數。
-            rg_str = build_cmp_str(display_rev_growth, display_ai_yoy, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
-            gm_om_str = build_cmp_dual_str(display_gross_margin, display_operating_margin, display_ai_gross_margin, display_ai_operating_margin, 'pct', 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
-            roe_str = build_cmp_str(roe, ai_roe, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
-            de_str = build_cmp_str(display_debt_to_equity, display_ai_debt_to_equity, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
-            pb_str = build_cmp_str(pb_ratio, ai_pb, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val)
+            rg_str = build_cmp_str(display_rev_growth, display_ai_yoy, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val if display_ai_yoy is not None else '')
+            gm_om_str = build_cmp_dual_str(display_gross_margin, display_operating_margin, display_ai_gross_margin, display_ai_operating_margin, 'pct', 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val if (display_ai_gross_margin is not None or display_ai_operating_margin is not None) else '')
+            roe_str = build_cmp_str(roe, ai_roe, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val if ai_roe is not None else '')
+            de_str = build_cmp_str(display_debt_to_equity, display_ai_debt_to_equity, 'pct', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val if display_ai_debt_to_equity is not None else '')
+            pb_str = build_cmp_str(pb_ratio, ai_pb, 'x', ai_label, show_ai_missing=has_ai_fin_fetch, period=ai_period_val if ai_pb is not None else '')
         
             rg_color = "#ff4d4d" if eff_rg and eff_rg > 0 else ("#00cc66" if eff_rg and eff_rg < 0 else "#fff")
             roe_eval = " <span style='color:#00cc66; font-size:0.8rem; margin-left:5px;' title='大於15%視為資金運用效率極佳 (已透過恆等式校正)'>⭐ 優質</span>" if eff_roe is not None and eff_roe >= 0.15 else ""
@@ -1651,14 +1663,14 @@ def render_main_page(sidebar_state=None):
             # ✅ hotfix：建立「法人目標價面板快照」，後面的打包提示詞只讀這個快照，
             # 避免提示詞重新抓其他來源造成與面板顯示不同步。
             target_panel_for_prompt = {
-                "high": ai_hi_val,
-                "mean": ai_me_val,
-                "low": ai_lo_val,
+                "high": panel_hi_val,
+                "mean": panel_me_val,
+                "low": panel_lo_val,
                 "analyst_count": ai_analyst_count,
                 "latest_target_price": ai_latest_target_price,
                 "latest_target_source_detail": ai_latest_target_source_detail,
                 "confidence": locals().get("target_confidence", classify_target_price_confidence(ai_analyst_count)),
-                "source": "法人目標價面板顯示值：AI/法人聯網 target_price_high-target_price_avg-target_price_low" if (ai_hi_val is not None and ai_me_val is not None and ai_lo_val is not None) else ("法人目標價面板顯示值：AI/法人聯網 target_price_avg" if ai_me_val is not None else "無完整法人目標價區間"),
+                "source": f"法人目標價面板顯示值：{target_price_source_label} target_price_high-target_price_avg-target_price_low" if (panel_hi_val is not None and panel_me_val is not None and panel_lo_val is not None) else (f"法人目標價面板顯示值：{target_price_source_label} target_price_avg" if panel_me_val is not None else "無完整法人目標價區間"),
                 "rationale": ai_target_rationale,
             }
 
@@ -1669,20 +1681,20 @@ def render_main_page(sidebar_state=None):
             st.markdown(f"#### 🎯 法人預估目標價 (分析師統計：{analyst_count_display} 位｜可信度：<span style='color:{conf_color};'>{conf_label}</span>)", unsafe_allow_html=True)
             st.caption(target_confidence.get("message", "分析師樣本數不足時，不宜視為強共識。"))
         
-            if ai_hi_val is not None and ai_me_val is not None and ai_lo_val is not None:
+            if panel_hi_val is not None and panel_me_val is not None and panel_lo_val is not None:
                 v1, v2, v3 = st.columns(3)
-                v1.markdown(f"<div style='background:#ffebee;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>最高價</small><br><b>{ai_hi_val:.1f}</b></div>", unsafe_allow_html=True)
-                upside = ((ai_me_val / curr_p) - 1) * 100 if curr_p else 0
-                v2.markdown(f"<div style='background:#fff3e0;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>平均價</small><br><b>{ai_me_val:.1f}</b><br><small>空間: {upside:+.1f}%</small></div>", unsafe_allow_html=True)
-                v3.markdown(f"<div style='background:#e8f5e9;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>最低價</small><br><b>{ai_lo_val:.1f}</b></div>", unsafe_allow_html=True)
+                v1.markdown(f"<div style='background:#ffebee;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>最高價</small><br><b>{panel_hi_val:.1f}</b></div>", unsafe_allow_html=True)
+                upside = ((panel_me_val / curr_p) - 1) * 100 if curr_p else 0
+                v2.markdown(f"<div style='background:#fff3e0;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>平均價</small><br><b>{panel_me_val:.1f}</b><br><small>空間: {upside:+.1f}%</small></div>", unsafe_allow_html=True)
+                v3.markdown(f"<div style='background:#e8f5e9;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>最低價</small><br><b>{panel_lo_val:.1f}</b></div>", unsafe_allow_html=True)
                 if ai_latest_target_price is not None:
                     st.caption(f"🆕 AI 最新目標價補充：{ai_latest_target_price:.1f}｜來源/日期：{ai_latest_target_source_detail or '未揭露'}｜限制：最新捕捉值，不一定等於法人平均。")
                 if ai_target_rationale:
                     st.caption(f"📌 法人/最新目標價核心理由：{ai_target_rationale}")
                 st.markdown("---")
-            elif ai_me_val is not None:
-                 upside_ai = ((ai_me_val / curr_p) - 1) * 100 if curr_p else 0
-                 st.markdown(f"<div style='background:#fff3e0;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>法人平均目標價 ({ai_label} {ai_period_val})</small><br><b>{ai_me_val:.1f}</b><br><small>潛在空間: {upside_ai:+.1f}%</small></div>", unsafe_allow_html=True)
+            elif panel_me_val is not None:
+                 upside_ai = ((panel_me_val / curr_p) - 1) * 100 if curr_p else 0
+                 st.markdown(f"<div style='background:#fff3e0;padding:12px;border-radius:8px;text-align:center;color:#000;'><small>法人平均目標價 ({target_price_source_label})</small><br><b>{panel_me_val:.1f}</b><br><small>潛在空間: {upside_ai:+.1f}%</small></div>", unsafe_allow_html=True)
                  if ai_latest_target_price is not None:
                     st.caption(f"🆕 AI 最新目標價補充：{ai_latest_target_price:.1f}｜來源/日期：{ai_latest_target_source_detail or '未揭露'}｜限制：最新捕捉值，不一定等於法人平均。")
                  if ai_target_rationale:
