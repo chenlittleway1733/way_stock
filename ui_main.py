@@ -27,7 +27,7 @@ def render_main_page(sidebar_state=None):
     # ==========================================
     # 5. 主畫面開始
     # ==========================================
-    st.markdown("## 📈 WAY AI 投資戰情室 版本2.1")
+    st.markdown("## 📈 WAY AI 投資戰情室 版本2.2")
 
     if st.session_state.fugle_key and not f_ok:
         st.error("🚨 **系統警報**：您輸入的「富果 (Fugle) API Key」驗證失敗！請至左側欄檢查金鑰是否輸入正確。")
@@ -82,7 +82,34 @@ def render_main_page(sidebar_state=None):
             with cols[idx]: st.button(f"{name}\n({code})", on_click=reset_all_states_on_stock_change, args=(code,), key=f"w_{code}", use_container_width=True)
         st.markdown("---")
 
-    curr_id = st.session_state.selected_stock
+    curr_id = str(st.session_state.get("selected_stock", "") or "").strip()
+
+    # 2.2-hotfix：首次進入系統、尚未選股時，主畫面顯示明確操作提示，
+    # 避免右側畫面只有標題與大片空白，尤其在 iPad / 平板檢視時容易誤以為系統未載入。
+    if not curr_id:
+        st.markdown(
+            """
+            <div style="
+                margin-top: 2.5rem;
+                padding: 1.4rem 1.6rem;
+                border: 1px solid rgba(0,0,0,0.10);
+                border-radius: 14px;
+                background: rgba(127,127,127,0.07);
+                max-width: 820px;
+            ">
+                <div style="font-size:1.35rem; font-weight:800; margin-bottom:0.55rem;">
+                    🔎 請先輸入股票代號或使用左側下拉選股查詢
+                </div>
+                <div style="font-size:1.02rem; line-height:1.8; color:rgba(120,120,120,0.95);">
+                    可在左側「輸入台股代號」欄位輸入，例如 <b>2330</b>、<b>3037</b>、<b>2454</b>，
+                    輸入後請按 <b style="color:#ff8c00;">Enter</b> 確認送出；也可以從「快速選股名單」下拉選擇股票。
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+
     if curr_id:
         # 🚀 絕對防呆宣告：避免因任何例外導致變數未定義而觸發 NameError
         ctx_pe, ctx_fpe, ctx_pb, ctx_peg = "N/A", "N/A", "N/A", "N/A"
