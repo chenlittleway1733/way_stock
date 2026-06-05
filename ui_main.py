@@ -1148,9 +1148,16 @@ def render_main_page(sidebar_state=None):
             if is_base_normalized: eg_str_disp += "<br><span style='color:#FFD700; font-size:0.75rem; font-weight:normal;'>⚠️ 啟動低基期防護(分母=0.5)</span>"
             eg_color = "#ff4d4d" if real_cg and real_cg > 0 else ("#00cc66" if real_cg and real_cg < 0 else "#fff")
         
-            # 2. 前瞻 PEG
-            orig_peg_str = f"{orig_peg:.2f}" if orig_peg is not None else ("分母為負" if real_cg is not None and real_cg <= 0 else "N/A")
-            peg_str_disp = f"{orig_peg_str}<br><span style='color:#FFD700; font-size:0.85rem;'>(AI推估: {ai_peg:.2f}{time_str})</span>" if ai_peg is not None else orig_peg_str
+            # 2. 前瞻 PEG：主值顯示採用值；若系統 PEG 缺值但 AI/FY1 可推估，避免主欄 NULL、資料品質卻顯示可用。
+            if eff_peg == -999:
+                peg_str_disp = "分母為負"
+            elif orig_peg is not None:
+                orig_peg_str = f"{orig_peg:.2f}"
+                peg_str_disp = f"{orig_peg_str}<br><span style='color:#FFD700; font-size:0.85rem;'>(AI推估: {ai_peg:.2f}{time_str})</span>" if ai_peg is not None else orig_peg_str
+            elif ai_peg is not None:
+                peg_str_disp = f"{ai_peg:.2f}<br><span style='color:#FFD700; font-size:0.85rem;'>(採用 AI/FY1 EPS 反推{time_str})</span>"
+            else:
+                peg_str_disp = "N/A"
         
             # 3. 前瞻 P/E：主值顯示採用值；若系統 Forward P/E 缺值但 AI/FY1 可反推，避免主欄 N/A、資料品質卻顯示可用。
             if sys_forward_pe is not None:
@@ -2011,6 +2018,8 @@ def render_main_page(sidebar_state=None):
                         return "NULL"
                     keywords = ["eps", "forward", "gross", "margin", "roe", "debt", "d/e", "revenue", "yoy", "target", "price", "毛利", "營益", "目標", "負債", "營收", "分歧", "校正", "採用"]
                     legacy_field_codes = {"trailing_eps", "forward_eps", "yoy", "mom", "revenue_yoy", "revenue_mom", "rev_growth", "monthly_revenue_yoy", "monthly_revenue_mom", "gross_margin", "operating_margin", "roe", "dividend_yield"}
+                    # 2.2：年份欄位不是財務採用值，不放入買進決策版來源摘要；FY 年份已在 EPS 分層區顯示。
+                    meta_year_codes = {"forward_eps_fy1_year", "forward_eps_fy2_year", "forward_eps_fy3_year"}
                     keep = []
                     for _, row in df.iterrows():
                         code = _nullize_text(row.get("欄位代碼", "")).strip()
@@ -2018,8 +2027,13 @@ def render_main_page(sidebar_state=None):
                         name = _nullize_text(row.get("欄位名稱", ""))
                         row_text = " ".join([_nullize_text(row.get(c, "")) for c in df.columns])
                         row_text_l = row_text.lower()
-                        # 2.2：legacy 欄位只留 debug，不進買進決策/研究提示詞主資料，避免外部 AI 誤用。
-                        if code_norm in legacy_field_codes or "legacy" in name.lower() or "legacy" in row_text_l:
+                        # 2.2：legacy / 純年份中繼欄位只留 debug，不進買進決策/研究提示詞主資料，避免外部 AI 誤用。
+                        if code_norm in legacy_field_codes or code_norm in meta_year_codes or "legacy" in name.lower() or "legacy" in row_text_l:
+                            continue
+                        # 空值且無可查證來源的欄位不輸出，例如 forward_eps_system 無值時不再放進摘要。
+                        ai_val_text = _nullize_text(row.get("AI值", ""))
+                        src_text = _nullize_text(row.get("來源", ""))
+                        if ai_val_text == "NULL" and src_text in {"NULL", "—", "-", "無"}:
                             continue
                         if any(k.lower() in row_text.lower() for k in keywords):
                             parts = []
@@ -2239,8 +2253,14 @@ def render_main_page(sidebar_state=None):
                         lines.append("- EPS 採用摘要: " + "；".join(eps_parts))
                     if any(_fmt_num(v, 2) != "NULL" for v in [fy1_eps, fy2_eps, fy3_eps]):
                         lines.append(f"- FY1 / FY2 / FY3 EPS: {_fmt_num(fy1_eps, 2)} / {_fmt_num(fy2_eps, 2)} / {_fmt_num(fy3_eps, 2)}")
+                    def _fmt_year_clean(v):
+                        x = s_float(v)
+                        if x is not None and 1900 <= x <= 2200:
+                            return str(int(round(x)))
+                        t = _nullize_text(v)
+                        return re.sub(r"(\d{4})\.0", r"\1", t)
                     if any(_nullize_text(v) != "NULL" for v in [fy1_year, fy2_year, fy3_year]):
-                        lines.append(f"- FY 年度: {_nullize_text(fy1_year)} / {_nullize_text(fy2_year)} / {_nullize_text(fy3_year)}")
+                        lines.append(f"- FY 年度: {_fmt_year_clean(fy1_year)} / {_fmt_year_clean(fy2_year)} / {_fmt_year_clean(fy3_year)}")
                     if _nullize_text(fy_note) != "NULL":
                         lines.append(f"- EPS 來源說明: {_nullize_text(fy_note)}")
                     if notes != "無":
@@ -2309,6 +2329,11 @@ def render_main_page(sidebar_state=None):
                         if t != "NULL":
                             return re.sub(r"(\d{4})\.0", r"\1", t)
                         return _fmt_year(s.get(year_key))
+                    _eps_basis = _nullize_text(s.get('eps_basis'))
+                    if _eps_basis in {"NULL", "未標示"}:
+                        _src_note_for_basis = _nullize_text(s.get('eps_source_note'))
+                        if any(k in _src_note_for_basis for k in ["法人", "FactSet", "共識", "外資", "券商"]):
+                            _eps_basis = "法人共識/券商年度預估"
                     lines = [
                         f"- FY 定義: {_nullize_text(s.get('fy_definition'))}",
                         f"- TTM EPS: {_fmt_num(s.get('ttm_eps'))}｜近四季已實現 EPS，用於目前實際獲利估值",
@@ -2316,7 +2341,7 @@ def render_main_page(sidebar_state=None):
                         f"- FY2 EPS: {_fmt_num(s.get('fy2_eps'))}｜{_fmt_label(s.get('fy2_label'), 'fy2_year')}",
                         f"- FY3 EPS: {_fmt_num(s.get('fy3_eps'))}｜{_fmt_label(s.get('fy3_label'), 'fy3_year')}",
                         f"- EPS 年份/期間: 近四季 / {_fmt_year(s.get('fy1_year'))} / {_fmt_year(s.get('fy2_year'))} / {_fmt_year(s.get('fy3_year'))}",
-                        f"- EPS 年期基準: {_nullize_text(s.get('eps_basis'))}",
+                        f"- EPS 年期基準: {_eps_basis}",
                         f"- EPS 來源備註: {_nullize_text(s.get('eps_source_note'))}",
                         f"- 現價隱含 P/E（TTM/FY1/FY2/FY3）: {_fmt_num(s.get('market_pe_ttm'))}x / {_fmt_num(s.get('market_pe_fy1'))}x / {_fmt_num(s.get('market_pe_fy2'))}x / {_fmt_num(s.get('market_pe_fy3'))}x",
                         f"- 市場 EPS 年期判讀: {_nullize_text(s.get('market_view'))}",
