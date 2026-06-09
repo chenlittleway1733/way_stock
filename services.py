@@ -1772,6 +1772,217 @@ def get_inst_data(stock_id, fm_key=""):
         log_data_health("FinMind", False, f"ERR:{str(e)[:120]}")
     return pd.DataFrame()
 
+
+def _safe_ratio(numerator, denominator):
+    numerator = s_float(numerator)
+    denominator = s_float(denominator)
+    if numerator is None or denominator is None or denominator <= 0:
+        return None
+    return numerator / denominator
+
+
+def _margin_period_change(df, balance_col, trading_days):
+    if df is None or df.empty or balance_col not in df.columns:
+        return None, None
+    if len(df) < trading_days + 1:
+        return None, None
+    latest = s_float(df[balance_col].iloc[-1])
+    if latest is None:
+        return None, None
+    idx = max(0, len(df) - 1 - trading_days)
+    base = s_float(df[balance_col].iloc[idx])
+    if base is None:
+        return None, None
+    change = latest - base
+    change_pct = change / base if base > 0 else None
+    return change, change_pct
+
+
+def build_margin_credit_summary(df, shares_outstanding=None):
+    """Build a margin/short-sale risk summary from FinMind credit-trading rows."""
+    try:
+        if df is None or getattr(df, "empty", True):
+            return {"available": False, "message": "未取得融資融券資料"}
+
+        data = df.copy()
+        if "date" in data.columns:
+            data["date"] = pd.to_datetime(data["date"], errors="coerce")
+            data = data.sort_values("date")
+
+        numeric_cols = [
+            "MarginPurchaseBuy",
+            "MarginPurchaseCashRepayment",
+            "MarginPurchaseLimit",
+            "MarginPurchaseSell",
+            "MarginPurchaseTodayBalance",
+            "MarginPurchaseYesterdayBalance",
+            "OffsetLoanAndShort",
+            "ShortSaleBuy",
+            "ShortSaleCashRepayment",
+            "ShortSaleLimit",
+            "ShortSaleSell",
+            "ShortSaleTodayBalance",
+            "ShortSaleYesterdayBalance",
+        ]
+        for col in numeric_cols:
+            if col in data.columns:
+                data[col] = pd.to_numeric(data[col], errors="coerce")
+
+        latest = data.iloc[-1]
+        margin_balance = s_float(latest.get("MarginPurchaseTodayBalance"))
+        margin_yesterday = s_float(latest.get("MarginPurchaseYesterdayBalance"))
+        margin_limit = s_float(latest.get("MarginPurchaseLimit"))
+        short_balance = s_float(latest.get("ShortSaleTodayBalance"))
+        short_limit = s_float(latest.get("ShortSaleLimit"))
+        margin_buy = s_float(latest.get("MarginPurchaseBuy"))
+        margin_sell = s_float(latest.get("MarginPurchaseSell"))
+        margin_repay = s_float(latest.get("MarginPurchaseCashRepayment"))
+        short_sell = s_float(latest.get("ShortSaleSell"))
+        short_buy = s_float(latest.get("ShortSaleBuy"))
+        offset_loan_short = s_float(latest.get("OffsetLoanAndShort"))
+
+        if margin_yesterday is not None and margin_balance is not None:
+            margin_change_1d = margin_balance - margin_yesterday
+        else:
+            margin_change_1d, _ = _margin_period_change(data.tail(2), "MarginPurchaseTodayBalance", 1)
+
+        margin_change_5d, margin_change_5d_pct = _margin_period_change(data, "MarginPurchaseTodayBalance", 5)
+        margin_change_20d, margin_change_20d_pct = _margin_period_change(data, "MarginPurchaseTodayBalance", 20)
+
+        shares_lots = None
+        shares = s_float(shares_outstanding)
+        if shares is not None and shares > 0:
+            shares_lots = shares / 1000.0
+
+        margin_usage_ratio = _safe_ratio(margin_balance, margin_limit)
+        margin_to_shares_ratio = _safe_ratio(margin_balance, shares_lots)
+        short_margin_ratio = _safe_ratio(short_balance, margin_balance)
+        short_usage_ratio = _safe_ratio(short_balance, short_limit)
+
+        risk_score = 0
+        if margin_usage_ratio is not None:
+            if margin_usage_ratio >= 0.80:
+                risk_score += 3
+            elif margin_usage_ratio >= 0.60:
+                risk_score += 2
+            elif margin_usage_ratio >= 0.40:
+                risk_score += 1
+        if margin_to_shares_ratio is not None:
+            if margin_to_shares_ratio >= 0.10:
+                risk_score += 3
+            elif margin_to_shares_ratio >= 0.05:
+                risk_score += 2
+            elif margin_to_shares_ratio >= 0.03:
+                risk_score += 1
+        if margin_change_5d_pct is not None:
+            if margin_change_5d_pct >= 0.30:
+                risk_score += 2
+            elif margin_change_5d_pct >= 0.15:
+                risk_score += 1
+            elif margin_change_5d_pct <= -0.15:
+                risk_score -= 1
+        if margin_change_20d_pct is not None:
+            if margin_change_20d_pct >= 0.50:
+                risk_score += 1
+            elif margin_change_20d_pct <= -0.25:
+                risk_score -= 1
+
+        if margin_balance is None:
+            risk_label, risk_color, risk_note = "資料不足", "gray", "融資餘額缺值，無法判讀信用風險。"
+        elif risk_score >= 5:
+            risk_label, risk_color, risk_note = "過熱", "#ff4d4d", "融資水位或增速偏高，籌碼槓桿壓力大，追價需保守。"
+        elif risk_score >= 3:
+            risk_label, risk_color, risk_note = "偏熱", "#ff8c00", "融資籌碼已有升溫跡象，需搭配法人與成交量確認。"
+        elif risk_score >= 1:
+            risk_label, risk_color, risk_note = "正常", "#FFD700", "融資水位尚在可觀察區間，仍需追蹤是否連續增加。"
+        else:
+            risk_label, risk_color, risk_note = "低", "#00cc66", "融資籌碼壓力低或正在降溫，短線槓桿風險相對較小。"
+
+        def fmt_lots(value):
+            value = s_float(value)
+            return "NULL" if value is None else f"{value:,.0f} 張"
+
+        def fmt_pct(value):
+            value = s_float(value)
+            return "NULL" if value is None else f"{value:.2%}"
+
+        report = pd.DataFrame([
+            {"項目": "最新日期", "數值": str(latest.get("date", ""))[:10], "判讀": "FinMind 個股融資融券資料"},
+            {"項目": "融資餘額", "數值": fmt_lots(margin_balance), "判讀": f"較昨日 {fmt_lots(margin_change_1d)}"},
+            {"項目": "融資使用率", "數值": fmt_pct(margin_usage_ratio), "判讀": "融資今日餘額 / 融資限額"},
+            {"項目": "融資占股本", "數值": fmt_pct(margin_to_shares_ratio), "判讀": "融資今日餘額 / 發行股數張數"},
+            {"項目": "5日融資變化", "數值": fmt_lots(margin_change_5d), "判讀": fmt_pct(margin_change_5d_pct)},
+            {"項目": "20日融資變化", "數值": fmt_lots(margin_change_20d), "判讀": fmt_pct(margin_change_20d_pct)},
+            {"項目": "融券餘額", "數值": fmt_lots(short_balance), "判讀": f"券資比 {fmt_pct(short_margin_ratio)}"},
+            {"項目": "信用風險", "數值": risk_label, "判讀": risk_note},
+        ])
+
+        return {
+            "available": True,
+            "source": "FinMind TaiwanStockMarginPurchaseShortSale",
+            "latest_date": str(latest.get("date", ""))[:10],
+            "margin_balance": margin_balance,
+            "margin_yesterday_balance": margin_yesterday,
+            "margin_change_1d": margin_change_1d,
+            "margin_change_5d": margin_change_5d,
+            "margin_change_5d_pct": margin_change_5d_pct,
+            "margin_change_20d": margin_change_20d,
+            "margin_change_20d_pct": margin_change_20d_pct,
+            "margin_limit": margin_limit,
+            "margin_usage_ratio": margin_usage_ratio,
+            "margin_to_shares_ratio": margin_to_shares_ratio,
+            "margin_buy": margin_buy,
+            "margin_sell": margin_sell,
+            "margin_repay": margin_repay,
+            "short_balance": short_balance,
+            "short_limit": short_limit,
+            "short_margin_ratio": short_margin_ratio,
+            "short_usage_ratio": short_usage_ratio,
+            "short_sell": short_sell,
+            "short_buy": short_buy,
+            "offset_loan_short": offset_loan_short,
+            "shares_lots": shares_lots,
+            "risk_score": risk_score,
+            "risk_label": risk_label,
+            "risk_color": risk_color,
+            "risk_note": risk_note,
+            "report": report,
+        }
+    except Exception as e:
+        log_exception("FinMind", "build_margin_credit_summary", e)
+        return {"available": False, "message": f"融資融券資料整理失敗：{str(e)[:80]}"}
+
+
+@st.cache_data(ttl=43200)
+def get_margin_credit_data(stock_id, fm_key=""):
+    """Fetch individual margin purchase / short sale balance from FinMind."""
+    try:
+        today = datetime.date.today()
+        start_str = (today - datetime.timedelta(days=180)).strftime("%Y-%m-%d")
+        url = (
+            "https://api.finmindtrade.com/api/v4/data"
+            f"?dataset=TaiwanStockMarginPurchaseShortSale&data_id={stock_id}&start_date={start_str}"
+        )
+        if fm_key:
+            url += f"&token={fm_key}"
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        log_data_health("FinMind", res.status_code == 200, res.status_code)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("status") == 200 and data.get("data"):
+                df = pd.DataFrame(data["data"])
+                if df.empty:
+                    return pd.DataFrame()
+                if "date" in df.columns:
+                    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+                    df = df.sort_values("date")
+                return df
+    except Exception as e:
+        log_exception("FinMind", f"get_margin_credit_data:{stock_id}", e)
+        log_data_health("FinMind", False, f"ERR:{str(e)[:120]}")
+    return pd.DataFrame()
+
+
 @st.cache_data(ttl=60)
 def validate_api_keys(f_key, m_key):
     f_res, m_res = None, None
