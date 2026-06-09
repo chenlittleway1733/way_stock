@@ -131,9 +131,18 @@ def build_multiple_context(
         formula_pe_cap = min(formula_pe_cap, soft_pe_cap)
     extreme_pe_cap_for_calc = soft_pe_cap if soft_pe_cap is not None else operable_pe_cap
 
-    sys_target_price_est = eff_f_eps * formula_pe_cap if eff_f_eps is not None and eff_f_eps > 0 and formula_pe_cap is not None else None
+    forward_eps_period_mismatch = detect_forward_eps_period_mismatch(
+        system_forward_eps=eff_f_eps,
+        fy1_eps=ai_forward_eps_fy1,
+        fy2_eps=ai_forward_eps_fy2,
+    )
+    formula_eps_for_calc = forward_eps_period_mismatch.get("recommended_eps")
+    formula_eps_source = forward_eps_period_mismatch.get("recommended_eps_source")
+    sys_target_price_raw = valuation_price(eff_f_eps, formula_pe_cap)
+    sys_target_price_est = valuation_price(formula_eps_for_calc, formula_pe_cap)
     is_capped = False
-    extreme_target_price = eff_f_eps * extreme_pe_cap_for_calc if eff_f_eps is not None and eff_f_eps > 0 and extreme_pe_cap_for_calc is not None else None
+    extreme_target_price_raw = valuation_price(eff_f_eps, extreme_pe_cap_for_calc)
+    extreme_target_price = valuation_price(formula_eps_for_calc, extreme_pe_cap_for_calc)
     current_eps_valuation = build_current_eps_valuation(
         ai_latest_quarter_eps=ai_latest_quarter_eps,
         sys_latest_quarter_eps=sys_latest_quarter_eps,
@@ -189,6 +198,10 @@ def build_multiple_context(
         "hard_pe_cap_for_calc": hard_pe_cap_for_calc,
         "extreme_pe_cap_for_calc": extreme_pe_cap_for_calc,
         "sys_target_price_est": sys_target_price_est,
+        "sys_target_price_raw": sys_target_price_raw,
+        "formula_eps_for_calc": formula_eps_for_calc,
+        "formula_eps_source": formula_eps_source,
+        "forward_eps_period_mismatch": forward_eps_period_mismatch,
         "current_eps_raw": current_eps_valuation["current_eps_raw"],
         "current_eps_for_valuation": current_eps_valuation["current_eps_for_valuation"],
         "current_eps_source": current_eps_valuation["current_eps_source"],
@@ -197,6 +210,7 @@ def build_multiple_context(
         "current_target_price_est": current_eps_valuation["current_target_price_est"],
         "is_capped": is_capped,
         "extreme_target_price": extreme_target_price,
+        "extreme_target_price_raw": extreme_target_price_raw,
         "manual_cap_user_adjusted": manual_cap_user_adjusted,
         "manual_cap_input": manual_cap_input,
         "manual_cap_source_text": manual_cap_source_text,

@@ -136,7 +136,7 @@ def render_eps_breakdown_panel(eps_report_df):
 
 def render_financial_quality_report_panel(dq_report_df):
     with st.expander("🩺 統一資料品質報告（系統 / AI / 採用值）", expanded=False):
-        st.caption("此表用來檢查每個估值欄位的來源、採用值、期間、AI來源網址與品質狀態。估值模型仍採系統值優先、AI 作為補齊與交叉校對。")
+        st.caption("此表用來檢查每個估值欄位的來源、採用值、來源優先序、期間、AI來源網址與品質狀態。估值模型依欄位優先表取捨，AI 作為補齊與交叉校對。")
         st.dataframe(dq_report_df, use_container_width=True, hide_index=True)
 
 
@@ -268,7 +268,7 @@ def render_final_signal_panel(final_signal):
             f"</div></div>",
             unsafe_allow_html=True,
         )
-        st.caption("燈號會綜合資料分歧、可操作估值區間、法人樣本數、產業估值模型與基本面防呆；資料異常時優先停用買賣判斷。")
+        st.caption("燈號會綜合資料分歧、可操作估值區間、法人樣本數、產業估值模型與基本面防呆；只有資料異常-不可判斷才停用買賣判斷，資料分歧則採降權與小量限制。")
         st.dataframe(final_signal.get("report"), use_container_width=True, hide_index=True)
 
 

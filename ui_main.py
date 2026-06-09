@@ -43,6 +43,7 @@ from ui_context.prompt_context import (
     prompt_defense_panel_summary,
     prompt_etf_panel_summary,
     prompt_eps_adoption_sync_summary,
+    prompt_field_source_priority_summary,
     prompt_forward_eps_tier_core,
     prompt_chip_panel_summary,
     prompt_model_gap_trigger_conditions,
@@ -382,7 +383,7 @@ def render_main_page(sidebar_state=None):
                 {"field": "最新單季 EPS", "definition": "最新已公告季度 EPS；用來判斷短期獲利動能", "system_value": sys_latest_quarter_eps, "ai_value": ai_latest_quarter_eps, "adopted_value": ai_latest_quarter_eps, "source": "AI補齊" if ai_latest_quarter_eps is not None else "未取得", "period": ai_period_val or raw_ai_period or "需查最新財報", "notes": "系統資料源未穩定提供單季 EPS，避免用 TTM 代替。"},
                 {"field": "TTM EPS", "definition": "近四季 EPS 合計；用於歷史 P/E", "system_value": sys_ttm_eps, "ai_value": ai_ttm_eps, "adopted_value": sys_ttm_eps if sys_ttm_eps is not None else ai_ttm_eps, "source": "系統優先" if sys_ttm_eps is not None else ("AI補齊" if ai_ttm_eps is not None else "未取得"), "period": "yfinance trailingEps / 現價÷P/E 反推" if sys_ttm_eps is not None else (raw_ai_period or "AI未揭露"), "notes": "原 trailing_eps 口徑統一視為 TTM EPS。"},
                 {"field": "完整年度 EPS", "definition": "最近完整會計年度 EPS；用來看年度基準", "system_value": sys_fiscal_year_eps, "ai_value": ai_fiscal_year_eps, "adopted_value": ai_fiscal_year_eps, "source": "AI補齊" if ai_fiscal_year_eps is not None else "未取得", "period": raw_ai_period or "需查年報", "notes": "不得用 TTM EPS 直接冒充完整年度 EPS。"},
-                {"field": "Forward EPS－系統", "definition": "yfinance forwardEps；缺值時由 TTM EPS × 成長率推估", "system_value": sys_forward_eps_system, "ai_value": None, "adopted_value": sys_forward_eps_system, "source": "系統/反推" if sys_forward_eps_system is not None else "未取得", "period": "forwardEps 或 earningsGrowth 推估", "notes": "用於系統 Forward P/E 與公式估值。"},
+                {"field": "Forward EPS－系統", "definition": "yfinance forwardEps；缺值時由 TTM EPS × 成長率推估", "system_value": sys_forward_eps_system, "ai_value": None, "adopted_value": sys_forward_eps_system, "source": "系統/反推" if sys_forward_eps_system is not None else "未取得", "period": "forwardEps 或 earningsGrowth 推估", "notes": "用於系統 Forward P/E 與公式估值；若後續判定年期錯位，公式合理價會降權採 FY1 EPS。"},
                 {"field": "Forward EPS－AI", "definition": "AI 從新聞/券商報告抓取或推估的 Forward EPS", "system_value": None, "ai_value": ai_forward_eps_ai, "adopted_value": ai_forward_eps_ai, "source": "AI補齊" if ai_forward_eps_ai is not None else "未取得", "period": raw_ai_period or "AI未揭露", "notes": "與法人共識 EPS 分開，避免單一來源誤當共識。"},
                 {"field": "Forward EPS－法人共識", "definition": "多家法人共識 EPS；若無明確樣本則為 NULL", "system_value": None, "ai_value": ai_forward_eps_consensus, "adopted_value": ai_forward_eps_consensus, "source": "AI/法人共識" if ai_forward_eps_consensus is not None else "未取得", "period": raw_ai_period or "AI未揭露", "notes": "後續可操作估值應優先考慮此欄；無共識不可視為強共識。"},
             ]
@@ -611,6 +612,10 @@ def render_main_page(sidebar_state=None):
             hard_pe_cap_for_calc = multiple_context["hard_pe_cap_for_calc"]
             extreme_pe_cap_for_calc = multiple_context["extreme_pe_cap_for_calc"]
             sys_target_price_est = multiple_context["sys_target_price_est"]
+            sys_target_price_raw = multiple_context["sys_target_price_raw"]
+            formula_eps_for_calc = multiple_context["formula_eps_for_calc"]
+            formula_eps_source = multiple_context["formula_eps_source"]
+            forward_eps_period_mismatch = multiple_context["forward_eps_period_mismatch"]
             current_eps_raw = multiple_context["current_eps_raw"]
             current_eps_for_valuation = multiple_context["current_eps_for_valuation"]
             current_eps_source = multiple_context["current_eps_source"]
@@ -619,6 +624,7 @@ def render_main_page(sidebar_state=None):
             current_target_price_est = multiple_context["current_target_price_est"]
             is_capped = multiple_context["is_capped"]
             extreme_target_price = multiple_context["extreme_target_price"]
+            extreme_target_price_raw = multiple_context["extreme_target_price_raw"]
             manual_cap_user_adjusted = multiple_context["manual_cap_user_adjusted"]
             manual_cap_input = multiple_context["manual_cap_input"]
             manual_cap_source_text = multiple_context["manual_cap_source_text"]
@@ -687,11 +693,22 @@ def render_main_page(sidebar_state=None):
                 stock_id=curr_id,
                 stock_name=c_name,
             )
+            if isinstance(forward_eps_period_mismatch, dict) and forward_eps_period_mismatch.get("has_mismatch"):
+                divergence_warnings.append({
+                    "規則": "Forward EPS 年期錯位",
+                    "嚴重度": "warning",
+                    "警告文字": forward_eps_period_mismatch.get("note", "系統 Forward EPS 疑似不是 FY1 口徑。"),
+                    "系統值": fmt_eps(forward_eps_period_mismatch.get("system_forward_eps")),
+                    "AI值": f"FY1 {fmt_eps(forward_eps_period_mismatch.get('fy1_eps'))} / FY2 {fmt_eps(forward_eps_period_mismatch.get('fy2_eps'))}",
+                    "差距": "FY1差距 " + ("N/A" if forward_eps_period_mismatch.get("fy1_gap") is None else f"{forward_eps_period_mismatch.get('fy1_gap') * 100:.1f}%"),
+                    "建議處理": "公式合理估值已降權採 FY1 EPS；FY2 只用於市場先行定價，不直接作買點。",
+                })
 
             # 2.2 final：分歧警告要回寫到資料品質摘要，避免提示詞出現「有分歧但仍標示系統+AI交叉」。
             try:
                 _div_field_map = {
                     "EPS 分歧": ["Forward EPS－系統", "Forward EPS－AI/共識", "Forward EPS－FY1"],
+                    "Forward EPS 年期錯位": ["Forward EPS－系統", "Forward EPS－FY1", "Forward EPS－FY2"],
                     "YoY 分歧": ["營收 YoY"],
                     "Forward P/E 分歧": ["Forward P/E"],
                     "PEG 分歧": ["PEG"],
@@ -819,6 +836,12 @@ def render_main_page(sidebar_state=None):
                 ai_manual_str = f"<span style='color:#FFD700; font-size:0.95rem;'>(AI推估: {ai_manual_target_price:.1f}元{time_str})</span>" if ai_manual_target_price else ""
                 if manual_cap_hit_hard:
                     cap_warning_html += f"<br><span style='color:#ff4d4d; font-weight:bold;'>手動情境倍率 {manual_cap_input:.1f}x 已超過產業 hard ceiling，情境價以 {hard_pe_cap:.1f}x 截斷。</span>"
+                if isinstance(forward_eps_period_mismatch, dict) and forward_eps_period_mismatch.get("has_mismatch"):
+                    cap_warning_html += (
+                        "<br><span style='color:#FCD34D; font-weight:bold;'>"
+                        "⚠️ Forward EPS 年期錯位疑慮：系統 Forward EPS 更接近 FY2，公式合理估值已降權採 FY1 EPS；FY2 僅作市場先行定價觀察。"
+                        "</span>"
+                    )
                 # 17-C-16：估值顯示口徑重整。
                 # 1) 公式合理估值保留「系統 Forward EPS × formula cap」。
                 # 2) 不再單列 AI估值，避免與 FY1 EPS 重複；AI/法人 EPS 留在 EPS 來源與 FY 年度層。
@@ -832,6 +855,7 @@ def render_main_page(sidebar_state=None):
                 fy3_year_text = _fy_year_display_safe(ai_forward_eps_fy3_year)
 
                 sys_tp_str = _fmt_price(sys_target_price_est)
+                sys_raw_tp_str = _fmt_price(sys_target_price_raw)
                 current_value_str = _fmt_price(current_target_price_est)
                 fy1_range_txt = f"{_fmt_price(fy1_base_target_price)} / {_fmt_price(fy1_soft_target_price)} / {_fmt_price(fy1_hard_target_price)}"
                 fy2_range_txt = f"{_fmt_price(fy2_base_target_price)} / {_fmt_price(fy2_soft_target_price)} / {_fmt_price(fy2_hard_target_price)}"
@@ -842,7 +866,8 @@ def render_main_page(sidebar_state=None):
                     cap_warning_html += "<br><span style='color:#ff4d4d; font-weight:bold;'>現價已高於 FY1 極限情境價，追高風險極大！</span>"
 
                 tp_est_str = (
-                    f"公式合理估值(系統Forward EPS×formula cap): {sys_tp_str}；"
+                    f"公式合理估值({formula_eps_source}×formula cap): {sys_tp_str}；"
+                    f"系統原始公式價(系統Forward EPS×formula cap): {sys_raw_tp_str}；"
                     f"目前估值({current_eps_source}×formula cap): {current_value_str}；"
                     f"FY1年度估值 base/soft/hard(基礎/樂觀/極限): {fy1_range_txt}；"
                     f"FY2第二年度估值 base/soft/hard(基礎/樂觀/極限): {fy2_range_txt}；"
@@ -856,6 +881,9 @@ def render_main_page(sidebar_state=None):
                 debug_eps = eff_f_eps if eff_f_eps else (ai_f_eps_calc if ai_f_eps_calc else 0)
 
                 _valuation_rows_html = ""
+                formula_desc = f"{formula_eps_source} × formula cap，非買賣目標"
+                if isinstance(forward_eps_period_mismatch, dict) and forward_eps_period_mismatch.get("has_mismatch"):
+                    formula_desc += f"｜原始系統公式價 {_fmt_price(sys_target_price_raw)}｜{forward_eps_period_mismatch.get('note', '')}"
 
                 def _single_valuation_row(_title, _desc, _eps, _cap, _price, _color):
                     return (
@@ -883,8 +911,8 @@ def render_main_page(sidebar_state=None):
 
                 _valuation_rows_html += _single_valuation_row(
                     "🎯 1. 公式合理估值",
-                    "系統 Forward EPS × formula cap，非買賣目標",
-                    eff_f_eps,
+                    formula_desc,
+                    formula_eps_for_calc,
                     formula_pe_cap,
                     sys_target_price_est,
                     "#ffffff",
@@ -949,10 +977,10 @@ def render_main_page(sidebar_state=None):
                     {_valuation_rows_html}
                     <div style='background:#111827; color:#E5E7EB; padding:7px 9px; border-radius:6px; margin-top:7px; line-height:1.55;'>
                         <b>使用規則</b><br>
-                        公式合理估值只使用系統 Forward EPS；FY1/FY2/FY3 同時列出 base / soft / hard，分別代表基礎 / 樂觀 / 極限。FY2 只用於市場先行定價判斷；FY3 為高風險遠期情境，不可直接當買點；手動情境若未調整，預設採 FY1 base。
+                        公式合理估值原則上使用系統 Forward EPS；若偵測到系統 Forward EPS 疑似 FY2 年期錯位，公式價會降權採 FY1 EPS。FY1/FY2/FY3 同時列出 base / soft / hard，分別代表基礎 / 樂觀 / 極限。FY2 只用於市場先行定價判斷；FY3 為高風險遠期情境，不可直接當買點；手動情境若未調整，預設採 FY1 base。
                     </div>
                     <div style='background:#2c2c2c; padding:4px 8px; border-radius:4px; margin-top:4px;'>
-                        <small style='color:#00bfff;'>🐛 [底層運算除錯] 系統EPS: {_fmt_eps(eff_f_eps)}｜目前 EPS: {_fmt_eps(current_eps_raw)}（估值採用 {_fmt_eps(current_eps_for_valuation)}；{current_eps_source}）｜AI/法人 EPS: {_fmt_eps(ai_f_eps_calc)}｜FY1 EPS: {_fmt_eps(ai_forward_eps_fy1)}｜FY2 EPS: {_fmt_eps(ai_forward_eps_fy2)}｜FY3 EPS: {_fmt_eps(ai_forward_eps_fy3)}｜EPS 年期/來源: {eps_period_note}｜formula: {_fmt_cap(formula_pe_cap)}｜base/soft/hard: {_fmt_cap(base_pe_cap_for_calc)} / {_fmt_cap(soft_pe_cap_for_calc)} / {_fmt_cap(hard_pe_cap_for_calc)}｜手動倍率: {_fmt_cap(manual_cap_for_calc)} ({manual_cap_source_text})</small>
+                        <small style='color:#00bfff;'>🐛 [底層運算除錯] 系統EPS: {_fmt_eps(eff_f_eps)}｜公式採用 EPS: {_fmt_eps(formula_eps_for_calc)}（{formula_eps_source}）｜目前 EPS: {_fmt_eps(current_eps_raw)}（估值採用 {_fmt_eps(current_eps_for_valuation)}；{current_eps_source}）｜AI/法人 EPS: {_fmt_eps(ai_f_eps_calc)}｜FY1 EPS: {_fmt_eps(ai_forward_eps_fy1)}｜FY2 EPS: {_fmt_eps(ai_forward_eps_fy2)}｜FY3 EPS: {_fmt_eps(ai_forward_eps_fy3)}｜EPS 年期/來源: {eps_period_note}｜formula: {_fmt_cap(formula_pe_cap)}｜base/soft/hard: {_fmt_cap(base_pe_cap_for_calc)} / {_fmt_cap(soft_pe_cap_for_calc)} / {_fmt_cap(hard_pe_cap_for_calc)}｜手動倍率: {_fmt_cap(manual_cap_for_calc)} ({manual_cap_source_text})</small>
                     </div>
                     {implied_html}{cap_warning_html}
                     </div>
@@ -963,6 +991,11 @@ def render_main_page(sidebar_state=None):
             # ==========================================
             # 🧭 法人目標價可信度 + 公式估值 / 可操作估值分離
             # ==========================================
+            if isinstance(dynamic_cap_pack, dict):
+                dynamic_cap_pack["forward_eps_period_mismatch"] = forward_eps_period_mismatch
+                dynamic_cap_pack["formula_eps_for_calc"] = formula_eps_for_calc
+                dynamic_cap_pack["formula_eps_source"] = formula_eps_source
+                dynamic_cap_pack["system_formula_fair_value_raw"] = sys_target_price_raw
             valuation_separation = build_valuation_separation_report(
                 current_price=curr_p,
                 system_formula_fair_value=sys_target_price_est,
@@ -1080,7 +1113,7 @@ def render_main_page(sidebar_state=None):
             )
 
             # ==========================================
-            # 🚦 最終操作燈號：可買 / 觀望 / 不建議 / 資料異常
+            # 🚦 最終操作燈號：可買-小量分批 / 觀望 / 不建議 / 資料分歧-降權判斷 / 資料異常-不可判斷
             # ==========================================
             final_signal = build_final_operation_signal(
                 current_price=curr_p,
@@ -1278,6 +1311,9 @@ def render_main_page(sidebar_state=None):
 
             prompt_peg_values = {
                 "eff_f_eps": locals().get("eff_f_eps"),
+                "formula_eps_for_calc": locals().get("formula_eps_for_calc"),
+                "formula_eps_source": locals().get("formula_eps_source"),
+                "forward_eps_period_mismatch": locals().get("forward_eps_period_mismatch"),
                 "ai_forward_eps_fy1": locals().get("ai_forward_eps_fy1"),
                 "ai_forward_eps_fy2": locals().get("ai_forward_eps_fy2"),
                 "ai_forward_eps_fy3": locals().get("ai_forward_eps_fy3"),
@@ -1292,6 +1328,7 @@ def render_main_page(sidebar_state=None):
                 "manual_cap_for_calc": locals().get("manual_cap_for_calc"),
                 "manual_cap_source_text": locals().get("manual_cap_source_text"),
                 "sys_target_price_est": locals().get("sys_target_price_est"),
+                "sys_target_price_raw": locals().get("sys_target_price_raw"),
                 "current_eps_raw": locals().get("current_eps_raw"),
                 "current_eps_for_valuation": locals().get("current_eps_for_valuation"),
                 "current_eps_source": locals().get("current_eps_source"),
@@ -1310,8 +1347,11 @@ def render_main_page(sidebar_state=None):
             }
 
             def _prompt_peg_valuation_layers():
+                _mismatch_pack = prompt_peg_values.get("forward_eps_period_mismatch")
+                _mismatch_note = _mismatch_pack.get("note") if isinstance(_mismatch_pack, dict) and _mismatch_pack.get("has_mismatch") else None
                 return prompt_peg_valuation_layers(
-                    system_eps=prompt_peg_values.get("eff_f_eps"),
+                    system_eps=prompt_peg_values.get("formula_eps_for_calc"),
+                    system_eps_raw=prompt_peg_values.get("eff_f_eps"),
                     fy1_eps=prompt_peg_values.get("ai_forward_eps_fy1"),
                     fy2_eps=prompt_peg_values.get("ai_forward_eps_fy2"),
                     fy3_eps=prompt_peg_values.get("ai_forward_eps_fy3"),
@@ -1326,6 +1366,9 @@ def render_main_page(sidebar_state=None):
                     manual_cap=prompt_peg_values.get("manual_cap_for_calc"),
                     manual_cap_source=prompt_peg_values.get("manual_cap_source_text"),
                     system_price=prompt_peg_values.get("sys_target_price_est"),
+                    system_raw_price=prompt_peg_values.get("sys_target_price_raw"),
+                    formula_eps_source=prompt_peg_values.get("formula_eps_source"),
+                    forward_eps_mismatch_note=_mismatch_note,
                     current_eps=prompt_peg_values.get("current_eps_for_valuation"),
                     current_eps_raw=prompt_peg_values.get("current_eps_raw"),
                     current_eps_source=prompt_peg_values.get("current_eps_source"),
@@ -1423,6 +1466,10 @@ def render_main_page(sidebar_state=None):
                 ai_forward_eps_fy_source_note_val=locals().get("ai_forward_eps_fy_source_note"),
                 ai_forward_eps_fy_basis_val=locals().get("ai_forward_eps_fy_basis"),
                 formula_pe_cap_val=locals().get("formula_pe_cap"),
+                formula_eps_for_calc_val=locals().get("formula_eps_for_calc"),
+                formula_eps_source_val=locals().get("formula_eps_source"),
+                system_formula_fair_value_raw_val=locals().get("sys_target_price_raw"),
+                forward_eps_period_mismatch_val=locals().get("forward_eps_period_mismatch"),
                 base_pe_cap_val=locals().get("base_pe_cap_for_calc"),
                 soft_pe_cap_val=locals().get("soft_pe_cap_for_calc"),
                 hard_pe_cap_val=locals().get("hard_pe_cap_for_calc"),
@@ -1535,6 +1582,9 @@ def render_main_page(sidebar_state=None):
 【5. 資料品質摘要（只列採用、缺值、異常、校正、關鍵欄位）】
 {_prompt_quality_summary(dq_report_df)}
 
+【5-1. 欄位來源優先表（系統 / AI 衝突時採用規則）】
+{prompt_field_source_priority_summary(max_rows=18)}
+
 【6. 法人目標價與可信度】
 {_prompt_target_price_panel_summary()}
 
@@ -1643,6 +1693,8 @@ def render_main_page(sidebar_state=None):
 {_prompt_warnings(divergence_warnings)}
 - 資料品質摘要:
 {_prompt_quality_summary(dq_report_df)}
+- 欄位來源優先表:
+{prompt_field_source_priority_summary(max_rows=14)}
 
 【6. 法人目標價與可信度】
 {_prompt_target_price_panel_summary()}
@@ -1699,11 +1751,12 @@ def render_main_page(sidebar_state=None):
 3) 若系統 / AI 分歧警告存在，必須先說明分歧對估值可信度與操作可信度的影響，不可直接給樂觀目標價。
 4) EPS 必須分清楚最新單季 EPS、TTM EPS、完整年度 EPS、系統 Forward EPS、AI Forward EPS、法人共識 Forward EPS，不可混用。
 5) 月營收必須以公告月份為準，不可用查詢當月推定最新月營收。
-6) 若關鍵欄位為 NULL，需提出替代判斷法；若資料異常，請明確說「暫不適合做買賣判斷」。
-7) 若產業分類來源為 AI 建議或 keyword_fallback，請先檢查分類是否合理；AI 建議分類屬待確認，不可視為正式 stock_mapping.py 分類。
-8) 請閱讀「產業模型單次快照稽核與更新判斷」，判斷是否需人工檢查產業估值模型；但不可把單次快照直接當成必須更新模型。
-9) 請閱讀「Forward EPS 年期分層估值」，判斷市場/法人是否可能已經用 FY2 或 FY3 EPS 定價；若是，請說明這是先行定價還是過度樂觀。
-10) 研究完整版請額外輸出「模型庫回饋建議」：這不是買賣建議，而是協助日後修正 stock_mapping.py、industry_taxonomy.py、dynamic_cap_model.py 或法人目標價可信度規則；AI 回饋只能作為候選清單，不可直接覆蓋模型庫。
+6) 同一欄位若系統 / AI / 外部來源衝突，需依「欄位來源優先表」決定採用值，不可自行挑樂觀數據。
+7) 若關鍵欄位為 NULL，需提出替代判斷法；若為資料異常-不可判斷，請明確說「暫不適合做買賣判斷」；若為資料分歧-降權判斷，請用保守估值並限制倉位。
+8) 若產業分類來源為 AI 建議或 keyword_fallback，請先檢查分類是否合理；AI 建議分類屬待確認，不可視為正式 stock_mapping.py 分類。
+9) 請閱讀「產業模型單次快照稽核與更新判斷」，判斷是否需人工檢查產業估值模型；但不可把單次快照直接當成必須更新模型。
+10) 請閱讀「Forward EPS 年期分層估值」，判斷市場/法人是否可能已經用 FY2 或 FY3 EPS 定價；若是，請說明這是先行定價還是過度樂觀。
+11) 研究完整版請額外輸出「模型庫回饋建議」：這不是買賣建議，而是協助日後修正 stock_mapping.py、industry_taxonomy.py、dynamic_cap_model.py 或法人目標價可信度規則；AI 回饋只能作為候選清單，不可直接覆蓋模型庫。
 
 任務要求：
 1) 先做「2.2 資料品質盤點」：逐項說明哪些欄位是系統/AI/推估/NULL，並指出最影響結論的 3 個資料風險。
@@ -1712,7 +1765,7 @@ def render_main_page(sidebar_state=None):
 4) 解讀「公式估值 vs 可操作估值」：請分開說明公式合理價、公式極限價、可操作估值區間，不可混成同一個目標價。
 5) 交易決策：
    - 先引用系統最終燈號，再判斷是否同意。
-   - 給「可買 / 觀望 / 不建議 / 資料異常」之一。
+   - 給「可買-小量分批 / 觀望 / 不建議 / 資料分歧-降權判斷 / 觀望-資料待確認 / 資料異常-不可判斷」之一。
    - 買點：給 2~3 個分批區間與理由。
    - 賣點：給 2~3 個減碼 / 停利 / 停損條件。
    - 倉位建議：保守 / 中性 / 積極三種配置比例。
@@ -1746,13 +1799,14 @@ def render_main_page(sidebar_state=None):
 - 買進判斷以可操作估值區間、資料可信度、估值可信度、操作可信度、最終燈號為主。
 - EPS 必須分清楚最新單季 EPS、TTM EPS、完整年度 EPS、系統 Forward EPS、AI Forward EPS、法人共識 Forward EPS。
 - 月營收必須以公告月份為準。
+- 同一欄位若多來源衝突，必須依欄位來源優先表判斷採用值，不可挑選較樂觀來源。
 - 若法人目標價分析師人數為 NULL 或少於 3 人，請降低目標價可信度。
 - 若資料品質不足或關鍵欄位異常，請明確說「暫不適合做買進判斷」。
 - 若同一欄位同時列出系統值與 AI 值，請說明採用哪一個，以及是否影響估值可信度。
 - 若觸發「模型落差風險提示」，請優先判斷落差是否會傷害買進安全邊際；但不要在買進決策版提出模型庫修正建議。
 
 請依序回答：
-1. [投資結論一句話]：可買 / 觀望 / 不建議 / 資料異常，並說明是否同意系統最終燈號。
+1. [投資結論一句話]：可買-小量分批 / 觀望 / 不建議 / 資料分歧-降權判斷 / 觀望-資料待確認 / 資料異常-不可判斷，並說明是否同意系統最終燈號。
 2. [買進前資料檢查]：檢查月營收公告月份、EPS 口徑、Forward EPS、法人目標價可信度、公式估值是否被樂觀 EPS 放大，並列出最影響買進判斷的 3 個資料風險。
 3. [產業與成長邏輯]：說明產業主線、未來 1～2 年成長動能，以及成長失速條件。
 4. [估值判斷]：分開說明公式合理價、公式極限價、可操作估值區間、法人目標價，並判斷現價低估 / 合理 / 偏高 / 高估。不可只用 PEG 判斷便宜。

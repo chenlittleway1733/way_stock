@@ -81,7 +81,17 @@ from ui_context.prompt_context import (
     prompt_technical_suffix,
 )
 from ui_context.multiple_context import build_multiple_context
-from utils import build_forward_eps_tiered_valuation_report, validate_ai_financial_json
+from utils import (
+    build_field_source_priority_report,
+    build_financial_quality_report,
+    build_forward_eps_tiered_valuation_report,
+    build_final_operation_signal,
+    detect_forward_eps_period_mismatch,
+    format_field_source_priority_for_prompt,
+    source_priority_summary_for_field,
+    validate_ai_financial_json,
+    validate_and_correct_financial_metrics,
+)
 
 
 def _parse_stocklist():
@@ -250,6 +260,57 @@ class ModelVersionTableTests(unittest.TestCase):
         self.assertLessEqual(max_dyn_hard, 82.0)
 
 
+class FieldSourcePriorityTests(unittest.TestCase):
+    def test_field_source_priority_report_contains_core_adoption_rules(self):
+        report = build_field_source_priority_report(["營收 YoY", "Forward EPS－FY1", "D/E"])
+
+        self.assertEqual(len(report), 3)
+        revenue = report[report["資料欄位"] == "營收 YoY"].iloc[0]
+        fy1 = report[report["資料欄位"] == "Forward EPS－FY1"].iloc[0]
+        de = report[report["資料欄位"] == "D/E"].iloc[0]
+
+        self.assertIn("FinMind TaiwanStockMonthRevenue", revenue["來源優先序"])
+        self.assertIn("yfinance revenueGrowth 不得覆蓋", revenue["採用規則"])
+        self.assertIn("法人 FY1 年度共識 EPS", fy1["來源優先序"])
+        self.assertIn("FY1 是前瞻 PEG 年度估值", fy1["採用規則"])
+        self.assertIn("標準化成倍數", de["採用規則"])
+        self.assertIn("D/E > 8", de["校驗/降權規則"])
+
+    def test_financial_quality_report_includes_source_priority_column(self):
+        report = build_financial_quality_report([
+            {
+                "field": "營收 YoY",
+                "system_source": "FinMind 月營收優先；yfinance 備援",
+                "system_value": 0.71,
+                "ai_source": "AI補齊",
+                "ai_value": 0.69,
+                "adopted_value": 0.71,
+                "adopted_source": "FinMind/yfinance",
+                "period": "公告月份：2026/05",
+                "fmt": "pct",
+            }
+        ])
+
+        self.assertIn("來源優先序", report.columns)
+        self.assertIn("FinMind TaiwanStockMonthRevenue", report.iloc[0]["來源優先序"])
+        self.assertIn("系統+AI交叉", report.iloc[0]["品質狀態"])
+
+    def test_prompt_source_priority_summary_is_compact_and_includes_critical_fields(self):
+        prompt = format_field_source_priority_for_prompt(["營收 YoY", "Forward EPS－FY2", "D/E"], max_rows=5)
+
+        self.assertIn("欄位=營收 YoY", prompt)
+        self.assertIn("yfinance revenueGrowth", prompt)
+        self.assertIn("欄位=Forward EPS－FY2", prompt)
+        self.assertIn("FY2 只作市場先行定價", prompt)
+        self.assertIn("欄位=D/E", prompt)
+
+    def test_source_priority_summary_handles_aliases(self):
+        summary = source_priority_summary_for_field("forward_eps_fy1")
+
+        self.assertIn("法人 FY1 年度共識 EPS", summary)
+        self.assertIn("FY1 是前瞻 PEG 年度估值", summary)
+
+
 class ValuationLogicTests(unittest.TestCase):
     def test_dynamic_cap_returns_bounded_forward_pe_pack(self):
         profile = dict(industry_taxonomy.get_taxonomy("AI_SERVER_ODM"))
@@ -368,6 +429,98 @@ class ValuationLogicTests(unittest.TestCase):
         self.assertEqual(result["current_target_price_est"], 144.0)
         self.assertEqual(result["current_eps_source"], "TTM EPS")
 
+    def test_forward_eps_period_mismatch_detects_system_eps_closer_to_fy2(self):
+        result = detect_forward_eps_period_mismatch(
+            system_forward_eps=135.21,
+            fy1_eps=93.75,
+            fy2_eps=131.10,
+        )
+
+        self.assertTrue(result["has_mismatch"])
+        self.assertEqual(result["recommended_eps"], 93.75)
+        self.assertIn("更接近 FY2", result["note"])
+
+    def test_formula_valuation_is_downgraded_when_forward_eps_matches_fy2(self):
+        result = build_multiple_context(
+            target_pe_cap=36,
+            suggested_cap=36,
+            dynamic_cap_pack={
+                "formula_cap": 36,
+                "base_multiple": 36,
+                "optimistic_cap": 55,
+                "hard_ceiling_cap": 70,
+            },
+            industry_profile={},
+            eff_f_eps=135.21,
+            has_ai_fin_fetch=True,
+            ai_f_eps_calc=93.75,
+            ai_forward_eps_fy1=93.75,
+            ai_forward_eps_fy2=131.10,
+            ai_forward_eps_fy3=150.0,
+            cap_adopted_forward_eps=93.75,
+        )
+
+        self.assertTrue(result["forward_eps_period_mismatch"]["has_mismatch"])
+        self.assertAlmostEqual(result["sys_target_price_raw"], 4867.56)
+        self.assertAlmostEqual(result["sys_target_price_est"], 3375.0)
+        self.assertEqual(result["formula_eps_for_calc"], 93.75)
+        self.assertIn("FY1 EPS", result["formula_eps_source"])
+
+    def test_final_signal_uses_unjudgeable_grade_only_for_critical_data_breaks(self):
+        result = build_final_operation_signal(
+            current_price=100,
+            valuation_separation={"warning_count": 0, "danger_count": 0},
+            divergence_warnings=[],
+            target_confidence={"rank": 5},
+            industry_profile={"pe_model_suitable": True},
+            forward_pe=18,
+            peg=1.1,
+            gross_margin=0.20,
+            operating_margin=0.35,
+        )
+
+        self.assertEqual(result["signal"], "資料異常-不可判斷")
+        self.assertEqual(result["data_grade_label"], "資料異常-不可判斷")
+        self.assertIn("營益率高於毛利率", "；".join(result["reasons"]))
+
+    def test_final_signal_downgrades_divergent_data_without_hard_stopping(self):
+        result = build_final_operation_signal(
+            current_price=100,
+            valuation_separation={"operable_low": 90, "operable_mid": 105, "operable_high": 120, "warning_count": 1, "danger_count": 1},
+            divergence_warnings=[{"嚴重度": "danger", "規則": "EPS 分歧"}],
+            target_confidence={"rank": 5},
+            industry_profile={"pe_model_suitable": True},
+            forward_pe=24,
+            peg=1.2,
+            roe=0.20,
+            revenue_yoy=0.20,
+            gross_margin=0.30,
+            operating_margin=0.20,
+        )
+
+        self.assertEqual(result["signal"], "資料分歧-降權判斷")
+        self.assertEqual(result["data_grade_label"], "資料分歧-降權判斷")
+        self.assertIn("保守估值", result["advice"])
+
+    def test_final_signal_can_remain_small_batch_buy_with_light_data_warnings(self):
+        result = build_final_operation_signal(
+            current_price=85,
+            valuation_separation={"operable_low": 90, "operable_mid": 105, "operable_high": 120, "warning_count": 1, "danger_count": 0},
+            divergence_warnings=[{"嚴重度": "warning", "規則": "YoY 分歧"}],
+            target_confidence={"rank": 5},
+            industry_profile={"pe_model_suitable": True},
+            forward_pe=16,
+            peg=0.9,
+            roe=0.20,
+            revenue_yoy=0.20,
+            gross_margin=0.30,
+            operating_margin=0.20,
+        )
+
+        self.assertEqual(result["signal"], "可買-小量分批")
+        self.assertEqual(result["data_grade_label"], "觀望-資料待確認")
+        self.assertIn("不可一次買滿", result["advice"])
+
     def test_margin_credit_summary_calculates_ratios_and_risk(self):
         df = pd.DataFrame({
             "date": pd.date_range("2026-05-01", periods=6, freq="B"),
@@ -397,6 +550,24 @@ class ValuationLogicTests(unittest.TestCase):
         self.assertAlmostEqual(summary["short_margin_ratio"], 0.10)
         self.assertEqual(summary["risk_label"], "偏熱")
         self.assertFalse(summary["report"].empty)
+
+    def test_monthly_revenue_yoy_replaces_yfinance_without_warning(self):
+        monthly_rev_df = pd.DataFrame({
+            "Month": ["2026-05"],
+            "YoY": [71.62],
+        })
+
+        corrected_sys, corrected_ai, warnings = validate_and_correct_financial_metrics(
+            {"rev_growth": 1.102, "gross_margin": 0.26, "operating_margin": 0.20, "debt_to_equity": 0.3},
+            {"rev_growth": None},
+            monthly_rev_df=monthly_rev_df,
+            stock_id="3017",
+            stock_name="奇鋐",
+        )
+
+        self.assertAlmostEqual(corrected_sys["rev_growth"], 0.7162)
+        self.assertAlmostEqual(corrected_sys["revenue_yoy"], 0.7162)
+        self.assertEqual(warnings, [])
 
     def test_ai_financial_json_validation_normalizes_and_blocks_bad_values(self):
         payload = {
@@ -512,6 +683,10 @@ class PromptContextTests(unittest.TestCase):
     def test_prompt_peg_layers_include_current_eps_valuation(self):
         summary = prompt_peg_valuation_layers(
             system_eps=5,
+            system_eps_raw=7,
+            system_raw_price=126,
+            formula_eps_source="FY1 EPS（系統 Forward EPS 疑似 FY2，已降權）",
+            forward_eps_mismatch_note="系統 Forward EPS 更接近 FY2",
             current_eps=10,
             current_eps_raw=2.5,
             current_eps_source="最新單季 EPS 年化",
@@ -532,6 +707,8 @@ class PromptContextTests(unittest.TestCase):
         self.assertIn("最新單季 EPS 年化", summary)
         self.assertIn("原始EPS=2.50", summary)
         self.assertIn("目前實際獲利支撐度", summary)
+        self.assertIn("系統原始公式價=126.0元", summary)
+        self.assertIn("系統 Forward EPS 更接近 FY2", summary)
 
     def test_eps_adoption_summary_includes_current_valuation_price(self):
         summary = prompt_eps_adoption_sync_summary(

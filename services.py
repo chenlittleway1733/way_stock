@@ -24,7 +24,13 @@ from google import genai
 from google.genai import types
 
 # 從 utils 引入需要的工具
-from utils import s_float, log_data_health, log_exception, validate_ai_financial_json
+from utils import (
+    format_field_source_priority_for_prompt,
+    s_float,
+    log_data_health,
+    log_exception,
+    validate_ai_financial_json,
+)
 try:
     from industry_taxonomy import INDUSTRY_TAXONOMY
 except Exception:
@@ -815,6 +821,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     current_year = datetime.date.today().year
     target_year = current_year if datetime.date.today().month < 9 else current_year + 1
     valid_taxon_codes_text = ", ".join(sorted(INDUSTRY_TAXONOMY.keys())) if INDUSTRY_TAXONOMY else "GENERAL"
+    source_priority_prompt = format_field_source_priority_for_prompt(max_rows=24)
 
     system_prompt = f"""你是一個精準的財經數據提取機器人。請上網搜尋該台股公司「最新」、「最即時」的財報與市場數據，絕對不要使用過期的舊資料，提取以下指標：
     1. 「歷史本益比 (P/E)」
@@ -864,6 +871,13 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     - forward_eps_fy1_year / forward_eps_fy2_year / forward_eps_fy3_year：上述 EPS 對應年度，例如 2026、2027、2028。
     - forward_eps_fy_source_note：簡述 EPS 年期資料來源與可靠度，例如「券商共識」、「單一券商」、「AI依成長率推估」。
     - trailing_eps 與 forward_eps 為向下相容 legacy 欄位，trailing_eps 可同 ttm_eps，forward_eps 可同 forward_eps_consensus 或 forward_eps_ai。
+
+    欄位來源優先表：
+    {source_priority_prompt}
+    若搜尋結果與欄位來源優先表衝突，請優先依照優先表判斷；若採用較低順位來源，必須在 _sources.<field>.note 說明原因。尤其注意：
+    - 月營收 YoY / MoM 必須以公告月份的單月資料為準，不可用 yfinance revenueGrowth 或累計 YoY 覆蓋。
+    - Forward EPS 必須拆 FY1 / FY2 / FY3 與來源可靠度；FY2/FY3 不可冒充 FY1。
+    - D/E 必須說明是倍數或百分比，系統會統一標準化成倍數。
 
     必須嚴格回傳包含上述財務欄位的 JSON 格式。百分比請轉換為小數（例如 25.5% 寫成 0.255，衰退5%寫成 -0.05），數值請直接輸出數字。若查無資料，該欄位請填 null。
     請務必搜尋近期各大券商對該公司的最新目標價。

@@ -212,6 +212,18 @@ def prompt_ai_source_summary(df):
         return "NULL"
 
 
+def prompt_field_source_priority_summary(fields=None, max_rows=18):
+    """Format the field-level source priority table for prompt packs."""
+    try:
+        return format_field_source_priority_for_prompt(fields, max_rows=max_rows)
+    except Exception as exc:
+        try:
+            log_exception("PromptPack", "prompt_field_source_priority_summary", exc)
+        except Exception:
+            pass
+        return "NULL"
+
+
 def prompt_dynamic_cap_core(pack, mode="research", divergence_warnings=None, final_signal=None, fallback_values=None):
     """Format Dynamic Cap inputs for prompt packs without leaking raw dictionaries."""
     try:
@@ -294,7 +306,7 @@ def prompt_dynamic_cap_core(pack, mode="research", divergence_warnings=None, fin
         except Exception:
             actual_divergence_count = 0
         try:
-            is_data_abnormal_signal = isinstance(final_signal, dict) and str(final_signal.get("signal", "")).strip() == "資料異常"
+            is_data_abnormal_signal = isinstance(final_signal, dict) and str(final_signal.get("signal", "")).strip().startswith("資料異常")
         except Exception:
             is_data_abnormal_signal = False
 
@@ -366,7 +378,7 @@ def prompt_dynamic_cap_core(pack, mode="research", divergence_warnings=None, fin
         if actual_divergence_count > 0:
             lines.append(f"- 資料分歧同步: 分歧警告 {actual_divergence_count} 項，已與【5. 分歧與資料品質】同步；Dynamic Cap 與可操作區間需降權解讀。")
         if is_data_abnormal_signal:
-            lines.append("- 資料異常保護: 最終燈號為資料異常，本區只保留壓力測試與風險提示，不作買賣判斷。")
+            lines.append("- 資料異常-不可判斷保護: 最終燈號為資料異常-不可判斷，本區只保留壓力測試與風險提示，不作買賣判斷。")
 
         eps_parts = []
         if _fmt_num(adopted_eps, 2) != "NULL":
@@ -483,6 +495,7 @@ def prompt_forward_eps_tier_core(pack):
 
 def prompt_peg_valuation_layers(
     system_eps=None,
+    system_eps_raw=None,
     fy1_eps=None,
     fy2_eps=None,
     fy3_eps=None,
@@ -497,6 +510,9 @@ def prompt_peg_valuation_layers(
     manual_cap=None,
     manual_cap_source=None,
     system_price=None,
+    system_raw_price=None,
+    formula_eps_source=None,
+    forward_eps_mismatch_note=None,
     current_eps=None,
     current_eps_raw=None,
     current_eps_source=None,
@@ -533,7 +549,17 @@ def prompt_peg_valuation_layers(
             return "年期未明" if t == "NULL" else t
 
         lines = []
-        lines.append(f"- 1. 公式合理估值: {_price(system_price)}｜系統 Forward EPS × formula cap｜EPS={_eps(system_eps)}｜倍率={_cap(formula_cap)}｜判讀=保留系統 Forward EPS 口徑；若為 NULL，不得用 AI/FY1 冒充系統公式。")
+        source_text = prompt_nullize_text(formula_eps_source or "系統 Forward EPS")
+        mismatch_note = prompt_nullize_text(forward_eps_mismatch_note)
+        raw_parts = []
+        if _eps(system_eps_raw) != "NULL":
+            raw_parts.append(f"系統原始EPS={_eps(system_eps_raw)}")
+        if _price(system_raw_price) != "NULL":
+            raw_parts.append(f"系統原始公式價={_price(system_raw_price)}")
+        if mismatch_note != "NULL":
+            raw_parts.append(f"年期判讀={mismatch_note}")
+        raw_text = "｜" + "｜".join(raw_parts) if raw_parts else ""
+        lines.append(f"- 1. 公式合理估值: {_price(system_price)}｜{source_text} × formula cap｜EPS={_eps(system_eps)}｜倍率={_cap(formula_cap)}{raw_text}｜判讀=若系統 Forward EPS 疑似 FY2 年期錯位，公式價降權採 FY1 EPS；FY2 只作市場先行定價，不直接作買點。")
         lines.append(
             f"- 1-1. 目前估值: {_price(current_price)}｜{prompt_nullize_text(current_eps_source or '目前 EPS')} × formula cap"
             f"｜EPS={_eps(current_eps)}｜原始EPS={_eps(current_eps_raw)}｜期間={prompt_nullize_text(current_eps_period)}"
@@ -604,7 +630,7 @@ def prompt_snapshot_audit_summary(
         positives = _prompt_audit_clean(summary.get("positives"))
         negatives = _prompt_audit_clean(summary.get("negatives"))
         try:
-            is_data_abnormal_signal = isinstance(final_signal, dict) and str(final_signal.get("signal", "")).strip() == "資料異常"
+            is_data_abnormal_signal = isinstance(final_signal, dict) and str(final_signal.get("signal", "")).strip().startswith("資料異常")
         except Exception:
             is_data_abnormal_signal = False
         try:
@@ -613,12 +639,12 @@ def prompt_snapshot_audit_summary(
             actual_divergence_count = 0
         if is_data_abnormal_signal:
             return "\n".join([
-                "- 稽核結果: 資料異常，暫不判斷模型是否偏離。",
+                "- 稽核結果: 資料異常-不可判斷，暫不判斷模型是否偏離。",
                 "- 稽核分數: 暫停判斷",
                 f"- 系統建議動作: 先確認 EPS、Forward P/E、PEG、毛利率、ROE、營收 YoY 等口徑；目前分歧警告 {actual_divergence_count} 項，暫不做買賣判斷。",
                 f"- 目前 primary_taxon: {_prompt_audit_clean(summary.get('primary_taxon'))}",
-                "- 風險/反對因素: 資料異常優先，Dynamic Cap 與產業模型只作壓力測試。",
-                "- 重要限制: 資料異常時，不可因模型估值或法人目標價偏高而直接追價。",
+                "- 風險/反對因素: 資料異常-不可判斷優先，Dynamic Cap 與產業模型只作壓力測試。",
+                "- 重要限制: 資料異常-不可判斷時，不可因模型估值或法人目標價偏高而直接追價。",
             ])
 
         lines = []
@@ -777,6 +803,10 @@ def prompt_eps_adoption_sync_summary(
     ai_forward_eps_fy_source_note_val=None,
     ai_forward_eps_fy_basis_val=None,
     formula_pe_cap_val=None,
+    formula_eps_for_calc_val=None,
+    formula_eps_source_val=None,
+    system_formula_fair_value_raw_val=None,
+    forward_eps_period_mismatch_val=None,
     base_pe_cap_val=None,
     soft_pe_cap_val=None,
     hard_pe_cap_val=None,
@@ -839,6 +869,15 @@ def prompt_eps_adoption_sync_summary(
             lines.append(f"- 完整年度 EPS: 系統={_n(sys_fiscal_year_eps_val)} / AI={_n(ai_fiscal_year_eps_val)} / 採用={_n(adopted)}")
         if _has(sys_forward_eps_system_val, eff_f_eps_val):
             lines.append(f"- Forward EPS－系統估值採用值: {_num(eff_f_eps_val)}（用於『公式合理估值』；系統原始={_num(sys_forward_eps_system_val)}）")
+        if _has(formula_eps_for_calc_val):
+            mismatch = forward_eps_period_mismatch_val if isinstance(forward_eps_period_mismatch_val, dict) else {}
+            note = prompt_nullize_text(mismatch.get("note") if mismatch.get("has_mismatch") else "")
+            if note == "NULL":
+                note = "未偵測到年期錯位"
+            lines.append(
+                f"- 公式合理估值 EPS 實際採用值: {_num(formula_eps_for_calc_val)}"
+                f"（{_n(formula_eps_source_val)}；系統原始公式價={_price(system_formula_fair_value_raw_val)}；年期判讀={note}）"
+            )
         if _has(current_eps_for_valuation_val):
             lines.append(
                 f"- 目前估值 EPS: {_num(current_eps_for_valuation_val)}"
@@ -882,6 +921,7 @@ def prompt_eps_adoption_sync_summary(
         price_parts = []
         for label, value in [
             ("系統公式", sys_target_price_est_val),
+            ("系統原始公式", system_formula_fair_value_raw_val),
             ("目前估值", current_target_price_est_val),
             ("FY1-base", fy1_base_target_price_val),
             ("FY1-soft", fy1_soft_target_price_val),
@@ -898,7 +938,7 @@ def prompt_eps_adoption_sync_summary(
                 price_parts.append(f"{label}={_price(value)}")
         if price_parts:
             lines.append("- 新版估值結果: " + "；".join(price_parts))
-        lines.append("- 重要規則: 公式合理估值只使用系統 Forward EPS；目前估值使用最新單季 EPS 年化，缺值才退回 TTM EPS，用於目前獲利支撐度檢查；系統 Forward EPS 缺值時為 NULL，不得用 AI/FY1 冒充系統公式；前瞻 PEG 不再單列 AI估值；FY1/FY2/FY3 各列 base/soft/hard，分別為基礎/樂觀/極限；手動年度情境以 FY1 EPS 為主，未手動調整時採 FY1 base。")
+        lines.append("- 重要規則: 公式合理估值原則上使用系統 Forward EPS；若偵測到系統 Forward EPS 疑似 FY2 年期錯位，公式價降權採 FY1 EPS，系統原始公式價只作追蹤；目前估值使用最新單季 EPS 年化，缺值才退回 TTM EPS，用於目前獲利支撐度檢查；系統 Forward EPS 缺值時為 NULL，不得用 AI/FY1 冒充系統公式；前瞻 PEG 不再單列 AI估值；FY1/FY2/FY3 各列 base/soft/hard，分別為基礎/樂觀/極限；手動年度情境以 FY1 EPS 為主，未手動調整時採 FY1 base。")
         return "\n".join(lines) if lines else "無可用 EPS 面板資料，提示詞不納入 EPS 估值判斷。"
     except Exception as exc:
         try:
