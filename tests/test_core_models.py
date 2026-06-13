@@ -68,6 +68,7 @@ if "google" not in sys.modules:
 
 import stock_mapping
 import industry_taxonomy
+import ui_context.financial_context as financial_context
 from dynamic_cap_model import CALIBRATION_DEFAULTS, calculate_dynamic_cap_v2, get_dynamic_cap_version_info
 from industry_model import get_industry_valuation_profile
 from services import build_margin_credit_summary
@@ -270,11 +271,39 @@ class FieldSourcePriorityTests(unittest.TestCase):
         de = report[report["資料欄位"] == "D/E"].iloc[0]
 
         self.assertIn("FinMind TaiwanStockMonthRevenue", revenue["來源優先序"])
-        self.assertIn("yfinance revenueGrowth 不得覆蓋", revenue["採用規則"])
+        self.assertIn("yfinance revenueGrowth 只作診斷備註", revenue["採用規則"])
         self.assertIn("法人 FY1 年度共識 EPS", fy1["來源優先序"])
         self.assertIn("FY1 是前瞻 PEG 年度估值", fy1["採用規則"])
         self.assertIn("標準化成倍數", de["採用規則"])
         self.assertIn("D/E > 8", de["校驗/降權規則"])
+
+    def test_financial_base_context_uses_monthly_yoy_not_yfinance_revenue_growth(self):
+        old_monthly = financial_context.get_monthly_revenue
+        old_pepb = financial_context.get_pe_pb_data
+        old_health = financial_context.get_finmind_financial_health
+        try:
+            financial_context.get_monthly_revenue = lambda *args, **kwargs: pd.DataFrame({
+                "Month": ["2026/05"],
+                "YoY": [42.67],
+                "MoM": [3.2],
+                "revenue_source": ["FinMind TaiwanStockMonthRevenue"],
+            })
+            financial_context.get_pe_pb_data = lambda *args, **kwargs: pd.DataFrame()
+            financial_context.get_finmind_financial_health = lambda *args, **kwargs: {}
+
+            context = financial_context.build_financial_base_context(
+                stock_id="3008",
+                info={"revenueGrowth": 0.2257},
+                current_price=2500,
+                finmind_key="",
+            )
+        finally:
+            financial_context.get_monthly_revenue = old_monthly
+            financial_context.get_pe_pb_data = old_pepb
+            financial_context.get_finmind_financial_health = old_health
+
+        self.assertAlmostEqual(context["rev_growth"], 0.4267)
+        self.assertEqual(context["latest_rev_display_label"], "公告月份：2026/05")
 
     def test_financial_quality_report_includes_source_priority_column(self):
         report = build_financial_quality_report([

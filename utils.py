@@ -309,9 +309,9 @@ FIELD_SOURCE_PRIORITY_TABLE = [
         "field": "營收 YoY",
         "code": "revenue_yoy",
         "aliases": ["revenue_yoy", "rev_growth", "yoy", "營收年增", "月營收yoy"],
-        "priority": ["FinMind TaiwanStockMonthRevenue 單月 YoY", "Yahoo 股市月營收單月 YoY", "公開資訊觀測站月營收", "AI 查證公告月份", "yfinance revenueGrowth 備援"],
-        "adoption_rule": "以實際公告月份的單月 YoY 為準；yfinance revenueGrowth 不得覆蓋月營收 YoY。",
-        "validation_rule": "若 AI 抓到累計 YoY、季度 YoY 或不同月份，需列分歧並降權。",
+        "priority": ["FinMind TaiwanStockMonthRevenue 單月 YoY", "Yahoo 股市月營收單月 YoY", "公開資訊觀測站月營收", "AI 查證公告月份"],
+        "adoption_rule": "以實際公告月份的單月 YoY 為準；yfinance revenueGrowth 只作診斷備註，不進月營收 YoY 採用值。",
+        "validation_rule": "若 AI 抓到累計 YoY、季度 YoY、不同月份或 yfinance revenueGrowth，需列口徑差異並降權。",
     },
     {
         "field": "營收 MoM",

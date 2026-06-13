@@ -16,6 +16,8 @@ def build_financial_base_context(*, stock_id, info, current_price, finmind_key, 
         else:
             latest_rev_month = normalize_revenue_month(df_rev_bk["Month"].iloc[-1])
         latest_mom_val = s_float(df_rev_bk["MoM"].iloc[-1])
+        latest_yoy_val = s_float(df_rev_bk["YoY"].iloc[-1]) if "YoY" in df_rev_bk.columns else None
+        latest_monthly_yoy = latest_yoy_val / 100.0 if latest_yoy_val is not None else None
         latest_rev_source = str(df_rev_bk["revenue_source"].iloc[-1]) if "revenue_source" in df_rev_bk.columns else "月營收資料源"
         rev_notice_pack = build_revenue_month_notice(latest_rev_month)
         latest_rev_notice = rev_notice_pack.get("notice", "")
@@ -23,6 +25,7 @@ def build_financial_base_context(*, stock_id, info, current_price, finmind_key, 
     else:
         latest_rev_month = "無資料"
         latest_mom_val = None
+        latest_monthly_yoy = None
         latest_rev_notice = "未取得月營收資料，營收 YoY / MoM 將改用其他資料源或顯示 N/A。"
         latest_rev_display_label = "公告月份：未取得"
         latest_rev_source = ""
@@ -51,9 +54,9 @@ def build_financial_base_context(*, stock_id, info, current_price, finmind_key, 
     if sys_de is None:
         sys_de = fm_health.get("debtToEquity")
 
-    rev_growth = s_float(info.get("revenueGrowth"))
-    if rev_growth is None and df_rev_bk is not None and not df_rev_bk.empty:
-        rev_growth = s_float(df_rev_bk["YoY"].iloc[-1]) / 100.0
+    # yfinance revenueGrowth 常是季度/TTM 口徑，不等於台股最新單月營收 YoY。
+    # 系統「營收 YoY」只採公告月份的月營收資料；缺值時留空，後續可由 AI 單月 YoY 補齊。
+    rev_growth = latest_monthly_yoy
     earn_growth = s_float(info.get("earningsGrowth"))
 
     t_eps = s_float(info.get("trailingEps"))
