@@ -23,17 +23,16 @@ import yfinance as yf
 from google import genai
 from google.genai import types
 
+from ai_services.financial_filler import postprocess_financial_ai_payload
 # 從 utils 引入需要的工具
 from utils import (
     build_monthly_revenue_growth_frame,
     expected_latest_revenue_month,
     format_field_source_priority_for_prompt,
-    build_financial_candidate_data,
     normalize_revenue_month,
     s_float,
     log_data_health,
     log_exception,
-    validate_ai_financial_json,
 )
 try:
     from industry_taxonomy import INDUSTRY_TAXONOMY
@@ -722,6 +721,8 @@ AI_FINANCIAL_FIELD_LABELS = {
     "trailing_eps": "近四季 EPS（legacy）",
     "forward_eps": "法人預估 EPS（legacy）",
     "latest_quarter_eps": "最新單季 EPS",
+    "previous_quarter_eps": "前一季 EPS",
+    "last_two_quarter_eps": "近二季 EPS 合計",
     "ttm_eps": "近四季 TTM EPS",
     "fiscal_year_eps": "最近完整年度 EPS",
     "forward_eps_system": "系統預估 Forward EPS",
@@ -830,6 +831,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     system_prompt = f"""你是一個精準的財經數據提取機器人。請上網搜尋該台股公司「最新」、「最即時」的財報與市場數據，絕對不要使用過期的舊資料，提取以下指標：
     1. 「歷史本益比 (P/E)」
     2. 「最新單季 EPS (latest_quarter_eps)」：最新已公告季度 EPS，例如 2026Q1 EPS。
+    2-1. 「前一季 EPS (previous_quarter_eps)」與「近二季 EPS 合計 (last_two_quarter_eps)」：用於 Run-rate EPS 動能估值。last_two_quarter_eps=最新單季 EPS + 前一季 EPS；若只能查到其中一季，缺值請填 null。
     3. 「近四季 EPS 合計 (ttm_eps / trailing_eps)」：用於歷史 P/E。
     4. 「最近完整年度 EPS (fiscal_year_eps)」：最近完整會計年度 EPS。
     5. 「法人預估 {target_year} 年度 EPS (forward_eps_ai / forward_eps_consensus)」：若有多家法人共識請填 forward_eps_consensus；若只有 AI 從單一新聞/券商抓取或推估，請填 forward_eps_ai。
@@ -865,6 +867,8 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
         - needs_manual_review：一律填 true，除非分類已非常明確且與公司本業完全一致。
     EPS 欄位請務必拆欄，不可把「最新單季 EPS」、「近四季 TTM EPS」、「完整年度 EPS」、「Forward EPS」混在同一欄：
     - latest_quarter_eps：最新已公告季度 EPS。
+    - previous_quarter_eps：前一季 EPS。
+    - last_two_quarter_eps：近二季 EPS 合計，用於 Run-rate EPS；不可取代 TTM EPS 或 FY1/FY2。
     - ttm_eps：近四季 EPS 合計。
     - fiscal_year_eps：最近完整年度 EPS。
     - forward_eps_ai：AI 從最新新聞/券商報告抓取或推估的 {target_year} EPS。
@@ -896,10 +900,10 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
 
     注意：本函式只負責財報與估值校對，不要查詢 ETF 持股；ETF 持股由獨立按鈕 get_etf_holders_from_ai() 執行。
     JSON 格式範例：
-    {{"pe": 15.2, "latest_quarter_eps": 1.35, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin": 0.255, "operating_margin": 0.123, "roe": 0.15, "yoy": 0.35, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "mom": 0.015, "dividend_yield": 0.032, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
+    {{"pe": 15.2, "latest_quarter_eps": 1.35, "previous_quarter_eps": 1.10, "last_two_quarter_eps": 2.45, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin": 0.255, "operating_margin": 0.123, "roe": 0.15, "yoy": 0.35, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "mom": 0.015, "dividend_yield": 0.032, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "last_two_quarter_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近二季 EPS 合計，用於 Run-rate 動能估值"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
     絕對不要輸出 markdown 標記或其他文字。"""
 
-    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、營收 MoM、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。請務必確認並標示出 EPS 對應年度、資料發布日期與來源！不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
+    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、最新單季 EPS、前一季 EPS、近二季 EPS 合計、營收 MoM、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。請務必確認並標示出 EPS 對應年度、資料發布日期與來源！不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
 
     def _make_config(search_enabled=True):
         kwargs = {
@@ -1003,35 +1007,19 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
         try:
             parsed = json.loads(clean_text)
             if isinstance(parsed, dict):
-                parsed.update({k: v for k, v in marker_data.items() if v is not None and parsed.get(k) is None})
-                parsed = _normalize_ai_source_metadata(parsed)
-                parsed = validate_ai_financial_json(parsed, stock_id=stock_id, stock_name=stock_name)
-                parsed = _normalize_ai_source_metadata(parsed)
-                retrieved_at = datetime.datetime.now().isoformat(timespec="seconds")
-                parsed["model_used"] = used_model
-                parsed["ai_search_enabled"] = bool(used_search)
-                parsed["fallback_reason"] = fallback_reason
-                parsed["retrieved_at"] = retrieved_at
-                parsed["attempts"] = attempts
-                parsed["retry_policy"] = "Pro Only：gemini-3.1-pro-preview + Google Search；最多 3 次；不降級。"
-                parsed["_candidate_data"] = build_financial_candidate_data(
+                parsed = postprocess_financial_ai_payload(
                     parsed,
+                    marker_data=marker_data,
                     stock_id=stock_id,
                     stock_name=stock_name,
-                    retrieved_at=retrieved_at,
-                    default_review_status="pending",
+                    target_year=target_year,
+                    used_model=used_model,
+                    used_search=used_search,
+                    fallback_reason=fallback_reason,
+                    attempts=attempts,
+                    prompt_text=prompt_text,
+                    system_prompt=system_prompt,
                 )
-                parsed["_candidate_data_status"] = f"pending_review_candidates={len(parsed['_candidate_data'])}"
-                parsed["query_payload"] = json.dumps({
-                    "stock": f"{stock_name} ({stock_id})",
-                    "target_year": target_year,
-                    "model_used": used_model,
-                    "google_search_enabled": bool(used_search),
-                    "fallback_reason": fallback_reason or "無",
-                    "retry_policy": "Pro Only same-model retry: delays 0s, 3s, 8s; no downgrade.",
-                    "prompt": prompt_text,
-                    "system_instruction": system_prompt,
-                }, ensure_ascii=False, indent=2)
             return parsed
         except json.JSONDecodeError:
             return {

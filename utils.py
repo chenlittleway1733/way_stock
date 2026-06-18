@@ -7,6 +7,7 @@ import re
 import math
 import hashlib
 import datetime
+import json
 import pandas as pd
 import streamlit as st
 
@@ -215,6 +216,8 @@ FINANCIAL_CANDIDATE_FIELD_LABELS = {
     "trailing_eps": "近四季 EPS（legacy）",
     "forward_eps": "法人預估 EPS（legacy）",
     "latest_quarter_eps": "最新單季 EPS",
+    "previous_quarter_eps": "前一季 EPS",
+    "last_two_quarter_eps": "近二季 EPS 合計",
     "ttm_eps": "近四季 TTM EPS",
     "fiscal_year_eps": "最近完整年度 EPS",
     "forward_eps_system": "系統預估 Forward EPS",
@@ -249,6 +252,8 @@ FINANCIAL_CANDIDATE_FIELD_UNITS = {
     "pb": "x",
     "forward_pe": "x",
     "latest_quarter_eps": "NTD/share",
+    "previous_quarter_eps": "NTD/share",
+    "last_two_quarter_eps": "NTD/share",
     "trailing_eps": "NTD/share",
     "ttm_eps": "NTD/share",
     "fiscal_year_eps": "NTD/share",
@@ -278,6 +283,8 @@ FINANCIAL_CANDIDATE_FIELD_UNITS = {
 
 FINANCIAL_CANDIDATE_PERIOD_TYPES = {
     "latest_quarter_eps": "single_quarter",
+    "previous_quarter_eps": "single_quarter",
+    "last_two_quarter_eps": "two_quarter_sum",
     "ttm_eps": "ttm",
     "trailing_eps": "ttm",
     "fiscal_year_eps": "annual",
@@ -503,6 +510,109 @@ def build_candidate_data_report(candidate_data):
     return pd.DataFrame(rows)
 
 
+def financial_candidate_review_cache_path(cache_path=None):
+    """候選資料審核狀態 JSON cache 路徑。"""
+    if cache_path:
+        return os.fspath(cache_path)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".way_cache", "financial_candidate_reviews.json")
+
+
+def _normalize_candidate_review_cache(raw):
+    if isinstance(raw, dict) and isinstance(raw.get("reviews"), dict):
+        return {
+            "version": raw.get("version") or "financial_candidate_review_v1",
+            "updated_at": raw.get("updated_at") or "",
+            "reviews": raw.get("reviews") or {},
+        }
+    if isinstance(raw, dict):
+        return {"version": "financial_candidate_review_v1", "updated_at": "", "reviews": raw}
+    return {"version": "financial_candidate_review_v1", "updated_at": "", "reviews": {}}
+
+
+def load_financial_candidate_review_cache(cache_path=None):
+    """載入候選資料審核狀態；檔案不存在時回傳空 cache。"""
+    path = financial_candidate_review_cache_path(cache_path)
+    if not os.path.exists(path):
+        return {"version": "financial_candidate_review_v1", "updated_at": "", "reviews": {}}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return _normalize_candidate_review_cache(json.loads(fh.read() or "{}"))
+    except Exception as exc:
+        log_exception("CandidateReviewCache", "load_financial_candidate_review_cache", exc)
+        return {"version": "financial_candidate_review_v1", "updated_at": "", "reviews": {}}
+
+
+def save_financial_candidate_review_cache(review_cache, cache_path=None):
+    """保存候選資料審核狀態 JSON cache。"""
+    path = financial_candidate_review_cache_path(cache_path)
+    cache = _normalize_candidate_review_cache(review_cache)
+    cache["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(cache, fh, ensure_ascii=False, indent=2)
+    return cache
+
+
+def financial_candidate_review_key(stock_id, candidate_id):
+    return f"{str(stock_id or '').strip()}::{str(candidate_id or '').strip()}"
+
+
+def update_financial_candidate_review(
+    *,
+    stock_id,
+    candidate_id,
+    review_status,
+    decision_note="",
+    candidate_snapshot=None,
+    cache_path=None,
+):
+    """更新單筆候選資料審核狀態，並寫入 JSON cache。"""
+    status = normalize_candidate_review_status(review_status)
+    cache = load_financial_candidate_review_cache(cache_path)
+    reviews = cache.setdefault("reviews", {})
+    snapshot = dict(candidate_snapshot or {})
+    field_name = snapshot.get("field_name", "")
+    record = {
+        "stock_id": str(stock_id or snapshot.get("stock_id") or ""),
+        "candidate_id": str(candidate_id or snapshot.get("candidate_id") or ""),
+        "field_name": field_name,
+        "field_label": snapshot.get("field_label") or field_name,
+        "review_status": status,
+        "decision_note": str(decision_note or ""),
+        "candidate_value": snapshot.get("value"),
+        "original_value": snapshot.get("original_value"),
+        "source_tier": snapshot.get("source_tier"),
+        "source_name": snapshot.get("source_name"),
+        "source_date": snapshot.get("source_date"),
+        "decided_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    reviews[financial_candidate_review_key(record["stock_id"], record["candidate_id"])] = record
+    cache = save_financial_candidate_review_cache(cache, cache_path)
+    return record
+
+
+def apply_financial_candidate_reviews(candidate_data, review_cache=None, *, stock_id=""):
+    """把已保存的 review_status 套回 candidate_data，供 UI 與後續正式採用流程使用。"""
+    cache = _normalize_candidate_review_cache(review_cache or {})
+    reviews = cache.get("reviews", {})
+    rows = []
+    for item in candidate_data or []:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        sid = str(stock_id or row.get("stock_id") or "")
+        cid = str(row.get("candidate_id") or "")
+        record = reviews.get(financial_candidate_review_key(sid, cid))
+        if isinstance(record, dict):
+            row["review_status"] = normalize_candidate_review_status(record.get("review_status"))
+            row["decision_note"] = record.get("decision_note", "")
+            row["decided_at"] = record.get("decided_at", "")
+        else:
+            row["review_status"] = normalize_candidate_review_status(row.get("review_status"))
+        rows.append(row)
+    return rows
+
+
 FIELD_SOURCE_PRIORITY_TABLE = [
     {
         "field": "現價",
@@ -551,6 +661,14 @@ FIELD_SOURCE_PRIORITY_TABLE = [
         "priority": ["公開資訊觀測站 / 最新財報", "AI 聯網查證最新季度 EPS", "系統欄位若能明確提供單季 EPS"],
         "adoption_rule": "不得用 TTM EPS 冒充單季 EPS；缺值時目前估值改用 TTM EPS 備援。",
         "validation_rule": "需標示季度，例如 2026Q1；年化估值需清楚寫成單季 EPS x4。",
+    },
+    {
+        "field": "近二季 EPS",
+        "code": "last_two_quarter_eps",
+        "aliases": ["last_two_quarter_eps", "previous_quarter_eps", "近二季eps", "前一季eps"],
+        "priority": ["公開資訊觀測站 / 最新兩季財報", "AI 聯網查證最新兩季 EPS", "FinMind 財報季度 EPS"],
+        "adoption_rule": "只用於 Run-rate EPS 動能估值，不取代 TTM EPS、FY1 或 FY2 年度估值。",
+        "validation_rule": "必須標示是近二季合計或前一季 EPS；近二季年化=近二季 EPS 合計 x2。",
     },
     {
         "field": "TTM EPS",
@@ -1469,7 +1587,7 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
         "pe",
         # EPS 拆欄：保留 legacy 欄位，也支援新標準欄位。
         "trailing_eps", "forward_eps",
-        "latest_quarter_eps", "ttm_eps", "fiscal_year_eps",
+        "latest_quarter_eps", "previous_quarter_eps", "last_two_quarter_eps", "ttm_eps", "fiscal_year_eps",
         "forward_eps_system", "forward_eps_ai", "forward_eps_consensus",
         "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3",
         "pb", "target_price", "target_price_high",
@@ -1509,7 +1627,7 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
         null_field("pb", f"P/B={pb:.2f} 超出 0～100 安全範圍")
 
     # EPS：允許虧損，但極端值通常是單位或股本欄位誤抓
-    for field in ["trailing_eps", "forward_eps", "latest_quarter_eps", "ttm_eps", "fiscal_year_eps", "forward_eps_system", "forward_eps_ai", "forward_eps_consensus", "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3"]:
+    for field in ["trailing_eps", "forward_eps", "latest_quarter_eps", "previous_quarter_eps", "last_two_quarter_eps", "ttm_eps", "fiscal_year_eps", "forward_eps_system", "forward_eps_ai", "forward_eps_consensus", "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3"]:
         v = data.get(field)
         if v is not None and abs(v) > 10000:
             null_field(field, f"EPS={v:,.2f} 絕對值過大，疑似單位錯置")
@@ -2231,7 +2349,8 @@ def init_session_state():
     if 'fugle_key' not in st.session_state: st.session_state.fugle_key = "" 
     if 'finmind_key' not in st.session_state: st.session_state.finmind_key = "" 
     if 'ai_fetched_financials' not in st.session_state: st.session_state.ai_fetched_financials = {}
-    if 'financial_candidate_reviews' not in st.session_state: st.session_state.financial_candidate_reviews = {}
+    if 'financial_candidate_reviews' not in st.session_state:
+        st.session_state.financial_candidate_reviews = load_financial_candidate_review_cache().get("reviews", {})
     if 'show_pk' not in st.session_state: st.session_state.show_pk = False
     if 'ai_industry_result' not in st.session_state: st.session_state.ai_industry_result = None
     if 'run_screener' not in st.session_state: st.session_state.run_screener = False
