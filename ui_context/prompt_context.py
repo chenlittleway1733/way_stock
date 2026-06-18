@@ -467,6 +467,9 @@ def prompt_forward_eps_tier_core(pack):
             f"- EPS 來源備註: {prompt_nullize_text(summary.get('eps_source_note'))}",
             f"- 現價隱含 P/E（TTM/FY1/FY2/FY3）: {prompt_nullize_text(summary.get('market_pe_ttm'))}x / {prompt_nullize_text(summary.get('market_pe_fy1'))}x / {prompt_nullize_text(summary.get('market_pe_fy2'))}x / {prompt_nullize_text(summary.get('market_pe_fy3'))}x",
             f"- 市場 EPS 年期判讀: {prompt_nullize_text(summary.get('market_view'))}",
+            f"- 市場定價年期 pricing_horizon: {prompt_nullize_text(summary.get('pricing_horizon_label'))}｜code={prompt_nullize_text(summary.get('pricing_horizon_code'))}｜{prompt_nullize_text(summary.get('pricing_horizon_explanation'))}",
+            f"- 定價年期操作規則: {prompt_nullize_text(summary.get('pricing_horizon_decision_rule'))}",
+            f"- 未來證據落地 future_evidence_score: {prompt_nullize_text(summary.get('future_evidence_score'))}｜{prompt_nullize_text(summary.get('future_evidence_label'))}｜{prompt_nullize_text(summary.get('future_evidence_action'))}",
         ]
         if report is not None and not getattr(report, "empty", True):
             for label in ["FY1", "FY2", "FY3"]:
@@ -483,6 +486,7 @@ def prompt_forward_eps_tier_core(pack):
         lines.extend([
             "- 請 AI 判斷：目前股價/法人目標價偏高，是因為 Dynamic Cap 倍率太低，還是因為市場已經在看 FY2/FY3 EPS？也請同時對照 TTM EPS，看目前實際獲利是否能支撐股價。",
             "- 重要限制：FY1/FY2/FY3 是預估年度 EPS 序列，不是查詢日後1/2/3年；base 是基礎估值，soft 是樂觀估值，hard 是極限風控上限；FY2 只能用來解釋市場先行，不等於可操作買點；FY3 屬高風險遠期情境，不可直接作為買進目標。",
+            "- 新增規則：若 pricing_horizon 為 FY2/FY3/題材重評價，請同時檢查 future_evidence_score；證據不足時不得用 FY2/FY3 支撐買進，證據高時也只能解讀為小部位或低成本既有部位續抱。"
         ])
         return "\n".join(lines)
     except Exception as exc:
@@ -1172,9 +1176,12 @@ def prompt_model_gap_trigger_conditions():
 - 法人平均目標價與系統可操作區間中值差距超過 30%。
 - 法人最高目標價與最低目標價差距超過平均目標價 60%。
 - 現價用 FY1 EPS 看高於 hard ceiling，但用 FY2 / FY3 EPS 看可解釋。
+- 系統 pricing_horizon 顯示 FY2_PRICED / FY3_HIGH_RISK / THEME_RE_RATING / EXTREME_FUTURE_PRICED。
+- future_evidence_score 低於 60，但外部敘事仍想用 FY2 / FY3 解釋現價。
 
 請 AI 逐項判斷落差可能來源：
 1. 市場是否已提前反映 FY2 / FY3 EPS。
+1-1. 系統 pricing_horizon 與 future_evidence_score 是否支持這種先行定價。
 2. primary_taxon 是否可能已不符合市場定價邏輯。
 3. hybrid 權重是否可能不足。
 4. 是否只是市場題材或短線過熱。
@@ -1192,6 +1199,7 @@ def prompt_model_gap_trigger_conditions():
 - 不可因單一法人高標就調高模型。
 - FY2 只能解釋市場先行定價，不等於買點。
 - FY3 只作高風險遠期情境，不可作一般買進依據。
+- future_evidence_score 低於 50 時，不得用 FY2/FY3 合理化現價；60-79 只能續抱或小量，80 以上也不可直接重倉。
 - 若建議調整模型，必須說明是 primary_taxon、hybrid 權重，還是 base / soft / hard ceiling 的問題。"""
 
 
@@ -1203,11 +1211,14 @@ def prompt_buy_decision_gap_risk_conditions():
 - 現價高於系統可操作區間高標 20% 以上。
 - 現價高於 FY1 base 基礎估值 30% 以上；若系統公式合理估值為 NULL，不得用系統公式價判斷。
 - 現價只能用 FY2 / FY3 EPS 才能解釋。
+- 系統 pricing_horizon 顯示 FY2_PRICED / FY3_HIGH_RISK / THEME_RE_RATING / EXTREME_FUTURE_PRICED。
+- future_evidence_score 低於 60，但現價仍需遠期 EPS 才能解釋。
 - 法人平均目標價與系統可操作區間中值差距超過 30%。
 - 法人最高目標價與最低目標價差距超過平均目標價 60%。
 
 請 AI 判斷此落差對「買進安全邊際」的影響：
 1. 現價是否已提前反映 FY2 / FY3 EPS。
+1-1. pricing_horizon 與 future_evidence_score 是否允許把此遠期定價視為可續抱，而非可追買。
 2. 法人高標是否過度樂觀或高低標分歧過大。
 3. 現價是否高於系統可操作區間，導致追價風險偏高。
 4. 若只能用 FY2 / FY3 解釋現價，請說明 EPS / 營收 / 毛利率是否已經落地。
@@ -1217,6 +1228,7 @@ def prompt_buy_decision_gap_risk_conditions():
 - 本區不是模型庫修正建議，只用於買進風險判斷。
 - FY2 只能解釋市場先行定價，不等於買點。
 - FY3 只作高風險遠期情境，不可作一般買進依據。
+- future_evidence_score 低於 50 時，不可用 FY2/FY3 支撐買進；60-79 僅能保守續抱或等待確認；80 以上仍需分批與控倉。
 - 法人高標不可直接視為合理買進價。
 - 公式合理價、年度 soft/hard 情境價、使用者手動壓力測試價都不是系統建議買點。"""
 

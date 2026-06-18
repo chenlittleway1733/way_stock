@@ -110,6 +110,11 @@ def render_main_page(sidebar_state=None):
         latest_rev_month, latest_mom_str = "未知", "N/A"
         latest_rev_notice, latest_rev_display_label = "", "公告月份：未知"
         latest_rev_source = ""
+        latest_rev_source_url = ""
+        latest_rev_source_rule = ""
+        latest_rev_announce_date = ""
+        latest_rev_announce_month = ""
+        latest_rev_revenue_month = ""
         dy_str, fcf_str, cr_str, fs_str = "N/A", "N/A", "N/A", "N/A"
         ctx_eps, ctx_rg, ctx_eg, ctx_gm, ctx_om, ctx_roe, ctx_de = "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
         tp_est_str, cap_warning_html = "無資料", ""
@@ -179,6 +184,11 @@ def render_main_page(sidebar_state=None):
             latest_rev_notice = financial_base["latest_rev_notice"]
             latest_rev_display_label = financial_base["latest_rev_display_label"]
             latest_rev_source = financial_base["latest_rev_source"]
+            latest_rev_source_url = financial_base["latest_rev_source_url"]
+            latest_rev_source_rule = financial_base["latest_rev_source_rule"]
+            latest_rev_announce_date = financial_base["latest_rev_announce_date"]
+            latest_rev_announce_month = financial_base["latest_rev_announce_month"]
+            latest_rev_revenue_month = financial_base["latest_rev_revenue_month"]
             pe_ratio = financial_base["pe_ratio"]
             pb_ratio = financial_base["pb_ratio"]
             roe = financial_base["roe"]
@@ -531,6 +541,11 @@ def render_main_page(sidebar_state=None):
                 latest_rev_display_label=latest_rev_display_label,
                 latest_rev_notice=latest_rev_notice,
                 latest_mom_val=latest_mom_val,
+                latest_rev_source_url=latest_rev_source_url,
+                latest_rev_source_rule=latest_rev_source_rule,
+                latest_rev_announce_date=latest_rev_announce_date,
+                latest_rev_announce_month=latest_rev_announce_month,
+                latest_rev_revenue_month=latest_rev_revenue_month,
                 pe_ratio=pe_ratio,
                 ai_pe=ai_pe,
                 sys_forward_pe=sys_forward_pe,
@@ -1018,6 +1033,16 @@ def render_main_page(sidebar_state=None):
             # ==========================================
             # 📆 第 17-C-9c-hotfix44：Forward EPS 年期分層估值
             # ==========================================
+            _theme_text_for_pricing = " ".join([
+                str(industry_profile.get("themes_text", "")) if isinstance(industry_profile, dict) else "",
+                str(industry_profile.get("event_switch_note", "")) if isinstance(industry_profile, dict) else "",
+                str(industry_profile.get("risk_flags", "")) if isinstance(industry_profile, dict) else "",
+                str(industry_profile.get("primary_valuation", "")) if isinstance(industry_profile, dict) else "",
+            ])
+            topic_re_rating_flag = (
+                (isinstance(industry_profile, dict) and not bool(industry_profile.get("pe_model_suitable", True)))
+                or any(k in _theme_text_for_pricing for k in ["題材", "事件", "重評價", "CPO", "玻璃載板", "ASIC", "先進封裝"])
+            )
             forward_eps_tier_pack = build_forward_eps_tiered_valuation_report(
                 current_price=curr_p,
                 broker_target_avg=ai_me_val,
@@ -1037,12 +1062,24 @@ def render_main_page(sidebar_state=None):
                 hard_ceiling=hard_pe_cap,
                 eps_source_note=ai_forward_eps_fy_source_note,
                 eps_basis=ai_forward_eps_fy_basis,
+                theme_re_rating_flag=topic_re_rating_flag,
+                revenue_yoy=display_rev_growth,
+                revenue_mom=(latest_mom_val / 100.0) if latest_mom_val is not None else ai_mom,
+                gross_margin=display_gross_margin,
+                operating_margin=display_operating_margin,
+                roe=eff_roe,
+                analyst_count=ai_analyst_count,
+                target_confidence=target_confidence,
+                divergence_warnings=divergence_warnings,
+                dq_warnings=dq_warnings,
             )
             if not isinstance(forward_eps_tier_pack, dict):
                 forward_eps_tier_pack = {"summary": {}, "report": None}
             _ft_summary_safe = forward_eps_tier_pack.get("summary", {}) if isinstance(forward_eps_tier_pack, dict) else {}
             if not isinstance(_ft_summary_safe, dict):
                 _ft_summary_safe = {}
+            pricing_horizon_pack = _ft_summary_safe.get("pricing_horizon", {}) if isinstance(_ft_summary_safe, dict) else {}
+            future_evidence_pack = _ft_summary_safe.get("future_evidence", {}) if isinstance(_ft_summary_safe, dict) else {}
             # ==========================================
             # 🧪 第 17-C-9c-hotfix44：產業模型單次快照稽核表
             # ==========================================
@@ -1131,6 +1168,8 @@ def render_main_page(sidebar_state=None):
                 gross_margin=display_gross_margin,
                 operating_margin=display_operating_margin,
                 has_ai_fin_fetch=has_ai_fin_fetch,
+                pricing_horizon=pricing_horizon_pack,
+                future_evidence=future_evidence_pack,
             )
             render_final_signal_panel(final_signal)
 
@@ -1561,6 +1600,9 @@ def render_main_page(sidebar_state=None):
 - 營收公告月份標籤: {_nullize_text(latest_rev_display_label)}
 - 最新單月營收 YoY / MoM: {panel_rg} / {_nullize_text(latest_mom_str)}
 - 月營收資料源: {_nullize_text(latest_rev_source)}
+- 月營收來源URL: {_nullize_text(latest_rev_source_url)}
+- 月營收來源規則: {_nullize_text(latest_rev_source_rule)}
+- 月營收所屬月份 / 公告月份 / 公告日: {_nullize_text(latest_rev_revenue_month)} / {_nullize_text(latest_rev_announce_month)} / {_nullize_text(latest_rev_announce_date)}
 - 月營收月份提示: {_nullize_text(latest_rev_notice)}
 
 【2. EPS 口徑摘要（不可混用）】
@@ -1672,6 +1714,7 @@ def render_main_page(sidebar_state=None):
 - 最新公告月份: {_nullize_text(latest_rev_display_label)}
 - 月營收 YoY / MoM: {panel_rg} / {_nullize_text(latest_mom_str)}
 - 資料源 / 提醒: {_nullize_text(latest_rev_source)} / {_nullize_text(latest_rev_notice)}
+- 來源URL / 規則 / 營收月份: {_nullize_text(latest_rev_source_url)} / {_nullize_text(latest_rev_source_rule)} / {_nullize_text(latest_rev_revenue_month)}
 
 【2. EPS 口徑與採用值（新版同步：系統 / AI / FY1 / FY2 / FY3）】
 {eps_adopted_for_prompt}

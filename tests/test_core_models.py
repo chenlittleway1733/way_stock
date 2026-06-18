@@ -68,10 +68,16 @@ if "google" not in sys.modules:
 
 import stock_mapping
 import industry_taxonomy
+import services
 import ui_context.financial_context as financial_context
 from dynamic_cap_model import CALIBRATION_DEFAULTS, calculate_dynamic_cap_v2, get_dynamic_cap_version_info
 from industry_model import get_industry_valuation_profile
-from services import build_margin_credit_summary
+from services import (
+    build_margin_credit_summary,
+    merge_mops_latest_revenue,
+    parse_mops_monthly_revenue_csv,
+    parse_mops_monthly_revenue_html,
+)
 from ui_context.prompt_context import (
     prompt_chip_panel_summary,
     prompt_etf_panel_summary,
@@ -84,11 +90,18 @@ from ui_context.prompt_context import (
 from ui_context.multiple_context import build_multiple_context
 from utils import (
     build_field_source_priority_report,
+    build_candidate_data_report,
+    build_financial_candidate_data,
     build_financial_quality_report,
     build_forward_eps_tiered_valuation_report,
+    build_divergence_warnings,
     build_final_operation_signal,
+    calculate_future_evidence_score,
+    calc_monthly_revenue_growth,
     detect_forward_eps_period_mismatch,
     format_field_source_priority_for_prompt,
+    infer_pricing_horizon,
+    normalize_candidate_review_status,
     source_priority_summary_for_field,
     validate_ai_financial_json,
     validate_and_correct_financial_metrics,
@@ -287,6 +300,10 @@ class FieldSourcePriorityTests(unittest.TestCase):
                 "YoY": [42.67],
                 "MoM": [3.2],
                 "revenue_source": ["FinMind TaiwanStockMonthRevenue"],
+                "source_url": ["https://example.test/monthly-revenue"],
+                "source_rule": ["monthly revenue only; not yfinance revenueGrowth"],
+                "announce_month": ["2026/06"],
+                "revenue_month": ["2026/05"],
             })
             financial_context.get_pe_pb_data = lambda *args, **kwargs: pd.DataFrame()
             financial_context.get_finmind_financial_health = lambda *args, **kwargs: {}
@@ -304,12 +321,139 @@ class FieldSourcePriorityTests(unittest.TestCase):
 
         self.assertAlmostEqual(context["rev_growth"], 0.4267)
         self.assertEqual(context["latest_rev_display_label"], "公告月份：2026/05")
+        self.assertEqual(context["latest_rev_source_url"], "https://example.test/monthly-revenue")
+        self.assertEqual(context["latest_rev_source_rule"], "monthly revenue only; not yfinance revenueGrowth")
+        self.assertEqual(context["latest_rev_announce_month"], "2026/06")
+        self.assertEqual(context["latest_rev_revenue_month"], "2026/05")
+
+    def test_get_monthly_revenue_finmind_fallback_has_source_meta(self):
+        class FakeResponse:
+            def __init__(self, status_code, payload=None, text=""):
+                self.status_code = status_code
+                self._payload = payload or {}
+                self.text = text
+                self.content = text.encode("utf-8")
+
+            def json(self):
+                return self._payload
+
+        old_mops = services.get_mops_monthly_revenue
+        old_get = services.requests.get
+        try:
+            services.get_mops_monthly_revenue = lambda *args, **kwargs: pd.DataFrame()
+
+            def fake_get(url, *args, **kwargs):
+                if "tw.stock.yahoo.com" in url:
+                    return FakeResponse(404, text="")
+                self.assertIn("TaiwanStockMonthRevenue", url)
+                return FakeResponse(200, {
+                    "status": 200,
+                    "data": [
+                        {"date": "2025-05-01", "revenue": 700880000},
+                        {"date": "2026-04-01", "revenue": 773500000},
+                        {"date": "2026-05-01", "revenue": 814000000},
+                    ],
+                })
+
+            services.requests.get = fake_get
+            df = services.get_monthly_revenue("6789", "")
+        finally:
+            services.get_mops_monthly_revenue = old_mops
+            services.requests.get = old_get
+
+        self.assertFalse(df.empty)
+        latest = df.iloc[-1]
+        self.assertEqual(latest["revenue_source"], "FinMind TaiwanStockMonthRevenue")
+        self.assertIn("api.finmindtrade.com", latest["source_url"])
+        self.assertEqual(latest["source_rule"], "FinMind TaiwanStockMonthRevenue; same-month YoY/MoM; not yfinance revenueGrowth")
+        self.assertEqual(latest["announce_date"], "來源未提供")
+        self.assertEqual(latest["announce_month"], "來源未提供")
+        self.assertEqual(latest["revenue_month"], "2026/05")
+
+    def test_calc_monthly_revenue_growth_uses_same_month_last_year(self):
+        df = pd.DataFrame([
+            {"date": "2025-05-01", "revenue": 700_880_000},
+            {"date": "2026-04-01", "revenue": 773_500_000},
+            {"date": "2026-05-01", "revenue": 814_000_000},
+        ])
+
+        result = calc_monthly_revenue_growth(df)
+
+        self.assertEqual(result["revenue_month"], "2026/05")
+        self.assertAlmostEqual(result["monthly_revenue_yoy"], 16.14, places=2)
+        self.assertAlmostEqual(result["monthly_revenue_mom"], 5.24, places=2)
+        self.assertEqual(result["source_rule"], "monthly revenue only; not yfinance revenueGrowth")
+
+    def test_parse_mops_monthly_revenue_html_calculates_yoy_and_mom(self):
+        html = """
+        <table>
+          <tr>
+            <th>公司代號</th><th>公司名稱</th><th>當月營收</th><th>上月營收</th>
+            <th>去年當月營收</th><th>上月比較增減(%)</th><th>去年同月增減(%)</th>
+          </tr>
+          <tr><td>6789</td><td>采鈺</td><td>814000</td><td>773500</td><td>700880</td><td>5.23</td><td>16.14</td></tr>
+        </table>
+        """
+
+        df = parse_mops_monthly_revenue_html(html, "6789", "2026/05")
+
+        self.assertFalse(df.empty)
+        self.assertEqual(df.iloc[0]["Month"], "2026/05")
+        self.assertAlmostEqual(df.iloc[0]["monthly_revenue_yoy"], 16.14, places=2)
+        self.assertAlmostEqual(df.iloc[0]["monthly_revenue_mom"], 5.24, places=2)
+        self.assertEqual(df.iloc[0]["revenue_source"], "MOPS 公開資訊觀測站月營收")
+
+    def test_parse_mops_monthly_revenue_csv_calculates_yoy_and_source_meta(self):
+        csv_text = """出表日期,資料年月,公司代號,公司名稱,產業別,營業收入-當月營收,營業收入-上月營收,營業收入-去年當月營收,營業收入-上月比較增減(%),營業收入-去年同月增減(%)
+"1150617","11505","6789","采鈺","半導體業","814000","773500","700880","5.23594","16.14094"
+"""
+
+        df = parse_mops_monthly_revenue_csv(csv_text, "6789", "上市", "https://mopsfin.twse.com.tw/opendata/t187ap05_L.csv")
+
+        self.assertFalse(df.empty)
+        self.assertEqual(df.iloc[0]["Month"], "2026/05")
+        self.assertAlmostEqual(df.iloc[0]["monthly_revenue_yoy"], 16.14, places=2)
+        self.assertAlmostEqual(df.iloc[0]["monthly_revenue_mom"], 5.24, places=2)
+        self.assertEqual(df.iloc[0]["revenue_source"], "MOPS 開放資料月營收(上市)")
+        self.assertEqual(df.iloc[0]["source_rule"], "MOPS OpenData monthly revenue; same-month YoY/MoM")
+        self.assertEqual(df.iloc[0]["announce_date"], "2026/06/17")
+        self.assertEqual(df.iloc[0]["announce_month"], "2026/06")
+        self.assertEqual(df.iloc[0]["source_url"], "https://mopsfin.twse.com.tw/opendata/t187ap05_L.csv")
+
+    def test_mops_latest_revenue_overrides_same_month_history_row(self):
+        history = pd.DataFrame([
+            {"Month": "2026/04", "Revenue": 7.735, "YoY": 2.0, "MoM": 1.0, "revenue_source": "FinMind TaiwanStockMonthRevenue"},
+            {"Month": "2026/05", "Revenue": 8.14, "YoY": -0.62, "MoM": 5.23, "revenue_source": "FinMind TaiwanStockMonthRevenue"},
+        ])
+        mops = pd.DataFrame([
+            {
+                "Month": "2026/05",
+                "Revenue": 8.14,
+                "YoY": 16.14,
+                "MoM": 5.24,
+                "monthly_revenue_yoy": 16.14,
+                "monthly_revenue_mom": 5.24,
+                "revenue_source": "MOPS 公開資訊觀測站月營收(上市)",
+            }
+        ])
+
+        merged = merge_mops_latest_revenue(history, mops)
+
+        self.assertEqual(len(merged), 2)
+        latest = merged[merged["Month"] == "2026/05"].iloc[0]
+        self.assertEqual(latest["revenue_source"], "MOPS 公開資訊觀測站月營收(上市)")
+        self.assertAlmostEqual(latest["monthly_revenue_yoy"], 16.14)
 
     def test_financial_quality_report_includes_source_priority_column(self):
         report = build_financial_quality_report([
             {
                 "field": "營收 YoY",
-                "system_source": "FinMind 月營收優先；yfinance 備援",
+                "system_source": "MOPS/FinMind/Yahoo 月營收",
+                "system_source_url": "https://mops.twse.com.tw/nas/t21/sii/t21sc03_115_5_0.html",
+                "source_rule": "MOPS monthly revenue; same-month YoY/MoM",
+                "announce_date": "2026/06/10",
+                "announce_month": "2026/06",
+                "revenue_month": "2026/05",
                 "system_value": 0.71,
                 "ai_source": "AI補齊",
                 "ai_value": 0.69,
@@ -321,7 +465,16 @@ class FieldSourcePriorityTests(unittest.TestCase):
         ])
 
         self.assertIn("來源優先序", report.columns)
+        self.assertIn("系統來源網址", report.columns)
+        self.assertIn("來源規則", report.columns)
+        self.assertIn("公告日", report.columns)
+        self.assertIn("公告月份", report.columns)
+        self.assertIn("營收所屬月份", report.columns)
         self.assertIn("FinMind TaiwanStockMonthRevenue", report.iloc[0]["來源優先序"])
+        self.assertEqual(report.iloc[0]["系統來源網址"], "https://mops.twse.com.tw/nas/t21/sii/t21sc03_115_5_0.html")
+        self.assertEqual(report.iloc[0]["來源規則"], "MOPS monthly revenue; same-month YoY/MoM")
+        self.assertEqual(report.iloc[0]["公告月份"], "2026/06")
+        self.assertEqual(report.iloc[0]["營收所屬月份"], "2026/05")
         self.assertIn("系統+AI交叉", report.iloc[0]["品質狀態"])
 
     def test_prompt_source_priority_summary_is_compact_and_includes_critical_fields(self):
@@ -338,6 +491,75 @@ class FieldSourcePriorityTests(unittest.TestCase):
 
         self.assertIn("法人 FY1 年度共識 EPS", summary)
         self.assertIn("FY1 是前瞻 PEG 年度估值", summary)
+
+    def test_financial_candidate_data_standardizes_review_status_and_source_tier(self):
+        ai_fin = {
+            "_stock_id": "3008",
+            "_stock_name": "大立光",
+            "ttm_eps": 48.12,
+            "yoy": 0.4267,
+            "target_price_avg": 3200,
+            "data_period": "2026Q1",
+            "_ai_source_trace": {
+                "ttm_eps": {
+                    "source": "公開資訊觀測站公司財報",
+                    "published_date": "2026Q1",
+                    "source_url": "https://mops.example.test",
+                    "note": "近四季 EPS 合計",
+                    "confidence": "high",
+                },
+                "yoy": {
+                    "source": "AI依成長率推估",
+                    "published_date": "2026/05",
+                    "note": "非公告單月 YoY",
+                },
+            },
+        }
+
+        candidates = build_financial_candidate_data(
+            ai_fin,
+            system_values={"ttm_eps": 48.12, "yoy": 0.2257},
+            stock_id="3008",
+            stock_name="大立光",
+            retrieved_at="2026-06-18T15:00:00",
+        )
+
+        by_field = {row["field_name"]: row for row in candidates}
+        self.assertEqual(by_field["ttm_eps"]["review_status"], "pending")
+        self.assertEqual(by_field["ttm_eps"]["source_tier"], 1)
+        self.assertEqual(by_field["ttm_eps"]["conflict_status"], "same_as_system")
+        self.assertEqual(by_field["ttm_eps"]["unit"], "NTD/share")
+        self.assertEqual(by_field["yoy"]["source_tier"], 5)
+        self.assertEqual(by_field["yoy"]["unit"], "ratio_decimal")
+        self.assertEqual(by_field["yoy"]["conflict_status"], "different_from_system")
+        self.assertAlmostEqual(by_field["yoy"]["difference_pct"], (0.4267 - 0.2257) / 0.2257)
+        self.assertEqual(by_field["target_price_avg"]["conflict_status"], "not_compared")
+        self.assertTrue(by_field["target_price_avg"]["candidate_id"].startswith("fin:3008:target_price_avg:"))
+
+    def test_candidate_data_report_exposes_review_status(self):
+        candidates = build_financial_candidate_data(
+            {
+                "forward_eps_fy1": 120.5,
+                "_ai_source_trace": {
+                    "forward_eps_fy1": {
+                        "source": "券商報告摘要",
+                        "published_date": "2026/06/10",
+                        "review_status": "needs_followup",
+                    }
+                },
+            },
+            stock_id="2330",
+            stock_name="台積電",
+            retrieved_at="2026-06-18T15:00:00",
+        )
+
+        report = build_candidate_data_report(candidates)
+
+        self.assertIn("審核狀態", report.columns)
+        self.assertIn("來源層級", report.columns)
+        self.assertEqual(report.iloc[0]["審核狀態"], "需追查")
+        self.assertEqual(report.iloc[0]["來源層級"], "Level 4")
+        self.assertEqual(normalize_candidate_review_status("保留原值"), "kept_original")
 
 
 class ValuationLogicTests(unittest.TestCase):
@@ -404,6 +626,77 @@ class ValuationLogicTests(unittest.TestCase):
         self.assertEqual(result["summary"]["base_cap"], 18)
         self.assertEqual(result["summary"]["soft_cap"], 22)
         self.assertEqual(result["summary"]["hard_cap"], 28)
+
+    def test_infer_pricing_horizon_detects_fy2_pricing(self):
+        result = infer_pricing_horizon(
+            price=150,
+            ttm_eps=3,
+            fy1_eps=5,
+            fy2_eps=9,
+            fy3_eps=10,
+            base_pe=18,
+            soft_pe=22,
+            hard_pe=28,
+        )
+
+        self.assertEqual(result["code"], "FY2_PRICED")
+        self.assertTrue(result["is_future_priced"])
+        self.assertIn("新買", result["decision_rule"])
+
+    def test_future_evidence_score_rewards_landing_but_penalizes_data_risk(self):
+        strong = calculate_future_evidence_score(
+            revenue_yoy=0.52,
+            revenue_mom=0.08,
+            gross_margin=0.42,
+            operating_margin=0.22,
+            roe=0.25,
+            fy1_eps=5,
+            fy2_eps=7,
+            analyst_count=12,
+            target_confidence={"rank": 5, "label": "高可信"},
+        )
+        weak = calculate_future_evidence_score(
+            revenue_yoy=-0.05,
+            revenue_mom=-0.12,
+            gross_margin=0.12,
+            operating_margin=0.03,
+            roe=0.04,
+            fy1_eps=5,
+            fy2_eps=4,
+            analyst_count=1,
+            target_confidence={"rank": 1, "label": "低可信"},
+            divergence_warnings=[{"嚴重度": "danger"}],
+        )
+
+        self.assertGreaterEqual(strong["score"], 80)
+        self.assertEqual(strong["label"], "未來高度落地")
+        self.assertLess(weak["score"], 40)
+        self.assertEqual(weak["label"], "純題材或證據反轉")
+
+    def test_forward_eps_tiered_summary_includes_pricing_horizon_and_future_evidence(self):
+        result = build_forward_eps_tiered_valuation_report(
+            current_price=150,
+            ttm_eps=3,
+            fy1_eps=5,
+            fy2_eps=9,
+            fy3_eps=10,
+            base_cap=18,
+            soft_ceiling=22,
+            hard_ceiling=28,
+            revenue_yoy=0.30,
+            revenue_mom=0.05,
+            gross_margin=0.35,
+            operating_margin=0.18,
+            roe=0.20,
+            analyst_count=8,
+            target_confidence={"rank": 4, "label": "中高可信"},
+        )
+
+        summary = result["summary"]
+        self.assertEqual(summary["pricing_horizon_code"], "FY2_PRICED")
+        self.assertIn("FY2", summary["pricing_horizon_label"])
+        self.assertGreaterEqual(summary["future_evidence_score"], 60)
+        self.assertIn("future_evidence", summary)
 
     def test_current_eps_valuation_prefers_latest_quarter_annualized_eps(self):
         result = build_multiple_context(
@@ -531,6 +824,34 @@ class ValuationLogicTests(unittest.TestCase):
         self.assertEqual(result["data_grade_label"], "資料分歧-降權判斷")
         self.assertIn("保守估值", result["advice"])
 
+    def test_yoy_divergence_over_ten_points_blocks_buy_signal(self):
+        warnings = build_divergence_warnings(
+            system_yoy=0.1614,
+            ai_yoy=-0.0062,
+            stock_id="6789",
+            stock_name="采鈺",
+        )
+
+        self.assertEqual(warnings[0]["規則"], "YoY 分歧")
+        self.assertEqual(warnings[0]["嚴重度"], "danger")
+
+        result = build_final_operation_signal(
+            current_price=85,
+            valuation_separation={"operable_low": 90, "operable_mid": 105, "operable_high": 120, "warning_count": 1, "danger_count": 1},
+            divergence_warnings=warnings,
+            target_confidence={"rank": 5},
+            industry_profile={"pe_model_suitable": True},
+            forward_pe=16,
+            peg=0.9,
+            roe=0.20,
+            revenue_yoy=0.1614,
+            gross_margin=0.30,
+            operating_margin=0.20,
+        )
+
+        self.assertEqual(result["signal"], "資料分歧-降權判斷")
+        self.assertNotEqual(result["signal"], "可買-小量分批")
+
     def test_final_signal_can_remain_small_batch_buy_with_light_data_warnings(self):
         result = build_final_operation_signal(
             current_price=85,
@@ -549,6 +870,48 @@ class ValuationLogicTests(unittest.TestCase):
         self.assertEqual(result["signal"], "可買-小量分批")
         self.assertEqual(result["data_grade_label"], "觀望-資料待確認")
         self.assertIn("不可一次買滿", result["advice"])
+
+    def test_final_signal_blocks_buy_when_fy2_priced_with_weak_evidence(self):
+        result = build_final_operation_signal(
+            current_price=85,
+            valuation_separation={"operable_low": 90, "operable_mid": 105, "operable_high": 120, "warning_count": 0, "danger_count": 0},
+            divergence_warnings=[],
+            target_confidence={"rank": 5},
+            industry_profile={"pe_model_suitable": True},
+            forward_pe=16,
+            peg=0.9,
+            roe=0.20,
+            revenue_yoy=0.20,
+            gross_margin=0.30,
+            operating_margin=0.20,
+            pricing_horizon={"code": "FY2_PRICED", "label": "FY2 先行定價", "explanation": "需 FY2 EPS 才能解釋", "decision_rule": "新買需降權"},
+            future_evidence={"score": 35, "label": "純題材或證據反轉", "action": "不可用 FY2 支撐買進"},
+        )
+
+        self.assertEqual(result["signal"], "不建議")
+        self.assertIn("未來證據不足", result["advice"])
+        self.assertEqual(result["pricing_horizon_code"], "FY2_PRICED")
+
+    def test_final_signal_downgrades_fy2_priced_buy_even_with_strong_evidence(self):
+        result = build_final_operation_signal(
+            current_price=85,
+            valuation_separation={"operable_low": 90, "operable_mid": 105, "operable_high": 120, "warning_count": 0, "danger_count": 0},
+            divergence_warnings=[],
+            target_confidence={"rank": 5},
+            industry_profile={"pe_model_suitable": True},
+            forward_pe=16,
+            peg=0.9,
+            roe=0.25,
+            revenue_yoy=0.50,
+            gross_margin=0.45,
+            operating_margin=0.25,
+            pricing_horizon={"code": "FY2_PRICED", "label": "FY2 先行定價", "explanation": "需 FY2 EPS 才能解釋", "decision_rule": "新買需降權"},
+            future_evidence={"score": 85, "label": "未來高度落地", "action": "只可小部位或既有續抱"},
+        )
+
+        self.assertEqual(result["signal"], "資料分歧-降權判斷")
+        self.assertIn("小部位", result["advice"])
+        self.assertEqual(result["future_evidence_score"], 85)
 
     def test_margin_credit_summary_calculates_ratios_and_risk(self):
         df = pd.DataFrame({

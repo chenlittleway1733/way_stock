@@ -116,6 +116,11 @@ def render_ai_financial_audit_control(*, curr_id, stock_name):
                 if ai_source_df is not None and not ai_source_df.empty:
                     st.markdown("##### 🔗 AI 逐欄來源追蹤")
                     st.dataframe(ai_source_df, use_container_width=True, hide_index=True)
+                candidate_df = build_candidate_data_report(temp_ai_fin.get("_candidate_data") or [])
+                if candidate_df is not None and not candidate_df.empty:
+                    st.markdown("##### 🧾 AI 候選資料與審核狀態")
+                    st.caption("第 1 階段：已建立 candidate_data 與 review_status；目前僅顯示，不會自動覆蓋正式採用值。")
+                    st.dataframe(candidate_df, use_container_width=True, hide_index=True)
                 ai_validation_warnings = temp_ai_fin.get("_ai_validation_warnings") or []
                 if ai_validation_warnings:
                     st.markdown("##### 🧪 AI JSON 合理性驗證")
