@@ -215,6 +215,7 @@ FINANCIAL_CANDIDATE_FIELD_LABELS = {
     "pe": "歷史本益比 P/E",
     "trailing_eps": "近四季 EPS（legacy）",
     "forward_eps": "法人預估 EPS（legacy）",
+    "latest_month_eps": "最新單月 / 自結 EPS",
     "latest_quarter_eps": "最新單季 EPS",
     "previous_quarter_eps": "前一季 EPS",
     "last_two_quarter_eps": "近二季 EPS 合計",
@@ -251,6 +252,7 @@ FINANCIAL_CANDIDATE_FIELD_UNITS = {
     "pe": "x",
     "pb": "x",
     "forward_pe": "x",
+    "latest_month_eps": "NTD/share",
     "latest_quarter_eps": "NTD/share",
     "previous_quarter_eps": "NTD/share",
     "last_two_quarter_eps": "NTD/share",
@@ -282,6 +284,7 @@ FINANCIAL_CANDIDATE_FIELD_UNITS = {
 }
 
 FINANCIAL_CANDIDATE_PERIOD_TYPES = {
+    "latest_month_eps": "single_month",
     "latest_quarter_eps": "single_quarter",
     "previous_quarter_eps": "single_quarter",
     "last_two_quarter_eps": "two_quarter_sum",
@@ -655,6 +658,14 @@ FIELD_SOURCE_PRIORITY_TABLE = [
         "validation_rule": "P/B 與 ROE、產業週期需一起看；不可單靠低 P/B 判斷便宜。",
     },
     {
+        "field": "最新單月 EPS",
+        "code": "latest_month_eps",
+        "aliases": ["latest_month_eps", "單月eps", "自結eps", "月eps", "最新單月eps"],
+        "priority": ["公司自結公告 / 公開資訊觀測站重大訊息", "交易所注意股自結公告", "AI 聯網查證最新單月 EPS"],
+        "adoption_rule": "若取得最新單月 EPS，目前估值優先採單月 EPS x12；缺值才退回最新單季 EPS x4 或 TTM EPS。",
+        "validation_rule": "需標示月份，例如 2026/04；年化估值需清楚寫成單月 EPS x12，不能與單季 EPS 混用。",
+    },
+    {
         "field": "最新單季 EPS",
         "code": "latest_quarter_eps",
         "aliases": ["latest_quarter_eps", "單季eps", "最新eps", "目前eps"],
@@ -674,9 +685,9 @@ FIELD_SOURCE_PRIORITY_TABLE = [
         "field": "TTM EPS",
         "code": "ttm_eps",
         "aliases": ["ttm_eps", "trailing_eps", "近四季eps", "ttmeps"],
-        "priority": ["yfinance trailingEps", "近四季財報 EPS 合計", "現價 / P/E 反推", "AI 聯網查證"],
-        "adoption_rule": "TTM EPS 用於歷史獲利支撐，不可與 Forward EPS 混用。",
-        "validation_rule": "反推值需標示為反推；若 PE 異常，反推 TTM EPS 不可採用。",
+        "priority": ["近四季財報 EPS 合計", "可信 TTM EPS", "yfinance trailingEps 備援", "現價 / P/E 反推", "AI 聯網查證"],
+        "adoption_rule": "近四季 EPS 合計優先；yfinance trailingEps 僅作備援與交叉檢查，不可覆蓋較新的四季合計值。",
+        "validation_rule": "若 yfinance trailingEps 與近四季合計差距 >10%，標示 yfinance EPS 可能過舊；反推值需標示為反推。",
     },
     {
         "field": "完整年度 EPS",
@@ -933,6 +944,87 @@ def _fmt_gap_pct(gap):
     return "N/A" if gap is None else f"{gap * 100:.1f}%"
 
 
+def build_ttm_eps_adoption(
+    *,
+    system_ttm_eps=None,
+    ai_ttm_eps=None,
+    current_price=None,
+    pe_ratio=None,
+    system_source="yfinance trailingEps",
+    ai_source="近四季財報 EPS 合計",
+    ai_has_trace=False,
+    system_is_inferred=False,
+    stale_gap_threshold=0.10,
+):
+    """決定 TTM EPS 採用值。
+
+    原則：
+    1. 明確的近四季 EPS 合計優先。
+    2. yfinance trailingEps 只作備援與交叉檢查。
+    3. 現價 / P/E 反推值只作最後備援，必須標示。
+    """
+    sys_eps = s_float(system_ttm_eps)
+    ai_eps = s_float(ai_ttm_eps)
+    inferred_eps = None
+    if sys_eps is None and current_price is not None and pe_ratio is not None:
+        price = s_float(current_price)
+        pe = s_float(pe_ratio)
+        if price is not None and price > 0 and pe is not None and pe > 0:
+            inferred_eps = price / pe
+            sys_eps = inferred_eps
+            system_is_inferred = True
+            system_source = "現價 / P/E 反推"
+
+    ai_trusted = ai_eps is not None and ai_eps > 0 and bool(ai_has_trace)
+    sys_valid = sys_eps is not None and sys_eps > 0
+    notes = []
+    warnings = []
+    adopted = None
+    adopted_source = "無可用資料"
+    adopted_rule = "缺少 TTM EPS，無法建立歷史 P/E。"
+
+    if ai_trusted:
+        adopted = ai_eps
+        adopted_source = ai_source
+        adopted_rule = "近四季 EPS 合計優先採用。"
+    elif sys_valid:
+        adopted = sys_eps
+        adopted_source = system_source
+        adopted_rule = "未取得可信近四季 EPS 合計，採系統備援值。"
+    elif ai_eps is not None and ai_eps > 0:
+        adopted = ai_eps
+        adopted_source = ai_source
+        adopted_rule = "AI 提供 TTM EPS 但來源/期間不足，暫作備援採用。"
+        warnings.append("AI TTM EPS 缺少來源或期間，需人工確認。")
+
+    if system_is_inferred and sys_valid:
+        notes.append("系統 TTM EPS 為現價 / P/E 反推，只能作備援。")
+    elif sys_valid:
+        notes.append("系統 TTM EPS 來自 yfinance trailingEps，僅作備援與交叉檢查。")
+
+    if ai_trusted:
+        notes.append("AI/外部校對 TTM EPS 標示為近四季 EPS 合計，優先於 yfinance trailingEps。")
+
+    gap = _relative_gap(sys_eps, ai_eps, "max")
+    if gap is not None and gap > stale_gap_threshold:
+        warnings.append(f"yfinance trailingEps 與近四季 TTM EPS 差距 {_fmt_gap_pct(gap)}，yfinance EPS 可能過舊。")
+
+    return {
+        "adopted_value": adopted,
+        "adopted_source": adopted_source,
+        "adopted_rule": adopted_rule,
+        "system_ttm_eps": sys_eps,
+        "ai_ttm_eps": ai_eps,
+        "system_source": system_source,
+        "ai_source": ai_source,
+        "system_is_inferred": bool(system_is_inferred),
+        "ai_has_trace": bool(ai_has_trace),
+        "gap": gap,
+        "warnings": warnings,
+        "notes": notes,
+    }
+
+
 def detect_forward_eps_period_mismatch(system_forward_eps=None, fy1_eps=None, fy2_eps=None, threshold=0.30):
     """Detect when system Forward EPS likely reflects FY2 instead of FY1."""
     sys_eps = s_float(system_forward_eps)
@@ -1149,9 +1241,135 @@ def build_divergence_warnings(
     return warnings
 
 
+DATA_QUALITY_LEVEL_DEFINITIONS = {
+    "L1": {
+        "label": "L1 口徑差異",
+        "action": "主採用值可確認時不影響主結論，列備註。",
+        "rank": 1,
+    },
+    "L2": {
+        "label": "L2 資料過舊 / 來源待確認",
+        "action": "改採較可信來源或降權該來源。",
+        "rank": 2,
+    },
+    "L3": {
+        "label": "L3 年期 / 估值口徑錯位",
+        "action": "公式估值降權，採保守 EPS 或保守倍率。",
+        "rank": 3,
+    },
+    "L4": {
+        "label": "L4 關鍵欄位錯誤",
+        "action": "暫停買進判斷，先確認 EPS、營收月份、現價或槓桿口徑。",
+        "rank": 4,
+    },
+    "L5": {
+        "label": "L5 多核心衝突",
+        "action": "資料包不可用，停止買賣判斷並重新抓取。",
+        "rank": 5,
+    },
+}
+
+
+def classify_data_quality_warning(warning):
+    """把現有分歧警告映射成 L1-L5 資料品質等級。"""
+    w = warning or {}
+    rule = str(w.get("規則", "") or "")
+    severity = str(w.get("嚴重度", "") or "").lower()
+    message = " ".join(str(w.get(k, "") or "") for k in ["警告文字", "建議處理"])
+    level = "L2"
+
+    if "Forward EPS 年期錯位" in rule:
+        level = "L3"
+    elif "EPS 分歧" in rule:
+        level = "L4" if severity == "danger" else "L3"
+    elif "YoY 分歧" in rule:
+        level = "L1" if "revenueGrowth" in message and severity != "danger" else "L3"
+    elif "Forward P/E 分歧" in rule:
+        level = "L3"
+    elif "PEG 矛盾" in rule or "PEG 分歧" in rule or "預估獲利成長 YoY 分歧" in rule:
+        level = "L3"
+    elif "合理價分歧" in rule:
+        level = "L4" if severity == "danger" else "L3"
+    elif "P/B 分歧" in rule:
+        level = "L4" if severity == "danger" else "L2"
+    elif "D/E 分歧" in rule:
+        level = "L2"
+    elif severity == "danger":
+        level = "L4"
+    elif severity == "warning":
+        level = "L2"
+    elif severity in {"info", "note", "none", ""}:
+        level = "L1"
+
+    info = DATA_QUALITY_LEVEL_DEFINITIONS[level]
+    return {
+        "level": level,
+        "label": info["label"],
+        "rank": info["rank"],
+        "action": info["action"],
+    }
+
+
+def annotate_data_quality_warnings(warnings):
+    """回傳含 L1-L5 欄位的分歧警告，不修改原 list。"""
+    annotated = []
+    for warning in warnings or []:
+        row = dict(warning or {})
+        quality = classify_data_quality_warning(row)
+        row["資料等級"] = quality["level"]
+        row["資料等級說明"] = quality["label"]
+        row["採用動作"] = quality["action"]
+        row["_quality_rank"] = quality["rank"]
+        annotated.append(row)
+    return annotated
+
+
+def summarize_data_quality_levels(warnings, critical_reasons=None):
+    """彙總本次資料品質等級；L5 僅在多個核心衝突或硬性錯誤時出現。"""
+    critical_reasons = [str(x) for x in (critical_reasons or []) if str(x).strip()]
+    annotated = annotate_data_quality_warnings(warnings)
+    if critical_reasons:
+        return {
+            "level": "L4",
+            "label": DATA_QUALITY_LEVEL_DEFINITIONS["L4"]["label"],
+            "rank": 4,
+            "action": DATA_QUALITY_LEVEL_DEFINITIONS["L4"]["action"],
+            "reasons": critical_reasons,
+        }
+    if not annotated:
+        return {
+            "level": "L0",
+            "label": "資料未見重大異常",
+            "rank": 0,
+            "action": "可依一般估值流程使用。",
+            "reasons": [],
+        }
+    ranks = [int(row.get("_quality_rank") or 0) for row in annotated]
+    l4_count = sum(1 for r in ranks if r >= 4)
+    l3_count = sum(1 for r in ranks if r == 3)
+    if l4_count >= 2 or (l4_count >= 1 and l3_count >= 2):
+        level = "L5"
+    else:
+        max_rank = max(ranks)
+        level = next((k for k, v in DATA_QUALITY_LEVEL_DEFINITIONS.items() if v["rank"] == max_rank), "L2")
+    info = DATA_QUALITY_LEVEL_DEFINITIONS[level]
+    reasons = [f"{row.get('規則', '資料警告')}({row.get('資料等級', level)})" for row in annotated]
+    return {
+        "level": level,
+        "label": info["label"],
+        "rank": info["rank"],
+        "action": info["action"],
+        "reasons": reasons,
+    }
+
+
 def build_divergence_warning_report(warnings):
     """將分歧警告整理成 DataFrame，供 Streamlit 顯示。"""
-    return pd.DataFrame(warnings or [], columns=["規則", "嚴重度", "警告文字", "系統值", "AI值", "差距", "建議處理"])
+    return pd.DataFrame(
+        annotate_data_quality_warnings(warnings),
+        columns=["規則", "資料等級", "資料等級說明", "嚴重度", "警告文字", "系統值", "AI值", "差距", "建議處理", "採用動作"],
+    )
+
 
 def infer_quality_status(adopted_value, system_value=None, ai_value=None, is_stale=False, notes=""):
     """依欄位是否有採用值、是否過期、是否被校驗提醒標記，產生一致的品質狀態。"""
@@ -1587,7 +1805,7 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
         "pe",
         # EPS 拆欄：保留 legacy 欄位，也支援新標準欄位。
         "trailing_eps", "forward_eps",
-        "latest_quarter_eps", "previous_quarter_eps", "last_two_quarter_eps", "ttm_eps", "fiscal_year_eps",
+        "latest_month_eps", "latest_quarter_eps", "previous_quarter_eps", "last_two_quarter_eps", "ttm_eps", "fiscal_year_eps",
         "forward_eps_system", "forward_eps_ai", "forward_eps_consensus",
         "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3",
         "pb", "target_price", "target_price_high",
@@ -1627,7 +1845,7 @@ def validate_ai_financial_json(ai_fin, stock_id="", stock_name=""):
         null_field("pb", f"P/B={pb:.2f} 超出 0～100 安全範圍")
 
     # EPS：允許虧損，但極端值通常是單位或股本欄位誤抓
-    for field in ["trailing_eps", "forward_eps", "latest_quarter_eps", "previous_quarter_eps", "last_two_quarter_eps", "ttm_eps", "fiscal_year_eps", "forward_eps_system", "forward_eps_ai", "forward_eps_consensus", "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3"]:
+    for field in ["trailing_eps", "forward_eps", "latest_month_eps", "latest_quarter_eps", "previous_quarter_eps", "last_two_quarter_eps", "ttm_eps", "fiscal_year_eps", "forward_eps_system", "forward_eps_ai", "forward_eps_consensus", "forward_eps_fy1", "forward_eps_fy2", "forward_eps_fy3"]:
         v = data.get(field)
         if v is not None and abs(v) > 10000:
             null_field(field, f"EPS={v:,.2f} 絕對值過大，疑似單位錯置")
@@ -1945,6 +2163,8 @@ def build_final_operation_signal(
     if peg_v is not None and peg_v < 0:
         watch_reasons.append("PEG 為負值，成長估值不可直接使用")
 
+    quality_level = summarize_data_quality_levels(warnings, critical_reasons=critical_reasons)
+
     # 三個可信度分數：資料、估值、操作。
     data_score = 85
     data_score -= warning_count * 8
@@ -2116,6 +2336,7 @@ def build_final_operation_signal(
         {"項目": "市場定價年期", "結果": f"{pricing_label}（{pricing_code or 'NULL'}）", "說明": f"{pricing_pack.get('explanation', '—')}｜{pricing_pack.get('decision_rule', '—')}"},
         {"項目": "未來證據落地", "結果": "NULL" if future_score is None else f"{future_score:.0f} / 100（{future_label}）", "說明": future_action or "—"},
         {"項目": "資料分級", "結果": data_grade["grade"], "說明": f"{data_grade['advice']}｜倉位限制：{data_grade['position_limit']}"},
+        {"項目": "資料品質 L級", "結果": f"{quality_level['level']}｜{quality_level['label']}", "說明": quality_level["action"]},
         {"項目": "可操作估值區間", "結果": "NULL" if op_low is None else f"{op_low:,.2f}～{op_high:,.2f}", "說明": "用保守 EPS、法人樣本數、分歧警告與產業模型折減。"},
         {"項目": "主要原因", "結果": "；".join(reasons) if reasons else "—", "說明": industry_profile.get("warning_note", "—")},
     ])
@@ -2133,6 +2354,8 @@ def build_final_operation_signal(
         "operation_confidence": _confidence_label_from_score(operation_score),
         "data_grade": data_grade,
         "data_grade_label": data_grade["grade"],
+        "data_quality_level": quality_level,
+        "data_quality_level_label": f"{quality_level['level']}｜{quality_level['label']}",
         "pricing_horizon": pricing_pack,
         "pricing_horizon_code": pricing_code,
         "pricing_horizon_label": pricing_label,
@@ -2909,8 +3132,10 @@ def _pricing_horizon_rank(code):
         "FY1_PRICED": 1,
         "FY1_SOFT_OR_FY2_WATCH": 2,
         "FY2_PRICED": 2,
+        "FY2_SOFT_PRICED": 2,
         "THEME_RE_RATING": 3,
         "FY3_HIGH_RISK": 3,
+        "FY2_HARD_PRICED": 3,
         "EXTREME_FUTURE_PRICED": 4,
         "UNSUPPORTED": 5,
         "DATA_INSUFFICIENT": 6,
@@ -2975,6 +3200,10 @@ def infer_pricing_horizon(
         return pack("FY1_SOFT_OR_FY2_WATCH", "FY1 樂觀 / FY2 觀察", "現價需 FY1 soft 樂觀倍率才可解釋，已接近市場先行定價。", "新買需降權，既有部位需看未來證據。")
     if supported(fy2, base):
         return pack("FY2_PRICED", "FY2 先行定價", "現價需 FY2 第二年預估 EPS × base 倍率才可解釋。", "新買自動降權，只能小部位或既有持股續抱觀察。")
+    if supported(fy2, soft):
+        return pack("FY2_SOFT_PRICED", "FY2 樂觀先行定價", "現價需 FY2 第二年預估 EPS × soft 樂觀倍率才可解釋。", "新買需明顯降權；只有 EPS、毛利率與法人共識持續上修時，既有部位才可續抱。")
+    if supported(fy2, hard):
+        return pack("FY2_HARD_PRICED", "FY2 極限先行定價", "現價需 FY2 第二年預估 EPS × hard 極限倍率才可解釋。", "屬高風險先行定價，不支援一般新買；需等回檔或 EPS 再上修。")
     if supported(fy3, base):
         return pack("FY3_HIGH_RISK", "FY3 高風險遠期定價", "現價需 FY3 第三年預估 EPS × base 倍率才可解釋。", "不支援一般買進，只能高風險題材觀察。")
     if supported(fy3, hard):

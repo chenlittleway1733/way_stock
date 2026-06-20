@@ -720,6 +720,7 @@ AI_FINANCIAL_FIELD_LABELS = {
     "pe": "歷史本益比 P/E",
     "trailing_eps": "近四季 EPS（legacy）",
     "forward_eps": "法人預估 EPS（legacy）",
+    "latest_month_eps": "最新單月 / 自結 EPS",
     "latest_quarter_eps": "最新單季 EPS",
     "previous_quarter_eps": "前一季 EPS",
     "last_two_quarter_eps": "近二季 EPS 合計",
@@ -830,7 +831,8 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
 
     system_prompt = f"""你是一個精準的財經數據提取機器人。請上網搜尋該台股公司「最新」、「最即時」的財報與市場數據，絕對不要使用過期的舊資料，提取以下指標：
     1. 「歷史本益比 (P/E)」
-    2. 「最新單季 EPS (latest_quarter_eps)」：最新已公告季度 EPS，例如 2026Q1 EPS。
+    2. 「最新單月 / 自結 EPS (latest_month_eps)」：若公司因注意股、重大訊息或新聞公告最近月份自結獲利，請填該單月 EPS，例如 2026年4月單月 EPS 13.95；沒有明確單月 EPS 請填 null。
+    2-0. 「最新單季 EPS (latest_quarter_eps)」：最新已公告季度 EPS，例如 2026Q1 EPS。
     2-1. 「前一季 EPS (previous_quarter_eps)」與「近二季 EPS 合計 (last_two_quarter_eps)」：用於 Run-rate EPS 動能估值。last_two_quarter_eps=最新單季 EPS + 前一季 EPS；若只能查到其中一季，缺值請填 null。
     3. 「近四季 EPS 合計 (ttm_eps / trailing_eps)」：用於歷史 P/E。
     4. 「最近完整年度 EPS (fiscal_year_eps)」：最近完整會計年度 EPS。
@@ -866,6 +868,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
         - evidence：找到的產品、營收、法說、官網或新聞依據摘要。
         - needs_manual_review：一律填 true，除非分類已非常明確且與公司本業完全一致。
     EPS 欄位請務必拆欄，不可把「最新單季 EPS」、「近四季 TTM EPS」、「完整年度 EPS」、「Forward EPS」混在同一欄：
+    - latest_month_eps：最新單月 / 自結 EPS，例如注意股公告或公司自結的 4 月 EPS；只可填單月值，不可填季度或年化值。
     - latest_quarter_eps：最新已公告季度 EPS。
     - previous_quarter_eps：前一季 EPS。
     - last_two_quarter_eps：近二季 EPS 合計，用於 Run-rate EPS；不可取代 TTM EPS 或 FY1/FY2。
@@ -883,6 +886,7 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
     欄位來源優先表：
     {source_priority_prompt}
     若搜尋結果與欄位來源優先表衝突，請優先依照優先表判斷；若採用較低順位來源，必須在 _sources.<field>.note 說明原因。尤其注意：
+    - 最新單月 / 自結 EPS 若存在，必須填 latest_month_eps，並在 _sources.latest_month_eps.note 寫明月份與是否為自結；不得塞入 latest_quarter_eps。
     - 月營收 YoY / MoM 必須以公告月份的單月資料為準，不可用 yfinance revenueGrowth 或累計 YoY 覆蓋。
     - Forward EPS 必須拆 FY1 / FY2 / FY3 與來源可靠度；FY2/FY3 不可冒充 FY1。
     - D/E 必須說明是倍數或百分比，系統會統一標準化成倍數。
@@ -900,10 +904,10 @@ def get_financials_from_ai(stock_name, stock_id, api_key, model_name="gemini-3.1
 
     注意：本函式只負責財報與估值校對，不要查詢 ETF 持股；ETF 持股由獨立按鈕 get_etf_holders_from_ai() 執行。
     JSON 格式範例：
-    {{"pe": 15.2, "latest_quarter_eps": 1.35, "previous_quarter_eps": 1.10, "last_two_quarter_eps": 2.45, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin": 0.255, "operating_margin": 0.123, "roe": 0.15, "yoy": 0.35, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "mom": 0.015, "dividend_yield": 0.032, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "last_two_quarter_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近二季 EPS 合計，用於 Run-rate 動能估值"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
+    {{"pe": 15.2, "latest_month_eps": 0.42, "latest_quarter_eps": 1.35, "previous_quarter_eps": 1.10, "last_two_quarter_eps": 2.45, "ttm_eps": 5.4, "fiscal_year_eps": 4.9, "forward_eps_system": null, "forward_eps_ai": 6.0, "forward_eps_consensus": 6.2, "forward_eps_fy1": 6.2, "forward_eps_fy2": 7.4, "forward_eps_fy3": 8.6, "forward_eps_fy1_year": 2026, "forward_eps_fy2_year": 2027, "forward_eps_fy3_year": 2028, "forward_eps_fy_source_note": "券商共識 FY1/FY2，FY3 為高成長情境", "trailing_eps": 5.4, "forward_eps": 6.2, "pb": 2.1, "gross_margin": 0.255, "operating_margin": 0.123, "roe": 0.15, "yoy": 0.35, "target_price": 1050.0, "target_price_high": 1200.0, "target_price_avg": 1050.0, "target_price_low": 900.0, "target_price_analyst_count": 18, "target_price_rationale": "AI 伺服器需求強、毛利率改善但評價偏高", "debt_to_equity": 0.45, "mom": 0.015, "dividend_yield": 0.032, "data_period": "2026/05/15", "free_cash_flow": 1500000000, "current_ratio": 1.85, "shares_outstanding": 2500000000, "industry_classification": {{"suggested_primary_taxon": "AI_SERVER_ODM", "suggested_display_name": "AI 伺服器 ODM / 組裝", "suggested_themes": ["AI伺服器", "資料中心"], "confidence": "medium", "reason": "主要成長動能來自 AI 伺服器，但仍需確認營收比重。", "evidence": "近期法說與新聞提及 AI 伺服器出貨動能。", "needs_manual_review": true}}, "_sources": {{"pe": {{"source": "Yahoo股市", "published_date": "2026/05/31", "source_url": "https://example.com", "note": "最新可得本益比"}}, "latest_month_eps": {{"source": "公司自結公告", "published_date": "2026/05/10", "source_url": "https://example.com", "note": "2026年4月單月 EPS"}}, "ttm_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近四季 EPS 合計"}}, "last_two_quarter_eps": {{"source": "最新財報/公開資訊觀測站", "published_date": "2026Q1", "source_url": "https://example.com", "note": "近二季 EPS 合計，用於 Run-rate 動能估值"}}, "forward_eps_consensus": {{"source": "券商/法人預估彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "{target_year} 年度 EPS 共識預估"}}, "target_price_avg": {{"source": "券商目標價彙整", "published_date": "2026/05/20", "source_url": "https://example.com", "note": "最新法人目標價均值"}}}}, "source_urls": ["https://example.com"]}}
     絕對不要輸出 markdown 標記或其他文字。"""
 
-    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、最新單季 EPS、前一季 EPS、近二季 EPS 合計、營收 MoM、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。請務必確認並標示出 EPS 對應年度、資料發布日期與來源！不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
+    prompt_text = f"請啟用搜尋引擎，【務必尋找最新日期】查詢台股 {stock_name} ({stock_id}) 最新財報新聞、最新單月/自結 EPS、最新單季 EPS、前一季 EPS、近二季 EPS 合計、營收 MoM、FY1/FY2/FY3 法人預測 EPS、未來三年複合成長率(CAGR)與最新目標價。請務必確認並標示出 EPS 對應年月/季度/年度、資料發布日期與來源！不要查詢 ETF 持股，ETF 持股由獨立功能處理。"
 
     def _make_config(search_enabled=True):
         kwargs = {
@@ -1974,6 +1978,68 @@ def inject_realtime_data(hist, stock_id, timeframe="D"):
     hist.index.name = 'Date'
     return hist, rt_prev
 
+
+def reconcile_price_history_with_reference(
+    primary_hist,
+    reference_hist,
+    *,
+    stock_id="",
+    primary_source="主股價來源",
+    reference_source="FinMind",
+    divergence_threshold=0.35,
+):
+    """Flag material price-source divergence without replacing the primary market price."""
+    if primary_hist is None or getattr(primary_hist, "empty", True):
+        return primary_hist, None
+    if reference_hist is None or getattr(reference_hist, "empty", True):
+        return primary_hist, None
+    try:
+        primary_close = float(primary_hist["Close"].dropna().iloc[-1])
+        reference_close = float(reference_hist["Close"].dropna().iloc[-1])
+    except Exception:
+        return primary_hist, None
+    if primary_close <= 0 or reference_close <= 0:
+        return primary_hist, None
+
+    divergence = abs(primary_close - reference_close) / reference_close
+    if divergence <= divergence_threshold:
+        return primary_hist, None
+
+    code_text = f"{stock_id} " if stock_id else ""
+    note = (
+        f"{code_text}股價來源交叉檢查：{primary_source} 最新收盤 {primary_close:.2f} "
+        f"與 {reference_source} {reference_close:.2f} 差距 {divergence*100:.1f}%，"
+        f"請確認是否為不同市場、延遲資料、還原價或來源錯置；系統不自動覆蓋現價。"
+    )
+    return primary_hist, note
+
+
+@st.cache_data(ttl=3600)
+def fetch_finmind_price_history(stock_id, fm_key="", days=1825):
+    """Fetch TaiwanStockPrice history from FinMind as price fallback / cross-check."""
+    try:
+        start_str = f"{(datetime.date.today() - datetime.timedelta(days=days)).isoformat()}"
+        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_id}&start_date={start_str}"
+        if fm_key:
+            url += f"&token={fm_key}"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        log_data_health("FinMind", res.status_code == 200, res.status_code)
+        data = res.json()
+        if data.get('status') == 200 and data.get('data'):
+            df = pd.DataFrame(data['data'])
+            df['Date'] = pd.to_datetime(df['date'])
+            df.rename(columns={'open':'Open','max':'High','min':'Low','close':'Close','Trading_Volume':'Volume'}, inplace=True)
+            df.set_index('Date', inplace=True)
+            out = df[['Open','High','Low','Close','Volume']].dropna()
+            if out is not None and not out.empty:
+                out.index.name = 'Date'
+                return out
+    except Exception as e:
+        log_exception("FinMind", f"fetch_finmind_price_history:{stock_id}", e)
+        log_data_health("FinMind", False, f"ERR:{str(e)[:120]}")
+    return None
+
+
 @st.cache_data(ttl=3600)
 def _get_base_stock_data(stock_id, fugle_key="", fm_key=""):
     hist = None
@@ -2025,25 +2091,24 @@ def _get_base_stock_data(stock_id, fugle_key="", fm_key=""):
                 log_exception("Yahoo", f"_get_base_stock_data:csv_fallback:{stock_id}{ext}", e)
 
     if hist is None or hist.empty:
-        try:
-            start_str = f"{(datetime.date.today() - datetime.timedelta(days=1825)).isoformat()}"
-            url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_id}&start_date={start_str}"
-            if fm_key: url += f"&token={fm_key}"
-            res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-            log_data_health("FinMind", res.status_code == 200, res.status_code)
-            data = res.json()
-            if data.get('status') == 200 and data.get('data'):
-                df = pd.DataFrame(data['data'])
-                df['Date'] = pd.to_datetime(df['date'])
-                df.rename(columns={'open':'Open','max':'High','min':'Low','close':'Close','Trading_Volume':'Volume'}, inplace=True)
-                df.set_index('Date', inplace=True)
-                hist = df[['Open','High','Low','Close','Volume']]
-                if hist is not None and not hist.empty:
-                    price_source = "FinMind fallback"
-                    fallback_notes.append("Yahoo 來源失敗，已改用 FinMind 備援股價。")
-        except Exception as e:
-            log_exception("FinMind", f"_get_base_stock_data:finmind_price:{stock_id}", e)
-            log_data_health("FinMind", False, f"ERR:{str(e)[:120]}")
+        finmind_hist = fetch_finmind_price_history(stock_id, fm_key)
+        if finmind_hist is not None and not finmind_hist.empty:
+            hist = finmind_hist
+            price_source = "FinMind fallback"
+            fallback_notes.append("Yahoo 來源失敗，已改用 FinMind 備援股價。")
+
+    if hist is not None and not hist.empty and price_source not in {"FinMind fallback", "Fugle API"}:
+        finmind_hist = fetch_finmind_price_history(stock_id, fm_key)
+        hist_checked, price_note = reconcile_price_history_with_reference(
+            hist,
+            finmind_hist,
+            stock_id=stock_id,
+            primary_source=price_source or "Yahoo/yfinance",
+            reference_source="FinMind",
+            divergence_threshold=0.35,
+        )
+        if price_note:
+            fallback_notes.append(price_note)
 
     if hist is not None and not hist.empty:
         hist.index.name = 'Date'
@@ -2071,6 +2136,19 @@ def get_stock_data(stock_id, fugle_key="", fm_key=""):
         info_data = info_data.copy()
         hist, rt_prev = inject_realtime_data(hist, stock_id, "D")
         if rt_prev is not None: info_data['previousClose'] = rt_prev
+        finmind_hist = fetch_finmind_price_history(stock_id, fm_key)
+        hist_checked, price_note = reconcile_price_history_with_reference(
+            hist,
+            finmind_hist,
+            stock_id=stock_id,
+            primary_source="即時/主股價來源",
+            reference_source="FinMind",
+            divergence_threshold=0.35,
+        )
+        if price_note:
+            notes = list(info_data.get('__fallback_notes') or [])
+            notes.append(price_note)
+            info_data['__fallback_notes'] = notes
     return hist, info_data
 
 @st.cache_data(ttl=900)
