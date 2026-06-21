@@ -92,8 +92,12 @@ def build_financial_base_context(*, stock_id, info, current_price, finmind_key, 
     earn_growth = s_float(info.get("earningsGrowth"))
 
     t_eps = s_float(info.get("trailingEps"))
+    sys_ttm_eps_source = "yfinance trailingEps"
+    sys_ttm_eps_is_inferred = False
     if t_eps is None and pe_ratio is not None and pe_ratio > 0 and current_price > 0:
         t_eps = current_price / pe_ratio
+        sys_ttm_eps_source = "現價 / P/E 反推"
+        sys_ttm_eps_is_inferred = True
 
     sys_f_eps_calc = s_float(info.get("forwardEps"))
 
@@ -120,6 +124,8 @@ def build_financial_base_context(*, stock_id, info, current_price, finmind_key, 
         "rev_growth": rev_growth,
         "earn_growth": earn_growth,
         "t_eps": t_eps,
+        "sys_ttm_eps_source": sys_ttm_eps_source if t_eps is not None else "",
+        "sys_ttm_eps_is_inferred": sys_ttm_eps_is_inferred,
         "sys_f_eps_calc": sys_f_eps_calc,
         "sys_latest_quarter_eps": None,
         "sys_ttm_eps": t_eps,
@@ -153,7 +159,12 @@ def build_ai_financial_context(*, stock_id, info, ai_financial_store):
     has_ai_fin_fetch = bool(ai_fin)
     ai_pe = s_float(ai_fin.get("pe")) if has_ai_fin_fetch else None
     ai_pb = s_float(ai_fin.get("pb")) if has_ai_fin_fetch else None
+    ai_latest_month_eps = pick_first_number(ai_fin.get("latest_month_eps")) if has_ai_fin_fetch else None
     ai_latest_quarter_eps = pick_first_number(ai_fin.get("latest_quarter_eps")) if has_ai_fin_fetch else None
+    ai_previous_quarter_eps = pick_first_number(ai_fin.get("previous_quarter_eps")) if has_ai_fin_fetch else None
+    ai_last_two_quarter_eps = pick_first_number(ai_fin.get("last_two_quarter_eps")) if has_ai_fin_fetch else None
+    if ai_last_two_quarter_eps is None and ai_latest_quarter_eps is not None and ai_previous_quarter_eps is not None:
+        ai_last_two_quarter_eps = ai_latest_quarter_eps + ai_previous_quarter_eps
     ai_ttm_eps = pick_first_number(ai_fin.get("ttm_eps"), ai_fin.get("trailing_eps")) if has_ai_fin_fetch else None
     ai_fiscal_year_eps = pick_first_number(ai_fin.get("fiscal_year_eps")) if has_ai_fin_fetch else None
     ai_forward_eps_ai = pick_first_number(ai_fin.get("forward_eps_ai"), ai_fin.get("forward_eps")) if has_ai_fin_fetch else None
@@ -197,7 +208,10 @@ def build_ai_financial_context(*, stock_id, info, ai_financial_store):
         "has_ai_fin_fetch": has_ai_fin_fetch,
         "ai_pe": ai_pe,
         "ai_pb": ai_pb,
+        "ai_latest_month_eps": ai_latest_month_eps,
         "ai_latest_quarter_eps": ai_latest_quarter_eps,
+        "ai_previous_quarter_eps": ai_previous_quarter_eps,
+        "ai_last_two_quarter_eps": ai_last_two_quarter_eps,
         "ai_ttm_eps": ai_ttm_eps,
         "ai_fiscal_year_eps": ai_fiscal_year_eps,
         "ai_forward_eps_ai": ai_forward_eps_ai,

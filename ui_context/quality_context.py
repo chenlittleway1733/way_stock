@@ -51,6 +51,7 @@ def build_quality_report_context(
     eff_peg,
     pb_ratio,
     ai_pb,
+    ai_latest_month_eps,
     sys_latest_quarter_eps,
     ai_latest_quarter_eps,
     sys_ttm_eps,
@@ -84,12 +85,22 @@ def build_quality_report_context(
     sys_de,
     ai_de,
     eff_de,
+    ttm_eps_adoption=None,
 ):
     """Build the financial quality report rows and derived period metadata."""
     dq_note_text = "；".join(dq_warnings) if dq_warnings else ""
     ai_period_text = raw_ai_period if raw_ai_period else "AI未啟動或未揭露期間"
     latest_rev_period = latest_rev_display_label if latest_rev_month and latest_rev_month != "無資料" else "未取得月營收"
     rev_is_stale = revenue_month_is_older(latest_rev_month) if latest_rev_month and latest_rev_month != "無資料" else False
+    ttm_eps_adoption = ttm_eps_adoption if isinstance(ttm_eps_adoption, dict) else {}
+    ttm_notes = "；".join(ttm_eps_adoption.get("notes") or [])
+    if ttm_eps_adoption.get("warnings"):
+        warn_text = "；".join(str(x) for x in ttm_eps_adoption.get("warnings") or [])
+        ttm_notes = (ttm_notes + "；" if ttm_notes else "") + warn_text
+    if not ttm_notes:
+        ttm_notes = "用於歷史 P/E；近四季 EPS 合計優先，yfinance trailingEps 僅作備援。"
+    ttm_adopted_source = ttm_eps_adoption.get("adopted_source") or adopt_source(sys_ttm_eps, ai_ttm_eps)
+    ttm_period = ai_period_text if ttm_eps_adoption.get("adopted_value") == ai_ttm_eps and ai_ttm_eps is not None else "系統/備援"
 
     def src(field_key, fallback_label="AI補齊"):
         return _ai_src(ai_fin, has_ai_fin_fetch, ai_period_text, field_key, fallback_label)
@@ -103,8 +114,9 @@ def build_quality_report_context(
         {"field": "Forward P/E", "system_source": "yfinance forwardPE 或 EPS 反推", "system_value": sys_forward_pe, "ai_source": src("forward_eps"), "ai_source_url": url("forward_eps"), "ai_value": ai_fpe, "adopted_value": eff_forward_pe, "adopted_source": adopt_source(sys_forward_pe, ai_fpe), "period": ai_period_text if sys_forward_pe is None and ai_fpe is not None else "系統/反推", "fmt": "x"},
         {"field": "PEG", "system_source": "Forward P/E ÷ 預估成長率", "system_value": orig_peg, "ai_source": src("yoy"), "ai_source_url": url("yoy"), "ai_value": ai_peg, "adopted_value": None if eff_peg == -999 else eff_peg, "adopted_source": "系統優先/AI備援", "period": "推估值", "fmt": "x", "notes": "成長率為負時 PEG 無意義" if eff_peg == -999 else ""},
         {"field": "P/B", "system_source": "yfinance；異常時 FinMind PBR 備援", "system_value": pb_ratio, "ai_source": src("pb"), "ai_source_url": url("pb"), "ai_value": ai_pb, "adopted_value": pb_ratio if pb_ratio is not None else ai_pb, "adopted_source": adopt_source(pb_ratio, ai_pb), "period": ai_period_text if pb_ratio is None and ai_pb is not None else "系統最新可得", "fmt": "x"},
+        {"field": "最新單月 EPS", "system_source": "系統未穩定提供，需 AI 查自結/注意股公告", "system_value": None, "ai_source": src("latest_month_eps"), "ai_source_url": url("latest_month_eps"), "ai_value": ai_latest_month_eps, "adopted_value": ai_latest_month_eps, "adopted_source": "AI補齊/自結公告" if ai_latest_month_eps is not None else "無可用資料", "period": ai_period_text, "fmt": "num", "notes": "若取得，目前估值優先採單月 EPS ×12"},
         {"field": "最新單季 EPS", "system_source": "系統未穩定提供，避免用 TTM 冒充", "system_value": sys_latest_quarter_eps, "ai_source": src("latest_quarter_eps"), "ai_source_url": url("latest_quarter_eps"), "ai_value": ai_latest_quarter_eps, "adopted_value": ai_latest_quarter_eps, "adopted_source": "AI補齊" if ai_latest_quarter_eps is not None else "無可用資料", "period": ai_period_text, "fmt": "num", "notes": "判斷最新獲利動能"},
-        {"field": "TTM EPS", "system_source": "yfinance trailingEps；必要時用 現價÷P/E 反推", "system_value": sys_ttm_eps, "ai_source": src("ttm_eps"), "ai_source_url": url("ttm_eps"), "ai_value": ai_ttm_eps, "adopted_value": eff_t_eps, "adopted_source": adopt_source(sys_ttm_eps, ai_ttm_eps), "period": ai_period_text if sys_ttm_eps is None and ai_ttm_eps is not None else "系統/反推", "fmt": "num", "notes": "用於歷史 P/E"},
+        {"field": "TTM EPS", "system_source": "yfinance trailingEps / 現價÷P/E 反推備援", "system_value": sys_ttm_eps, "ai_source": src("ttm_eps"), "ai_source_url": url("ttm_eps"), "ai_value": ai_ttm_eps, "adopted_value": eff_t_eps, "adopted_source": ttm_adopted_source, "period": ttm_period, "fmt": "num", "notes": ttm_notes},
         {"field": "完整年度 EPS", "system_source": "未穩定提供，需 AI/年報補齊", "system_value": sys_fiscal_year_eps, "ai_source": src("fiscal_year_eps"), "ai_source_url": url("fiscal_year_eps"), "ai_value": ai_fiscal_year_eps, "adopted_value": ai_fiscal_year_eps, "adopted_source": "AI補齊" if ai_fiscal_year_eps is not None else "無可用資料", "period": ai_period_text, "fmt": "num", "notes": "年度基準，不與 TTM 混用"},
         {"field": "Forward EPS－系統", "system_source": "yfinance forwardEps；必要時由 TTM EPS×成長率推估", "system_value": sys_forward_eps_system, "ai_source": "不使用AI", "ai_source_url": "", "ai_value": None, "adopted_value": sys_forward_eps_system, "adopted_source": "系統/推估" if sys_forward_eps_system is not None else "無可用資料", "period": "系統/推估", "fmt": "num"},
         {"field": "Forward EPS－AI/共識", "system_source": "不使用系統", "system_value": None, "ai_source": src("forward_eps_consensus") if ai_forward_eps_consensus is not None else src("forward_eps_ai"), "ai_source_url": url("forward_eps_consensus") if ai_forward_eps_consensus is not None else url("forward_eps_ai"), "ai_value": ai_f_eps_calc, "adopted_value": ai_f_eps_calc, "adopted_source": "法人共識/FY1" if ai_forward_eps_fy1 is not None or ai_forward_eps_consensus is not None else ("AI補齊" if ai_forward_eps_ai is not None else "無可用資料"), "period": ai_period_text, "fmt": "num", "notes": "與系統 Forward EPS 分開比較"},

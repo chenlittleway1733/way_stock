@@ -224,6 +224,54 @@ def prompt_field_source_priority_summary(fields=None, max_rows=18):
         return "NULL"
 
 
+def prompt_m10_margin_benchmark_summary(pack_or_summary=None, mode="compact"):
+    """Format M10 margin benchmark status for prompt packs."""
+    try:
+        source = pack_or_summary if isinstance(pack_or_summary, dict) else {}
+        summary = source.get("m10_margin_benchmark") if isinstance(source.get("m10_margin_benchmark"), dict) else source
+        if not isinstance(summary, dict):
+            return "NULL"
+
+        def _fmt_pct(v):
+            x = s_float(v)
+            if x is None:
+                return "NULL"
+            if abs(x) <= 3:
+                x *= 100
+            return f"{x:.1f}%"
+
+        if not summary.get("available"):
+            return "- M10 margin benchmark: 未建立；Dynamic Cap 沿用既有產業品質係數設定。"
+
+        line = (
+            "- M10 margin benchmark: "
+            f"狀態={prompt_nullize_text(summary.get('status_label'))}；"
+            f"分類={prompt_nullize_text(summary.get('category_name'))}；"
+            f"品質={prompt_nullize_text(summary.get('margin_quality'))}；"
+            f"規則={prompt_nullize_text(summary.get('margin_rule_label'))}；"
+            f"毛利率base/low/high={_fmt_pct(summary.get('base_gross_margin_pct'))}/{_fmt_pct(summary.get('gross_margin_low_pct'))}/{_fmt_pct(summary.get('gross_margin_high_pct'))}；"
+            f"營益率base/low/high={_fmt_pct(summary.get('base_operating_margin_pct'))}/{_fmt_pct(summary.get('operating_margin_low_pct'))}/{_fmt_pct(summary.get('operating_margin_high_pct'))}；"
+            f"估值用途={prompt_nullize_text(summary.get('usage_label'))}"
+        )
+        if str(mode).lower() in {"decision", "buy", "compact"}:
+            return line
+
+        lines = [line]
+        if prompt_nullize_text(summary.get("margin_reference_stocks")) != "NULL":
+            lines.append(f"- M10 margin 參考公司: {prompt_nullize_text(summary.get('margin_reference_stocks'))}")
+        if prompt_nullize_text(summary.get("margin_model_usage")) != "NULL":
+            lines.append(f"- M10 margin 使用說明: {prompt_nullize_text(summary.get('margin_model_usage'))}")
+        if prompt_nullize_text(summary.get("warning")) != "NULL":
+            lines.append(f"- M10 margin 提醒: {prompt_nullize_text(summary.get('warning'))}")
+        return "\n".join(lines)
+    except Exception as exc:
+        try:
+            log_exception("PromptPack", "prompt_m10_margin_benchmark_summary", exc)
+        except Exception:
+            pass
+        return "NULL"
+
+
 def prompt_dynamic_cap_core(pack, mode="research", divergence_warnings=None, final_signal=None, fallback_values=None):
     """Format Dynamic Cap inputs for prompt packs without leaking raw dictionaries."""
     try:
@@ -356,6 +404,9 @@ def prompt_dynamic_cap_core(pack, mode="research", divergence_warnings=None, fin
             lines.append(f"- 樂觀情境倍率: {optimistic_cap}（高風險情境，不等於買點）")
         if hard_cap != "NULL":
             lines.append(f"- hard ceiling: {hard_cap}（強制估值上限，不可因股價上漲直接調高）")
+        m10_margin_text = prompt_m10_margin_benchmark_summary(pack, mode=mode)
+        if m10_margin_text != "NULL":
+            lines.append(m10_margin_text)
 
         discount_parts = []
         for label, key in [
@@ -520,8 +571,17 @@ def prompt_peg_valuation_layers(
     current_eps=None,
     current_eps_raw=None,
     current_eps_source=None,
+    current_eps_formula_note=None,
     current_eps_period=None,
     current_price=None,
+    run_rate_1q_eps=None,
+    run_rate_2q_eps=None,
+    run_rate_reference_eps=None,
+    run_rate_1q_price=None,
+    run_rate_2q_price=None,
+    run_rate_reference_price=None,
+    run_rate_label=None,
+    run_rate_action=None,
     fy1_base_price=None,
     fy1_soft_price=None,
     fy1_hard_price=None,
@@ -566,9 +626,17 @@ def prompt_peg_valuation_layers(
         lines.append(f"- 1. 公式合理估值: {_price(system_price)}｜{source_text} × formula cap｜EPS={_eps(system_eps)}｜倍率={_cap(formula_cap)}{raw_text}｜判讀=若系統 Forward EPS 疑似 FY2 年期錯位，公式價降權採 FY1 EPS；FY2 只作市場先行定價，不直接作買點。")
         lines.append(
             f"- 1-1. 目前估值: {_price(current_price)}｜{prompt_nullize_text(current_eps_source or '目前 EPS')} × formula cap"
-            f"｜EPS={_eps(current_eps)}｜原始EPS={_eps(current_eps_raw)}｜期間={prompt_nullize_text(current_eps_period)}"
+            f"｜EPS={_eps(current_eps)}｜原始EPS={_eps(current_eps_raw)}｜計算={prompt_nullize_text(current_eps_formula_note)}｜期間={prompt_nullize_text(current_eps_period)}"
             "｜判讀=用已抓到的最新單季年化 EPS 或 TTM EPS 檢查目前實際獲利支撐度，不代表 Forward 合理價。"
         )
+        if any(_eps(v) != "NULL" for v in [run_rate_1q_eps, run_rate_2q_eps, run_rate_reference_eps]):
+            lines.append(
+                f"- 1-2. Run-rate EPS 動能估值: {_price(run_rate_reference_price)}"
+                f"｜近二季年化EPS={_eps(run_rate_2q_eps)} / 近一季年化EPS={_eps(run_rate_1q_eps)}"
+                f"｜參考EPS={_eps(run_rate_reference_eps)}｜近二季/近一季估值={_price(run_rate_2q_price)} / {_price(run_rate_1q_price)}"
+                f"｜判讀={prompt_nullize_text(run_rate_label)}；{prompt_nullize_text(run_rate_action)}"
+                "｜限制=只作 AI 高成長股獲利動能檢查，不取代 TTM、FY1 或 FY2。"
+            )
         lines.append(f"- 年度情境倍率: base={_cap(base_cap)}（基礎） / soft={_cap(soft_cap)}（樂觀） / hard={_cap(hard_cap)}（極限風控上限）")
 
         for title, eps, year, base_price, soft_price, hard_price, note in [
@@ -784,6 +852,7 @@ def prompt_snapshot_audit_core(
 
 def prompt_eps_adoption_sync_summary(
     sys_latest_quarter_eps_val=None,
+    ai_latest_month_eps_val=None,
     ai_latest_quarter_eps_val=None,
     raw_ai_period_val=None,
     sys_ttm_eps_val=None,
@@ -820,8 +889,17 @@ def prompt_eps_adoption_sync_summary(
     current_eps_for_valuation_val=None,
     current_eps_raw_val=None,
     current_eps_source_val=None,
+    current_eps_formula_note_val=None,
     current_eps_period_val=None,
     current_target_price_est_val=None,
+    run_rate_1q_eps_val=None,
+    run_rate_2q_eps_val=None,
+    run_rate_reference_eps_val=None,
+    run_rate_1q_target_price_val=None,
+    run_rate_2q_target_price_val=None,
+    run_rate_reference_target_price_val=None,
+    run_rate_label_val=None,
+    run_rate_action_val=None,
     fy1_base_target_price_val=None,
     fy1_soft_target_price_val=None,
     fy1_hard_target_price_val=None,
@@ -863,6 +941,8 @@ def prompt_eps_adoption_sync_summary(
         def _has(*vals):
             return any(s_float(v) is not None for v in vals)
 
+        if _has(ai_latest_month_eps_val):
+            lines.append(f"- 最新單月 / 自結 EPS: AI={_n(ai_latest_month_eps_val)} / 採用={_n(ai_latest_month_eps_val)} / 期間={_n(raw_ai_period_val)} / 估值口徑=單月 EPS x12")
         if _has(sys_latest_quarter_eps_val, ai_latest_quarter_eps_val):
             adopted = ai_latest_quarter_eps_val if s_float(ai_latest_quarter_eps_val) is not None else sys_latest_quarter_eps_val
             lines.append(f"- 最新單季 EPS: 系統={_n(sys_latest_quarter_eps_val)} / AI={_n(ai_latest_quarter_eps_val)} / 採用={_n(adopted)} / 期間={_n(raw_ai_period_val)}")
@@ -885,7 +965,13 @@ def prompt_eps_adoption_sync_summary(
         if _has(current_eps_for_valuation_val):
             lines.append(
                 f"- 目前估值 EPS: {_num(current_eps_for_valuation_val)}"
-                f"（{_n(current_eps_source_val)}；原始EPS={_num(current_eps_raw_val)}；期間={_n(current_eps_period_val)}；用於『目前估值』）"
+                f"（{_n(current_eps_source_val)}；原始EPS={_num(current_eps_raw_val)}；計算={_n(current_eps_formula_note_val)}；期間={_n(current_eps_period_val)}；用於『目前估值』）"
+            )
+        if _has(run_rate_1q_eps_val, run_rate_2q_eps_val, run_rate_reference_eps_val):
+            lines.append(
+                f"- Run-rate EPS 動能: 近二季年化={_num(run_rate_2q_eps_val)} / 近一季年化={_num(run_rate_1q_eps_val)}"
+                f" / 參考EPS={_num(run_rate_reference_eps_val)}"
+                f"（{_n(run_rate_label_val)}；{_n(run_rate_action_val)}；只作動能檢查，不取代 TTM/FY1/FY2）"
             )
         if _has(ai_forward_eps_ai_val):
             lines.append(f"- Forward EPS－AI一般欄位: {_num(ai_forward_eps_ai_val)}")
@@ -927,6 +1013,9 @@ def prompt_eps_adoption_sync_summary(
             ("系統公式", sys_target_price_est_val),
             ("系統原始公式", system_formula_fair_value_raw_val),
             ("目前估值", current_target_price_est_val),
+            ("Run-rate參考", run_rate_reference_target_price_val),
+            ("Run-rate近二季", run_rate_2q_target_price_val),
+            ("Run-rate近一季", run_rate_1q_target_price_val),
             ("FY1-base", fy1_base_target_price_val),
             ("FY1-soft", fy1_soft_target_price_val),
             ("FY1-hard", fy1_hard_target_price_val),
@@ -942,7 +1031,7 @@ def prompt_eps_adoption_sync_summary(
                 price_parts.append(f"{label}={_price(value)}")
         if price_parts:
             lines.append("- 新版估值結果: " + "；".join(price_parts))
-        lines.append("- 重要規則: 公式合理估值原則上使用系統 Forward EPS；若偵測到系統 Forward EPS 疑似 FY2 年期錯位，公式價降權採 FY1 EPS，系統原始公式價只作追蹤；目前估值使用最新單季 EPS 年化，缺值才退回 TTM EPS，用於目前獲利支撐度檢查；系統 Forward EPS 缺值時為 NULL，不得用 AI/FY1 冒充系統公式；前瞻 PEG 不再單列 AI估值；FY1/FY2/FY3 各列 base/soft/hard，分別為基礎/樂觀/極限；手動年度情境以 FY1 EPS 為主，未手動調整時採 FY1 base。")
+        lines.append("- 重要規則: 公式合理估值原則上使用系統 Forward EPS；若偵測到系統 Forward EPS 疑似 FY2 年期錯位，公式價降權採 FY1 EPS，系統原始公式價只作追蹤；目前估值使用最新單季 EPS 年化，缺值才退回 TTM EPS，用於目前獲利支撐度檢查；Run-rate EPS 用近一季/近二季年化檢查 AI 高成長動能，但不得取代 TTM、FY1 或 FY2；系統 Forward EPS 缺值時為 NULL，不得用 AI/FY1 冒充系統公式；前瞻 PEG 不再單列 AI估值；FY1/FY2/FY3 各列 base/soft/hard，分別為基礎/樂觀/極限；手動年度情境以 FY1 EPS 為主，未手動調整時採 FY1 base。")
         return "\n".join(lines) if lines else "無可用 EPS 面板資料，提示詞不納入 EPS 估值判斷。"
     except Exception as exc:
         try:
