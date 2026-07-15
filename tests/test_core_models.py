@@ -189,6 +189,49 @@ class StockMappingConsistencyTests(unittest.TestCase):
                 total_weight += weight
             self.assertLessEqual(total_weight, 0.50 + 1e-9, f"{code} total hybrid weight exceeds 50%")
 
+    def test_7828_innovation_service_uses_semiconductor_test_model(self):
+        rows = {r["code"]: r for r in _parse_stocklist()}
+        self.assertIn("7828", rows)
+        self.assertEqual(rows["7828"]["name"], "創新服務")
+        self.assertIn("測試 / AOI / 自動化檢測設備", rows["7828"]["category"])
+
+        profile = get_industry_valuation_profile("7828", "創新服務")
+        self.assertEqual(profile["primary_taxon"], "TEST_AUTOMATION_EQUIPMENT")
+        self.assertEqual(profile["model_label"], "測試 / AOI / 自動化檢測設備")
+        self.assertEqual(profile["classification_source"], "stock_mapping.py")
+        self.assertEqual(profile["m10_margin_status"], "stock_not_valuation_ready")
+
+    def test_2454_cloud_ai_asic_re_rating_keeps_platform_primary_and_hard_cap_locked(self):
+        profile = get_industry_valuation_profile("2454", "聯發科")
+
+        self.assertEqual(profile["primary_taxon"], "PLATFORM_IC_LEADER")
+        self.assertEqual(profile["re_rating_status"], "CLOUD_AI_ASIC_RE_RATING")
+        self.assertIn("IC_DESIGN_ASIC_HIGH_VISIBILITY 35%（hard 0%）", profile["hybrid_taxons_text"])
+        self.assertTrue(profile["disable_market_hard_overlay"])
+        self.assertIn("FY2_SOFT_PRICED", profile["pricing_horizon_policy"])
+        self.assertAlmostEqual(profile["hybrid_cap_display"]["mixed_hard_ceiling_pe"], 60.0)
+        self.assertGreater(profile["hybrid_cap_display"]["mixed_soft_ceiling_pe"], 45.0)
+
+        cap_pack = calculate_dynamic_cap_v2(
+            stock_id="2454",
+            stock_name="聯發科",
+            current_price=5000,
+            industry_profile=profile,
+            ttm_eps=100,
+            system_forward_eps=100,
+            revenue_yoy=0.80,
+            gross_margin=0.50,
+            operating_margin=0.25,
+            roe=0.25,
+            divergence_warnings=[],
+            dq_warnings=[],
+        )
+        self.assertEqual(cap_pack["model_version"], "Dynamic Cap 2.0 calibration 17-C-23")
+        self.assertAlmostEqual(cap_pack["structural_hard_ceiling_cap"], 60.0)
+        self.assertAlmostEqual(cap_pack["hard_ceiling_cap"], 60.0)
+        self.assertFalse(cap_pack["market_condition_hard_adjustment"]["adjusted"])
+        self.assertIn("關閉市場 hard overlay", cap_pack["market_condition_hard_adjustment"]["reason"])
+
     def test_taxonomy_pe_caps_are_ordered_when_present(self):
         for taxon, profile in industry_taxonomy.INDUSTRY_TAXONOMY.items():
             base = profile.get("base_pe")
@@ -254,9 +297,10 @@ class ModelVersionTableTests(unittest.TestCase):
             "17-C-20",
             "17-C-21",
             "17-C-22",
+            "17-C-23",
         ]
 
-        for info in (tax_info, cap_info):
+        for info in (tax_info,):
             table = info["version_table"]
             orders = [row["order"] for row in table]
             self.assertGreaterEqual(len(table), 5)
@@ -266,9 +310,18 @@ class ModelVersionTableTests(unittest.TestCase):
             self.assertEqual(table[-1]["stage"], info["latest_stage"])
             self.assertEqual(orders, sorted(orders))
 
+        table = cap_info["version_table"]
+        orders = [row["order"] for row in table]
+        self.assertGreaterEqual(len(table), 5)
+        self.assertEqual(cap_info["version"], "17-C-23")
+        self.assertEqual(cap_info["latest_stage"], "17-C-23")
+        self.assertEqual(cap_info["build_date"], "2026-06-23")
+        self.assertEqual(table[-1]["stage"], cap_info["latest_stage"])
+        self.assertEqual(orders, sorted(orders))
+
         self.assertEqual([row["stage"] for row in tax_info["version_table"]], expected_taxonomy_stages)
         self.assertEqual([row["stage"] for row in cap_info["version_table"]], expected_dynamic_cap_stages)
-        self.assertEqual(cap_info["engine_version"], "Dynamic Cap 2.0 calibration 17-C-22")
+        self.assertEqual(cap_info["engine_version"], "Dynamic Cap 2.0 calibration 17-C-23")
 
     def test_multiplier_tightening_stage_keeps_taxonomy_and_dynamic_cap_in_sync(self):
         expected_caps = {
@@ -346,7 +399,7 @@ class M10ModelDataLoaderTests(unittest.TestCase):
 
         self.assertTrue(summary["ok"], summary["issues"])
         self.assertEqual(summary["industry_category_count"], 90)
-        self.assertEqual(summary["stock_model_count"], 275)
+        self.assertEqual(summary["stock_model_count"], 276)
         self.assertEqual(summary["valuation_universe_count"], 157)
         self.assertEqual(summary["margin_quality_counts"], {"A": 37, "B": 35, "C": 15, "N/A": 3})
 
@@ -1213,7 +1266,7 @@ class ValuationLogicTests(unittest.TestCase):
         self.assertGreater(pack.get("final_cap"), 0)
         self.assertGreaterEqual(pack.get("final_cap"), pack.get("floor_cap"))
         self.assertLessEqual(pack.get("final_cap"), pack.get("hard_ceiling_cap"))
-        self.assertEqual(pack.get("model_version"), "Dynamic Cap 2.0 calibration 17-C-22")
+        self.assertEqual(pack.get("model_version"), "Dynamic Cap 2.0 calibration 17-C-23")
         self.assertFalse(pack.get("report").empty)
 
     def test_dynamic_cap_market_condition_can_expand_hard_ceiling(self):
@@ -1347,6 +1400,23 @@ class ValuationLogicTests(unittest.TestCase):
         self.assertEqual(result["rank"], 2)
         self.assertIn("soft", result["explanation"])
         self.assertIn("降權", result["decision_rule"])
+
+    def test_infer_pricing_horizon_keeps_fy1_soft_separate_from_fy2(self):
+        result = infer_pricing_horizon(
+            price=3040,
+            ttm_eps=39.59,
+            fy1_eps=68.29,
+            fy2_eps=100.0,
+            fy3_eps=None,
+            base_pe=38,
+            soft_pe=60,
+            hard_pe=60,
+        )
+
+        self.assertEqual(result["code"], "FY1_SOFT_PRICED")
+        self.assertEqual(result["rank"], 1)
+        self.assertFalse(result["is_future_priced"])
+        self.assertIn("不代表必須用 FY2", result["explanation"])
 
     def test_future_evidence_score_rewards_landing_but_penalizes_data_risk(self):
         strong = calculate_future_evidence_score(
@@ -1722,6 +1792,50 @@ class ValuationLogicTests(unittest.TestCase):
         self.assertEqual(result["signal"], "資料分歧-降權判斷")
         self.assertIn("小部位", result["advice"])
         self.assertEqual(result["future_evidence_score"], 85)
+
+    def test_final_signal_does_not_treat_fy1_soft_as_fy2_future_pricing(self):
+        result = build_final_operation_signal(
+            current_price=85,
+            valuation_separation={"operable_low": 90, "operable_mid": 105, "operable_high": 120, "warning_count": 0, "danger_count": 0},
+            divergence_warnings=[],
+            target_confidence={"rank": 5},
+            industry_profile={"pe_model_suitable": True},
+            forward_pe=24,
+            peg=0.9,
+            roe=0.20,
+            revenue_yoy=0.20,
+            gross_margin=0.30,
+            operating_margin=0.20,
+            pricing_horizon={"code": "FY1_SOFT_PRICED", "label": "FY1 樂觀定價", "explanation": "FY1 soft 可解釋", "decision_rule": "安全邊際不足"},
+            future_evidence={"score": 35, "label": "證據不足", "action": "不可追價"},
+        )
+
+        self.assertEqual(result["pricing_horizon_code"], "FY1_SOFT_PRICED")
+        self.assertNotIn("需 FY2", result["advice"])
+        self.assertNotIn("FY2", "；".join(result["reasons"]))
+        self.assertIn("FY1 樂觀區", "；".join(result["reasons"]))
+
+    def test_final_signal_never_upgrades_buy_for_fy2_soft_priced(self):
+        result = build_final_operation_signal(
+            current_price=85,
+            valuation_separation={"operable_low": 90, "operable_mid": 105, "operable_high": 120, "warning_count": 0, "danger_count": 0},
+            divergence_warnings=[],
+            target_confidence={"rank": 5},
+            industry_profile={"pe_model_suitable": True},
+            forward_pe=16,
+            peg=0.9,
+            roe=0.25,
+            revenue_yoy=0.50,
+            gross_margin=0.45,
+            operating_margin=0.25,
+            pricing_horizon={"code": "FY2_SOFT_PRICED", "label": "FY2 樂觀先行定價", "explanation": "需 FY2 soft 才能解釋", "decision_rule": "不得升級買進"},
+            future_evidence={"score": 90, "label": "未來高度落地", "action": "續抱或回檔小量"},
+        )
+
+        self.assertNotEqual(result["signal"], "可買-小量分批")
+        self.assertEqual(result["signal"], "資料分歧-降權判斷")
+        self.assertIn("不得直接升級", result["advice"])
+        self.assertIn("回檔小量", result["advice"])
 
     def test_margin_credit_summary_calculates_ratios_and_risk(self):
         df = pd.DataFrame({

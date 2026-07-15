@@ -536,7 +536,7 @@ def prompt_forward_eps_tier_core(pack):
                     pass
         lines.extend([
             "- 請 AI 判斷：目前股價/法人目標價偏高，是因為 Dynamic Cap 倍率太低，還是因為市場已經在看 FY2/FY3 EPS？也請同時對照 TTM EPS，看目前實際獲利是否能支撐股價。",
-            "- 重要限制：FY1/FY2/FY3 是預估年度 EPS 序列，不是查詢日後1/2/3年；base 是基礎估值，soft 是樂觀估值，hard 是極限風控上限；FY2 只能用來解釋市場先行，不等於可操作買點；FY3 屬高風險遠期情境，不可直接作為買進目標。",
+            "- 重要限制：FY1/FY2/FY3 是預估年度 EPS 序列，不是查詢日後1/2/3年；base 是基礎估值，soft 是樂觀估值，hard 是極限風控上限；FY1_SOFT_PRICED 代表 FY1 樂觀區，不代表必須用 FY2 EPS 才能解釋；FY2 只能用來解釋市場先行，不等於可操作買點；FY3 屬高風險遠期情境，不可直接作為買進目標。",
             "- 新增規則：若 pricing_horizon 為 FY2/FY3/題材重評價，請同時檢查 future_evidence_score；證據不足時不得用 FY2/FY3 支撐買進，證據高時也只能解讀為小部位或低成本既有部位續抱。"
         ])
         return "\n".join(lines)
@@ -1287,6 +1287,7 @@ def prompt_model_gap_trigger_conditions():
 - 不可因股價高於模型價就直接調高模型。
 - 不可因單一法人高標就調高模型。
 - FY2 只能解釋市場先行定價，不等於買點。
+- FY1_SOFT_PRICED 只是 FY1 樂觀區或安全邊際不足，不可誤判為 FY2 先行定價。
 - FY3 只作高風險遠期情境，不可作一般買進依據。
 - future_evidence_score 低於 50 時，不得用 FY2/FY3 合理化現價；60-79 只能續抱或小量，80 以上也不可直接重倉。
 - 若建議調整模型，必須說明是 primary_taxon、hybrid 權重，還是 base / soft / hard ceiling 的問題。"""
@@ -1316,6 +1317,7 @@ def prompt_buy_decision_gap_risk_conditions():
 重要限制：
 - 本區不是模型庫修正建議，只用於買進風險判斷。
 - FY2 只能解釋市場先行定價，不等於買點。
+- FY1_SOFT_PRICED 只是 FY1 樂觀區或安全邊際不足，不可誤判為 FY2 先行定價。
 - FY3 只作高風險遠期情境，不可作一般買進依據。
 - future_evidence_score 低於 50 時，不可用 FY2/FY3 支撐買進；60-79 僅能保守續抱或等待確認；80 以上仍需分批與控倉。
 - 法人高標不可直接視為合理買進價。
@@ -1334,6 +1336,9 @@ def prompt_model_library_feedback_request(industry_profile=None):
         confidence = prompt_nullize_text(industry_profile.get("classification_confidence"))
         hard_cap = prompt_nullize_text(industry_profile.get("hard_ceiling_pe"))
         soft_cap = prompt_nullize_text(industry_profile.get("soft_ceiling_pe"))
+        re_rating_status = prompt_nullize_text(industry_profile.get("re_rating_status_label") or industry_profile.get("re_rating_status"))
+        pricing_policy = prompt_nullize_text(industry_profile.get("pricing_horizon_policy"))
+        hard_policy = prompt_nullize_text(industry_profile.get("hard_ceiling_policy"))
 
         lines = [
             "本區只放在研究完整版；目的不是產生買賣建議，而是把本次個案分析整理成模型庫修正候選清單。",
@@ -1341,6 +1346,9 @@ def prompt_model_library_feedback_request(industry_profile=None):
             f"- 目前匹配模型: {model_label}",
             f"- 目前 hybrid_taxons / 權重: {hybrid_taxons}",
             f"- 混合後估值區間: {mixed_caps}",
+            f"- 模型重評價狀態: {re_rating_status}",
+            f"- 重評價操作規則: {pricing_policy}",
+            f"- hard ceiling 政策: {hard_policy}",
             f"- 分類來源 / 可信度: {source} / {confidence}",
             f"- 主模型 soft / hard ceiling: {soft_cap} / {hard_cap}",
             "- 可參考落差來源: 現價、法人目標價、系統可操作估值、FY1/FY2/FY3 估值、Dynamic Cap、產業模型單次快照稽核。",
