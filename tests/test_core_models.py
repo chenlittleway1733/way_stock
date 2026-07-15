@@ -476,6 +476,13 @@ class MarketReasoningEngineTests(unittest.TestCase):
         self.assertEqual(snapshot["foreign_futures_net_oi_lots"], -79557)
         self.assertIn("未平倉偏空", snapshot["net_oi_bias"])
 
+        classified = classify_short_position(futures_snapshot=snapshot)
+        self.assertEqual(classified["top_class"], "covering")
+        self.assertEqual(classified["position_label"], "未平倉重度偏空")
+        self.assertEqual(classified["flow_label"], "當日小幅回補")
+        self.assertIn("未平倉重度偏空 / 當日小幅回補", classified["display_label"])
+        self.assertIn("不代表既有空單已消失", classified["interpretation"])
+
     def test_short_position_classifier_uses_open_interest_bias_for_hedge_or_bearish_read(self):
         hedge = classify_short_position(
             institutional_flow={"cash_net": 6200},
@@ -521,7 +528,7 @@ class MarketReasoningEngineTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(pack["model_version"], "V3-MR-Phase7b-20260715")
+        self.assertEqual(pack["model_version"], "V3-MR-Phase7c-20260715")
         self.assertEqual(set(pack["scenarios"]), {"bull", "base", "bear"})
         self.assertAlmostEqual(sum(s["probability"] for s in pack["scenarios"].values()), 1.0)
         self.assertTrue(pack["reasoning_evidence"])
@@ -549,7 +556,7 @@ class MarketReasoningEngineTests(unittest.TestCase):
 
         self.assertEqual(payload["analysis_id"], "unit-test")
         self.assertEqual(payload["trade_date"], "2026-07-15")
-        self.assertEqual(payload["model_version"], "V3-MR-Phase7b-20260715")
+        self.assertEqual(payload["model_version"], "V3-MR-Phase7c-20260715")
         self.assertIn("scenarios", payload)
         self.assertIn("evidence", payload)
         self.assertIn("source_snapshot", payload)

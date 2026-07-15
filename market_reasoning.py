@@ -48,7 +48,7 @@ from datetime import datetime
 import pandas as pd
 
 
-MARKET_REASONING_VERSION = "V3-MR-Phase7b-20260715"
+MARKET_REASONING_VERSION = "V3-MR-Phase7c-20260715"
 
 SHORT_POSITION_CLASSES = (
     "hedge",
@@ -409,6 +409,37 @@ def classify_short_position(
     if futures_net_oi is not None:
         oi_short_pressure = _clamp((-futures_net_oi) / 50000.0, -2.0, 2.0)
 
+    position_bias = "unknown"
+    position_label = "未平倉資料不足"
+    if futures_net_oi is not None:
+        if futures_net_oi <= -60000:
+            position_bias = "heavy_short"
+            position_label = "未平倉重度偏空"
+        elif futures_net_oi <= -30000:
+            position_bias = "short"
+            position_label = "未平倉偏空"
+        elif futures_net_oi >= 30000:
+            position_bias = "long"
+            position_label = "未平倉偏多"
+        else:
+            position_bias = "neutral"
+            position_label = "未平倉中性"
+
+    flow_bias = "neutral"
+    flow_label = "當日交易中性"
+    if futures_short_change >= 3000:
+        flow_bias = "short_build"
+        flow_label = "當日偏加空"
+    elif futures_short_change > 0:
+        flow_bias = "slight_short_build"
+        flow_label = "當日略偏加空"
+    elif futures_short_change <= -3000:
+        flow_bias = "short_covering"
+        flow_label = "當日明顯回補"
+    elif futures_short_change < 0:
+        flow_bias = "slight_short_covering"
+        flow_label = "當日小幅回補"
+
     scores = {key: 0.0 for key in SHORT_POSITION_CLASSES}
     if short_score > 0:
         if cash_score > 0:
@@ -440,6 +471,21 @@ def classify_short_position(
         "arbitrage": "套利 Arbitrage",
         "covering": "空單回補 Covering",
     }
+    behavior_label = labels.get(top_class, top_class)
+    if position_bias in {"heavy_short", "short"}:
+        display_label = f"{position_label} / {flow_label}"
+        if flow_bias in {"short_covering", "slight_short_covering"}:
+            interpretation = (
+                f"{position_label}，但當日交易流量偏回補；這只代表空方當日減壓，"
+                "不代表既有空單已消失。"
+            )
+        elif flow_bias in {"short_build", "slight_short_build"}:
+            interpretation = f"{position_label}，且當日交易仍偏加空，市場風險需提高。"
+        else:
+            interpretation = f"{position_label}，當日交易流量中性，仍需以未平倉存量控風險。"
+    else:
+        display_label = f"{position_label} / {flow_label}" if position_bias != "unknown" else behavior_label
+        interpretation = f"{position_label}；{flow_label}。"
     evidence = [
         f"現貨/法人淨額 {cash_net:,.0f}",
         f"期貨空單變化 {futures_short_change:,.0f}",
@@ -456,7 +502,14 @@ def classify_short_position(
         "available": True,
         "probabilities": probabilities,
         "top_class": top_class,
-        "top_label": labels.get(top_class, top_class),
+        "top_label": behavior_label,
+        "behavior_label": behavior_label,
+        "position_bias": position_bias,
+        "position_label": position_label,
+        "flow_bias": flow_bias,
+        "flow_label": flow_label,
+        "display_label": display_label,
+        "interpretation": interpretation,
         "scores": scores,
         "evidence": evidence,
         "source": futures_snapshot.get("source"),
@@ -476,6 +529,13 @@ def _short_position_direction_score(short_position):
     covering = _to_float(probabilities.get("covering")) or 0.0
     arbitrage = _to_float(probabilities.get("arbitrage")) or 0.0
     score = covering * 35.0 + hedge * 12.0 - directional_bear * 55.0 - arbitrage * 6.0
+    position_bias = short_position.get("position_bias")
+    if position_bias == "heavy_short":
+        score -= 12.0
+    elif position_bias == "short":
+        score -= 6.0
+    elif position_bias == "long":
+        score += 4.0
     return _clamp(score, -45.0, 35.0)
 
 
@@ -489,6 +549,13 @@ def _short_position_risk_score(short_position):
     covering = _to_float(probabilities.get("covering")) or 0.0
     arbitrage = _to_float(probabilities.get("arbitrage")) or 0.0
     risk = 42.0 + directional_bear * 34.0 + hedge * 8.0 + arbitrage * 12.0 - covering * 14.0
+    position_bias = short_position.get("position_bias")
+    if position_bias == "heavy_short":
+        risk += 14.0
+    elif position_bias == "short":
+        risk += 8.0
+    elif position_bias == "long":
+        risk -= 4.0
     return _clamp(risk, 20.0, 85.0)
 
 
@@ -981,7 +1048,7 @@ def build_reasoning_evidence_records(reasoning_pack):
             "direction": direction,
             "weight": 0.20,
             "value": top_class,
-            "evidence_text": f"空單分類：{short_position.get('top_label', 'N/A')}",
+            "evidence_text": f"空單分類：{short_position.get('display_label') or short_position.get('top_label', 'N/A')}",
             "source": "market_reasoning.classify_short_position",
         })
 
@@ -1069,6 +1136,7 @@ def build_market_dashboard_snapshot(reasoning_pack, stock_id=None, stock_name=No
         "base_probability": (scenarios.get("base") or {}).get("probability"),
         "bear_probability": (scenarios.get("bear") or {}).get("probability"),
         "short_position_label": (reasoning_pack.get("short_position") or {}).get("top_label", "資料不足"),
+        "short_position_display_label": (reasoning_pack.get("short_position") or {}).get("display_label"),
     }
     row["signature"] = "|".join([
         str(row["stock_id"]),
@@ -1113,7 +1181,7 @@ def build_market_history_frame(history):
             "Base": item.get("base_probability"),
             "Bear": item.get("bear_probability"),
             "資料品質": item.get("data_quality"),
-            "空單分類": item.get("short_position_label"),
+            "空單分類": item.get("short_position_display_label") or item.get("short_position_label"),
         })
     df = pd.DataFrame(rows)
     if df.empty:
@@ -1262,7 +1330,7 @@ def build_market_reasoning_report(reasoning_pack):
         probabilities = short_position.get("probabilities") or {}
         rows.append({
             "項目": "空單分類",
-            "結果": short_position.get("top_label", "N/A"),
+            "結果": short_position.get("display_label") or short_position.get("top_label", "N/A"),
             "說明": " / ".join(f"{key}:{value:.0%}" for key, value in probabilities.items() if value is not None),
         })
     else:
@@ -1328,7 +1396,7 @@ def format_market_reasoning_prompt_summary(reasoning_pack):
         f"風險={_format_score(reasoning_pack.get('risk_score'))}; "
         f"信心={_format_score(reasoning_pack.get('confidence_score'))}; "
         f"資料品質={quality.get('status')}; "
-        f"空單分類={short_position.get('top_label', '資料不足')}; "
+        f"空單分類={short_position.get('display_label') or short_position.get('top_label', '資料不足')}; "
         f"情境={scenario_text}; "
         f"支持證據={evidence}; 反向證據={counter}; 警示={warnings}"
     )

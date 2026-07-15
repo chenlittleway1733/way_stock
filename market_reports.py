@@ -200,7 +200,7 @@ def build_market_alerts(reasoning_pack, backtest_result=None, ai_result=None):
             severity,
             "DIRECTIONAL_BEAR_SHORT",
             "空單分類偏方向性看空",
-            f"期貨空單分類為 {short_position.get('top_label', '方向性看空')}，機率 {_fmt_ratio(prob)}。",
+            f"期貨空單分類為 {short_position.get('display_label') or short_position.get('top_label', '方向性看空')}，機率 {_fmt_ratio(prob)}。",
             "market_reasoning.short_position",
             "需確認外資現貨是否同步賣超，若同步轉弱應降低追價。",
         )

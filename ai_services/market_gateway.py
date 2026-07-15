@@ -269,8 +269,8 @@ def build_market_ai_fallback_response(ai_input, reason="AI Gateway fallback"):
         ),
         "market_bias": _market_bias_from_scores(direction_score),
         "short_interpretation": {
-            "top_class": short_position.get("top_label", "資料不足"),
-            "explanation": short_position.get("message", "依系統空單分類結果或缺值狀態呈現。"),
+            "top_class": short_position.get("display_label") or short_position.get("top_label", "資料不足"),
+            "explanation": short_position.get("interpretation") or short_position.get("message", "依系統空單分類結果或缺值狀態呈現。"),
             "probabilities": short_position.get("probabilities") if isinstance(short_position.get("probabilities"), dict) else {},
         },
         "key_evidence": key_evidence or ["系統尚未累積足夠支持證據。"],

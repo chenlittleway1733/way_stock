@@ -173,15 +173,18 @@ def render_market_reasoning_panel(
                 {"項目": "商品 / 身份", "數值": f"{futures_data.get('product_name', 'N/A')} / {futures_data.get('investor_name', 'N/A')}", "說明": "期交所三大法人區分各期貨契約"},
                 {"項目": "當日多方交易", "數值": _fmt_lots(futures_data.get("foreign_futures_trade_long_lots")), "說明": "外資買進期貨口數"},
                 {"項目": "當日空方交易", "數值": _fmt_lots(futures_data.get("foreign_futures_trade_short_lots")), "說明": "外資賣出期貨口數"},
-                {"項目": "當日空方變化推估", "數值": _fmt_lots(futures_data.get("foreign_futures_short_change")), "說明": futures_data.get("daily_bias", "")},
+                {"項目": "當日交易淨流量推估", "數值": _fmt_lots(futures_data.get("foreign_futures_short_change")), "說明": f"{futures_data.get('daily_bias', '')}；這是交易流量，不等於未平倉變化"},
                 {"項目": "未平倉多方", "數值": _fmt_lots(futures_data.get("foreign_futures_long_oi_lots")), "說明": "外資未平倉多方口數"},
                 {"項目": "未平倉空方", "數值": _fmt_lots(futures_data.get("foreign_futures_short_oi_lots")), "說明": "外資未平倉空方口數"},
                 {"項目": "未平倉淨額", "數值": _fmt_lots(futures_data.get("foreign_futures_net_oi_lots")), "說明": futures_data.get("net_oi_bias", "")},
-                {"項目": "分類結果", "數值": short_position.get("top_label", "資料不足"), "說明": "看空 / 避險 / 套利 / 回補為規則推估"},
+                {"項目": "存量判讀", "數值": short_position.get("position_label", "資料不足"), "說明": "依外資台指期未平倉淨額判斷"},
+                {"項目": "當日流量判讀", "數值": short_position.get("flow_label", "資料不足"), "說明": "依當日多方/空方交易口數推估"},
+                {"項目": "分類結果", "數值": short_position.get("display_label") or short_position.get("top_label", "資料不足"), "說明": short_position.get("interpretation") or "看空 / 避險 / 套利 / 回補為規則推估"},
             ]
             st_dataframe(pd.DataFrame(rows), hide_index=True)
             probabilities = short_position.get("probabilities") or {}
             if probabilities:
+                st.caption("下表機率描述的是當日行為型態；未平倉空單存量請以上方「存量判讀」為準。")
                 prob_rows = [
                     {"分類": "避險 / 風控", "機率": f"{probabilities.get('hedge', 0):.1%}"},
                     {"分類": "方向性看空", "機率": f"{probabilities.get('directional_bear', 0):.1%}"},
@@ -189,7 +192,7 @@ def render_market_reasoning_panel(
                     {"分類": "空單回補", "機率": f"{probabilities.get('covering', 0):.1%}"},
                 ]
                 st_dataframe(pd.DataFrame(prob_rows), hide_index=True)
-            st.caption("限制：期交所資料為市場層級台指期外資部位；個股法人資料為個股層級，分類只作風控推估。")
+            st.caption("限制：期交所資料為市場層級台指期外資部位；當日交易流量與未平倉存量需分開解讀，分類只作風控推估。")
         else:
             st.info(futures_data.get("message", "尚未取得台指期外資空單資料。"))
 
