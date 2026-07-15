@@ -25,6 +25,12 @@ from google import genai
 from google.genai import types
 
 from ai_services.financial_filler import postprocess_financial_ai_payload
+from ai_services.market_gateway import (
+    build_market_ai_fallback_response,
+    build_market_ai_input,
+    build_market_ai_prompt,
+    parse_and_validate_market_ai_response,
+)
 # 從 utils 引入需要的工具
 from utils import (
     build_monthly_revenue_growth_frame,
@@ -1128,6 +1134,57 @@ def get_ai_analysis_final(topic, api_key, model_name="gemini-3.1-pro-preview"):
         return json.loads(clean_json), list(set(links))
     except Exception as e: 
         return f"連線異常: {str(e)}", []
+
+
+def get_market_ai_analysis(reasoning_pack, api_key, stock_id=None, stock_name=None, model_name="gemini-3.1-pro-preview"):
+    """Run AI Gateway analysis for market reasoning with deterministic fallback."""
+    ai_input = build_market_ai_input(reasoning_pack, stock_id=stock_id, stock_name=stock_name)
+    prompt_pack = build_market_ai_prompt(ai_input)
+    if not api_key:
+        fallback = build_market_ai_fallback_response(ai_input, reason="未輸入 Gemini API Key，使用規則引擎降級摘要。")
+        return {
+            "ok": False,
+            "issues": [fallback["_fallback_reason"]],
+            "data": fallback,
+            "prompt": prompt_pack,
+            "input": ai_input,
+            "model_used": None,
+        }
+
+    used_model = model_name or "gemini-3.1-pro-preview"
+    try:
+        client = genai.Client(api_key=api_key.strip())
+        response = client.models.generate_content(
+            model=used_model,
+            contents=prompt_pack["user_prompt"],
+            config=types.GenerateContentConfig(
+                system_instruction=prompt_pack["system_instruction"],
+                response_mime_type="application/json",
+            ),
+        )
+        log_data_health("Gemini", True, 200)
+        parsed = parse_and_validate_market_ai_response(response.text, ai_input=ai_input)
+        parsed.update({
+            "prompt": prompt_pack,
+            "input": ai_input,
+            "model_used": used_model,
+        })
+        return parsed
+    except Exception as e:
+        log_exception("Gemini", "get_market_ai_analysis", e)
+        log_data_health("Gemini", False, f"ERR:{used_model}:market_gateway")
+        fallback = build_market_ai_fallback_response(
+            ai_input,
+            reason=f"Gemini 市場分析失敗，已降級規則摘要：{str(e)[:160]}",
+        )
+        return {
+            "ok": False,
+            "issues": [fallback["_fallback_reason"]],
+            "data": fallback,
+            "prompt": prompt_pack,
+            "input": ai_input,
+            "model_used": used_model,
+        }
 
 @st.cache_data(ttl=900) 
 def get_global_market_trend():

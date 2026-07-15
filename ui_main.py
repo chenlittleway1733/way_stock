@@ -24,6 +24,7 @@ from ui_panels.financials import (
 )
 from ui_panels.etf import render_etf_exposure_panel
 from ui_panels.chips import render_chip_panels
+from ui_panels.market_reasoning import render_market_reasoning_panel
 from ui_panels.market_trend import render_market_trend_panel
 from ui_panels.news import render_financial_news_panel
 from ui_panels.peer_compare import render_peer_compare_panel
@@ -1306,6 +1307,12 @@ def render_main_page(sidebar_state=None):
             )
 
             chip_panel_state = render_chip_panels(curr_id=curr_id, info=info, ai_shares=ai_shares, eff_eg=eff_eg)
+            market_reasoning_pack = render_market_reasoning_panel(
+                trend_data=trend_data,
+                chip_state=chip_panel_state,
+                stock_id=curr_id,
+                stock_name=c_name,
+            )
             if chip_panel_state.get("has_institutional_data"):
                 f_10d = chip_panel_state.get("f_10d")
                 t_10d = chip_panel_state.get("t_10d")
