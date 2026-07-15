@@ -375,6 +375,21 @@ def classify_short_position(
         futures_snapshot.get("price_change_pct"),
         futures_snapshot.get("taiex_change_pct"),
     )) or 0.0
+    futures_net_oi = _to_float(_first_present(
+        futures_snapshot.get("foreign_futures_net_oi_lots"),
+        futures_snapshot.get("futures_net_oi"),
+        futures_snapshot.get("net_oi"),
+    ))
+    futures_short_oi = _to_float(_first_present(
+        futures_snapshot.get("foreign_futures_short_oi_lots"),
+        futures_snapshot.get("futures_short_oi"),
+        futures_snapshot.get("short_oi"),
+    ))
+    futures_long_oi = _to_float(_first_present(
+        futures_snapshot.get("foreign_futures_long_oi_lots"),
+        futures_snapshot.get("futures_long_oi"),
+        futures_snapshot.get("long_oi"),
+    ))
     fx_change_pct = _to_float(_first_present(
         fx_change_pct,
         futures_snapshot.get("usd_twd_change_pct"),
@@ -387,6 +402,9 @@ def classify_short_position(
     short_score = _clamp(futures_short_change / 10000.0, -2.0, 2.0)
     price_score = _clamp(price_change_pct / 2.5, -2.0, 2.0)
     fx_stress = _clamp(fx_change_pct / 1.0, -2.0, 2.0)
+    oi_short_pressure = 0.0
+    if futures_net_oi is not None:
+        oi_short_pressure = _clamp((-futures_net_oi) / 50000.0, -2.0, 2.0)
 
     scores = {key: 0.0 for key in SHORT_POSITION_CLASSES}
     if short_score > 0:
@@ -399,6 +417,13 @@ def classify_short_position(
             scores["arbitrage"] += 1.10
     if short_score < 0:
         scores["covering"] += 1.25 + max(price_score, 0.0) * 0.45
+    if oi_short_pressure > 0.6:
+        if cash_score > 0:
+            scores["hedge"] += 0.85 + min(oi_short_pressure, 1.2) * 0.35
+        elif cash_score < 0:
+            scores["directional_bear"] += 0.45 + min(oi_short_pressure, 1.2) * 0.30
+        else:
+            scores["directional_bear"] += min(oi_short_pressure, 1.2) * 0.15
     if price_score < -0.4 and short_score > 0:
         scores["directional_bear"] += 0.35
     if margin_risk >= 65 and price_score < 0:
@@ -417,6 +442,10 @@ def classify_short_position(
         f"期貨空單變化 {futures_short_change:,.0f}",
         f"價格變動 {price_change_pct:+.2f}%",
     ]
+    if futures_net_oi is not None:
+        evidence.append(f"期貨未平倉淨額 {futures_net_oi:,.0f}")
+    if futures_short_oi is not None or futures_long_oi is not None:
+        evidence.append(f"期貨未平倉多/空 {futures_long_oi or 0:,.0f}/{futures_short_oi or 0:,.0f}")
     if basis_abnormal:
         evidence.append("期現價差/套利訊號異常")
 
@@ -427,6 +456,10 @@ def classify_short_position(
         "top_label": labels.get(top_class, top_class),
         "scores": scores,
         "evidence": evidence,
+        "source": futures_snapshot.get("source"),
+        "data_date": futures_snapshot.get("data_date"),
+        "daily_bias": futures_snapshot.get("daily_bias"),
+        "net_oi_bias": futures_snapshot.get("net_oi_bias"),
     }
 
 

@@ -121,7 +121,9 @@ from model_data_loader import (
 )
 from services import (
     build_margin_credit_summary,
+    build_taifex_foreign_futures_snapshot,
     merge_mops_latest_revenue,
+    parse_taifex_futures_contracts_html,
     parse_mops_monthly_revenue_csv,
     parse_mops_monthly_revenue_html,
     reconcile_price_history_with_reference,
@@ -398,6 +400,57 @@ class MarketReasoningEngineTests(unittest.TestCase):
         self.assertFalse(result["available"])
         self.assertIsNone(result["top_class"])
         self.assertIn("台指期", result["message"])
+
+    def test_taifex_foreign_futures_snapshot_parses_tx_foreign_row(self):
+        html = """
+        <html><body>日期2026/07/15
+        <table>
+        <tr><th>序號</th><th>商品名稱</th><th>身份別</th><th>多方口數</th><th>多方金額</th><th>空方口數</th><th>空方金額</th><th>多空淨額口數</th><th>多空淨額金額</th><th>未平倉多方口數</th><th>未平倉多方金額</th><th>未平倉空方口數</th><th>未平倉空方金額</th><th>未平倉淨額口數</th><th>未平倉淨額金額</th></tr>
+        <tr><td>1</td><td>臺股期貨</td><td>自營商</td><td>8,774</td><td>79,913,086</td><td>10,717</td><td>97,646,365</td><td>-1,943</td><td>-17,733,279</td><td>3,941</td><td>36,404,678</td><td>4,605</td><td>42,508,599</td><td>-664</td><td>-6,103,921</td></tr>
+        <tr><td>投信</td><td>6,242</td><td>57,219,234</td><td>4,469</td><td>40,853,445</td><td>1,773</td><td>16,365,789</td><td>81,601</td><td>751,806,333</td><td>5,955</td><td>54,864,606</td><td>75,646</td><td>696,941,727</td></tr>
+        <tr><td>外資</td><td>61,727</td><td>561,690,489</td><td>60,535</td><td>551,182,103</td><td>1,192</td><td>10,508,385</td><td>7,319</td><td>67,433,521</td><td>86,876</td><td>800,498,844</td><td>-79,557</td><td>-733,065,323</td></tr>
+        </table></body></html>
+        """
+
+        row = parse_taifex_futures_contracts_html(html)
+        snapshot = build_taifex_foreign_futures_snapshot(row, price_change_pct=-0.8)
+
+        self.assertTrue(row["available"])
+        self.assertEqual(row["data_date"], "2026-07-15")
+        self.assertEqual(row["product_name"], "臺股期貨")
+        self.assertEqual(row["investor_name"], "外資")
+        self.assertEqual(snapshot["foreign_futures_net_change"], 1192)
+        self.assertEqual(snapshot["foreign_futures_short_change"], -1192)
+        self.assertEqual(snapshot["foreign_futures_short_oi_lots"], 86876)
+        self.assertEqual(snapshot["foreign_futures_net_oi_lots"], -79557)
+        self.assertIn("未平倉偏空", snapshot["net_oi_bias"])
+
+    def test_short_position_classifier_uses_open_interest_bias_for_hedge_or_bearish_read(self):
+        hedge = classify_short_position(
+            institutional_flow={"cash_net": 6200},
+            futures_snapshot={
+                "foreign_futures_short_change": -1200,
+                "foreign_futures_net_oi_lots": -79557,
+                "foreign_futures_long_oi_lots": 7319,
+                "foreign_futures_short_oi_lots": 86876,
+                "price_change_pct": -0.2,
+            },
+        )
+        bear = classify_short_position(
+            institutional_flow={"cash_net": -6200},
+            futures_snapshot={
+                "foreign_futures_short_change": 5200,
+                "foreign_futures_net_oi_lots": -79557,
+                "foreign_futures_long_oi_lots": 7319,
+                "foreign_futures_short_oi_lots": 86876,
+                "price_change_pct": -1.0,
+            },
+        )
+
+        self.assertTrue(hedge["available"])
+        self.assertEqual(hedge["top_class"], "hedge")
+        self.assertIn("期貨未平倉淨額", "；".join(hedge["evidence"]))
+        self.assertEqual(bear["top_class"], "directional_bear")
 
     def test_phase3_scenarios_and_evidence_records_are_generated(self):
         pack = calculate_market_reasoning(

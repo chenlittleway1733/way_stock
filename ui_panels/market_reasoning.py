@@ -39,9 +39,51 @@ def _fmt_score(score):
     return f"{score:.1f}"
 
 
-def render_market_reasoning_panel(trend_data=None, chip_state=None, stock_id=None, stock_name=None):
+def _taipei_now():
+    return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+
+
+def _market_session_info(now=None):
+    now = now or _taipei_now()
+    minutes = now.hour * 60 + now.minute
+    if 5 * 60 <= minutes <= 8 * 60 + 59:
+        label = "台股盤前"
+    elif 9 * 60 <= minutes <= 13 * 60 + 30:
+        label = "台股盤中"
+    elif 13 * 60 + 31 <= minutes <= 20 * 60 + 59:
+        label = "台股盤後"
+    else:
+        label = "美股 / 夜盤"
+    return {
+        "label": label,
+        "key": f"{now.strftime('%Y-%m-%d')}::{label}",
+        "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "display_time": now.strftime("%H時%M分"),
+    }
+
+
+def _attach_ai_cache_meta(ai_result, session_info):
+    if isinstance(ai_result, dict):
+        ai_result["_ui_cache"] = {
+            "market_session": session_info["label"],
+            "market_session_key": session_info["key"],
+            "generated_at": session_info["generated_at"],
+            "display_time": session_info["display_time"],
+        }
+    return ai_result
+
+
+def render_market_reasoning_panel(trend_data=None, chip_state=None, stock_id=None, stock_name=None, futures_snapshot=None):
     """Render V3 market reasoning result and return the reasoning pack."""
-    reasoning = calculate_market_reasoning(trend_data=trend_data, chip_state=chip_state)
+    if futures_snapshot is None:
+        futures_snapshot = get_taifex_foreign_futures_snapshot(
+            price_change_pct=(trend_data or {}).get("ewt"),
+        )
+    reasoning = calculate_market_reasoning(
+        trend_data=trend_data,
+        chip_state=chip_state,
+        futures_snapshot=futures_snapshot,
+    )
     quality = reasoning.get("data_quality", {})
     phase_label = "第七階段" if chip_state is not None else "第一階段"
 
@@ -91,6 +133,39 @@ def render_market_reasoning_panel(trend_data=None, chip_state=None, stock_id=Non
 
     for warning in reasoning.get("warnings", []):
         st.warning(warning)
+
+    short_position = reasoning.get("short_position") or {}
+    futures_data = ((reasoning.get("snapshot") or {}).get("extensions") or {}).get("futures_snapshot") or {}
+    with st.expander("台指期外資空單分類", expanded=False):
+        if futures_data.get("available"):
+            def _fmt_lots(value):
+                value = s_float(value)
+                return "N/A" if value is None else f"{value:,.0f} 口"
+
+            rows = [
+                {"項目": "資料日期", "數值": futures_data.get("data_date") or "N/A", "說明": futures_data.get("source", "TAIFEX")},
+                {"項目": "商品 / 身份", "數值": f"{futures_data.get('product_name', 'N/A')} / {futures_data.get('investor_name', 'N/A')}", "說明": "期交所三大法人區分各期貨契約"},
+                {"項目": "當日多方交易", "數值": _fmt_lots(futures_data.get("foreign_futures_trade_long_lots")), "說明": "外資買進期貨口數"},
+                {"項目": "當日空方交易", "數值": _fmt_lots(futures_data.get("foreign_futures_trade_short_lots")), "說明": "外資賣出期貨口數"},
+                {"項目": "當日空方變化推估", "數值": _fmt_lots(futures_data.get("foreign_futures_short_change")), "說明": futures_data.get("daily_bias", "")},
+                {"項目": "未平倉多方", "數值": _fmt_lots(futures_data.get("foreign_futures_long_oi_lots")), "說明": "外資未平倉多方口數"},
+                {"項目": "未平倉空方", "數值": _fmt_lots(futures_data.get("foreign_futures_short_oi_lots")), "說明": "外資未平倉空方口數"},
+                {"項目": "未平倉淨額", "數值": _fmt_lots(futures_data.get("foreign_futures_net_oi_lots")), "說明": futures_data.get("net_oi_bias", "")},
+                {"項目": "分類結果", "數值": short_position.get("top_label", "資料不足"), "說明": "看空 / 避險 / 套利 / 回補為規則推估"},
+            ]
+            st_dataframe(pd.DataFrame(rows), hide_index=True)
+            probabilities = short_position.get("probabilities") or {}
+            if probabilities:
+                prob_rows = [
+                    {"分類": "避險 / 風控", "機率": f"{probabilities.get('hedge', 0):.1%}"},
+                    {"分類": "方向性看空", "機率": f"{probabilities.get('directional_bear', 0):.1%}"},
+                    {"分類": "套利", "機率": f"{probabilities.get('arbitrage', 0):.1%}"},
+                    {"分類": "空單回補", "機率": f"{probabilities.get('covering', 0):.1%}"},
+                ]
+                st_dataframe(pd.DataFrame(prob_rows), hide_index=True)
+            st.caption("限制：期交所資料為市場層級台指期外資部位；個股法人資料為個股層級，分類只作風控推估。")
+        else:
+            st.info(futures_data.get("message", "尚未取得台指期外資空單資料。"))
 
     evidence = reasoning.get("evidence") or []
     counter_evidence = reasoning.get("counter_evidence") or []
@@ -164,6 +239,7 @@ def render_market_reasoning_panel(trend_data=None, chip_state=None, stock_id=Non
     st.markdown("##### 🤖 AI Gateway 市場深度分析")
     ai_key = f"market_ai_analysis_{stock_id or 'global'}"
     button_key = f"market_ai_analysis_btn_{stock_id or 'global'}"
+    current_session = _market_session_info()
     if st.button(
         "啟動 AI 市場深度分析",
         key=button_key,
@@ -172,19 +248,34 @@ def render_market_reasoning_panel(trend_data=None, chip_state=None, stock_id=Non
         help="只會送出系統市場推理 JSON，不允許 AI 自行補資料。",
     ):
         with st.spinner("AI Gateway 分析市場推理資料中..."):
-            st.session_state[ai_key] = get_market_ai_analysis(
+            st.session_state[ai_key] = _attach_ai_cache_meta(get_market_ai_analysis(
                 reasoning,
                 st.session_state.get("api_key", ""),
                 stock_id=stock_id,
                 stock_name=stock_name,
                 model_name=get_selected_model_id(),
-            )
+            ), current_session)
 
     if not st.session_state.get("api_key"):
         st.caption("尚未輸入 Gemini API Key；AI Gateway 按鈕停用。")
 
     ai_result = st.session_state.get(ai_key)
     if isinstance(ai_result, dict):
+        if not isinstance(ai_result.get("_ui_cache"), dict):
+            ai_result = _attach_ai_cache_meta(ai_result, current_session)
+            st.session_state[ai_key] = ai_result
+        cache_meta = ai_result.get("_ui_cache") or {}
+        if cache_meta.get("market_session_key") == current_session["key"]:
+            st.info(
+                f"本時段（{cache_meta.get('display_time', '時間未記錄')}）已有 AI 市場分析結果，預設沿用；"
+                "再次按下「啟動 AI 市場深度分析」會重新分析。"
+            )
+        else:
+            st.caption(
+                f"上一時段（{cache_meta.get('market_session', '未知時段')} "
+                f"{cache_meta.get('display_time', '時間未記錄')}）已有 AI 市場分析結果；"
+                "若市場資料已更新，可按下按鈕重新分析。"
+            )
         data = ai_result.get("data") or {}
         if ai_result.get("ok"):
             st.success("AI Gateway 回覆已通過 JSON Schema 驗證。")
