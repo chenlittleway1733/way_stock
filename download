@@ -1,21 +1,35 @@
-"""Financial validation boundary.
+# Local secrets
+.streamlit/secrets.toml
 
-This module is the stable import path for financial-field validation.  The
-implementations stay in utils.py for backward compatibility during the first
-modularization pass.
-"""
+# Python/runtime cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-from utils import (
-    normalize_debt_to_equity,
-    normalize_financial_ratio,
-    validate_ai_financial_json,
-    validate_and_correct_financial_metrics,
-)
+# macOS metadata
+.DS_Store
+._*
+*/._*
 
-__all__ = [
-    "normalize_debt_to_equity",
-    "normalize_financial_ratio",
-    "validate_ai_financial_json",
-    "validate_and_correct_financial_metrics",
-]
+# Build/package outputs
+dist/
+*.zip
+download
+ui_mainold.py
 
+# Generated reports and temporary render files
+output/
+tmp/
+/valuation_*.md
+/valuation_*.json
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# Repository metadata, if present
+.git/
+.agents/
+.codex/
