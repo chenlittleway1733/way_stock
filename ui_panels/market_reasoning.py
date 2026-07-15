@@ -17,6 +17,23 @@ from market_reasoning import (
 )
 
 
+MARKET_REASONING_SCOPE = "global_taiwan_market"
+MARKET_REASONING_HISTORY_KEY = "market_reasoning_history_global"
+MARKET_AI_ANALYSIS_KEY = "market_ai_analysis_global"
+MARKET_AI_BUTTON_KEY = "market_ai_analysis_btn_global"
+MARKET_AUTO_REPORT_TYPE_KEY = "market_auto_report_type_global"
+MARKET_AUTO_REPORT_TEXT_KEY = "market_auto_report_text_global"
+
+
+def build_market_reasoning_calculation_kwargs(trend_data=None, chip_state=None, futures_snapshot=None, use_stock_chip_state=False):
+    """Build calculation kwargs for the UI; market mode ignores current stock chip data by default."""
+    return {
+        "trend_data": trend_data,
+        "chip_state": chip_state if use_stock_chip_state else None,
+        "futures_snapshot": futures_snapshot,
+    }
+
+
 def _score_color(score, *, inverse=False):
     if score is None:
         return "#aaaaaa"
@@ -73,28 +90,35 @@ def _attach_ai_cache_meta(ai_result, session_info):
     return ai_result
 
 
-def render_market_reasoning_panel(trend_data=None, chip_state=None, stock_id=None, stock_name=None, futures_snapshot=None):
+def render_market_reasoning_panel(
+    trend_data=None,
+    chip_state=None,
+    stock_id=None,
+    stock_name=None,
+    futures_snapshot=None,
+    use_stock_chip_state=False,
+):
     """Render V3 market reasoning result and return the reasoning pack."""
     if futures_snapshot is None:
         futures_snapshot = get_taifex_foreign_futures_snapshot(
             price_change_pct=(trend_data or {}).get("ewt"),
         )
-    reasoning = calculate_market_reasoning(
+    reasoning = calculate_market_reasoning(**build_market_reasoning_calculation_kwargs(
         trend_data=trend_data,
         chip_state=chip_state,
         futures_snapshot=futures_snapshot,
-    )
+        use_stock_chip_state=use_stock_chip_state,
+    ))
     quality = reasoning.get("data_quality", {})
-    phase_label = "第七階段" if chip_state is not None else "第一階段"
+    phase_label = "第七階段｜全市場模式"
 
-    history_key = f"market_reasoning_history_{stock_id or 'global'}"
     history = append_market_reasoning_history(
-        st.session_state.get(history_key, []),
+        st.session_state.get(MARKET_REASONING_HISTORY_KEY, []),
         reasoning,
-        stock_id=stock_id,
-        stock_name=stock_name,
+        stock_id=None,
+        stock_name=None,
     )
-    st.session_state[history_key] = history
+    st.session_state[MARKET_REASONING_HISTORY_KEY] = history
     backtest = evaluate_market_backtest(history, min_samples=5)
     weight_result = optimize_market_weights(history, min_samples=5)
 
@@ -133,6 +157,8 @@ def render_market_reasoning_panel(trend_data=None, chip_state=None, stock_id=Non
 
     for warning in reasoning.get("warnings", []):
         st.warning(warning)
+    if chip_state is not None and not use_stock_chip_state:
+        st.caption("本區為全市場推理：不納入目前查詢個股的法人/融資籌碼，因此切換股票時市場分數應維持一致；個股籌碼請看下方籌碼面板。")
 
     short_position = reasoning.get("short_position") or {}
     futures_data = ((reasoning.get("snapshot") or {}).get("extensions") or {}).get("futures_snapshot") or {}
@@ -237,8 +263,8 @@ def render_market_reasoning_panel(trend_data=None, chip_state=None, stock_id=Non
             st_dataframe(weight_result.get("report"), hide_index=True)
 
     st.markdown("##### 🤖 AI Gateway 市場深度分析")
-    ai_key = f"market_ai_analysis_{stock_id or 'global'}"
-    button_key = f"market_ai_analysis_btn_{stock_id or 'global'}"
+    ai_key = MARKET_AI_ANALYSIS_KEY
+    button_key = MARKET_AI_BUTTON_KEY
     current_session = _market_session_info()
     if st.button(
         "啟動 AI 市場深度分析",
@@ -251,8 +277,8 @@ def render_market_reasoning_panel(trend_data=None, chip_state=None, stock_id=Non
             st.session_state[ai_key] = _attach_ai_cache_meta(get_market_ai_analysis(
                 reasoning,
                 st.session_state.get("api_key", ""),
-                stock_id=stock_id,
-                stock_name=stock_name,
+                stock_id=None,
+                stock_name=None,
                 model_name=get_selected_model_id(),
             ), current_session)
 
@@ -302,14 +328,14 @@ def render_market_reasoning_panel(trend_data=None, chip_state=None, stock_id=Non
             "報告類型",
             ["盤前報告", "盤後報告"],
             horizontal=True,
-            key=f"market_auto_report_type_{stock_id or 'global'}",
+            key=MARKET_AUTO_REPORT_TYPE_KEY,
         )
         report_type = "post_market" if report_choice == "盤後報告" else "pre_market"
         auto_report = build_market_auto_report(
             reasoning,
             report_type=report_type,
-            stock_id=stock_id,
-            stock_name=stock_name,
+            stock_id=None,
+            stock_name=None,
             backtest_result=backtest,
             ai_result=ai_result,
         )
@@ -330,7 +356,7 @@ def render_market_reasoning_panel(trend_data=None, chip_state=None, stock_id=Non
             "報告內容",
             value=build_market_report_text(auto_report),
             height=300,
-            key=f"market_auto_report_text_{stock_id or 'global'}",
+            key=MARKET_AUTO_REPORT_TEXT_KEY,
         )
 
     with st.expander("市場推理資料品質與權重", expanded=False):

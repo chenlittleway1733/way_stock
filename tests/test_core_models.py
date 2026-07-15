@@ -140,6 +140,14 @@ from ui_context.prompt_context import (
     prompt_technical_suffix,
 )
 from ui_context.multiple_context import build_multiple_context
+from ui_panels.market_reasoning import (
+    MARKET_AI_ANALYSIS_KEY,
+    MARKET_AI_BUTTON_KEY,
+    MARKET_AUTO_REPORT_TEXT_KEY,
+    MARKET_AUTO_REPORT_TYPE_KEY,
+    MARKET_REASONING_HISTORY_KEY,
+    build_market_reasoning_calculation_kwargs,
+)
 from validators.candidate_review import build_financial_candidate_data as modular_build_financial_candidate_data
 from validators.financial_validation import validate_ai_financial_json as modular_validate_ai_financial_json
 from validators.stock_dataset_validation import (
@@ -385,6 +393,48 @@ class MarketReasoningEngineTests(unittest.TestCase):
         self.assertIn("institutional_flow", pack["data_quality"]["missing_fields"])
         self.assertIn("margin_credit", pack["data_quality"]["missing_fields"])
 
+    def test_market_reasoning_ui_defaults_to_global_scope_keys_and_ignores_stock_chip_state(self):
+        self.assertEqual(MARKET_REASONING_HISTORY_KEY, "market_reasoning_history_global")
+        self.assertEqual(MARKET_AI_ANALYSIS_KEY, "market_ai_analysis_global")
+        self.assertEqual(MARKET_AI_BUTTON_KEY, "market_ai_analysis_btn_global")
+        self.assertEqual(MARKET_AUTO_REPORT_TYPE_KEY, "market_auto_report_type_global")
+        self.assertEqual(MARKET_AUTO_REPORT_TEXT_KEY, "market_auto_report_text_global")
+
+        trend = {"sox": 0.6, "tsm": 0.4, "ewt": 0.2, "nq": 0.3}
+        futures = {"available": True, "foreign_futures_short_change": 4000, "price_change_pct": 0.2}
+        stock_chip_a = {"f_10d": 5000, "t_10d": 1000, "margin_credit": {"available": True, "risk_score": 80}}
+        stock_chip_b = {"f_10d": -5000, "t_10d": -1000, "margin_credit": {"available": True, "risk_score": 10}}
+
+        kwargs_a = build_market_reasoning_calculation_kwargs(trend, stock_chip_a, futures)
+        kwargs_b = build_market_reasoning_calculation_kwargs(trend, stock_chip_b, futures)
+        self.assertIsNone(kwargs_a["chip_state"])
+        self.assertIsNone(kwargs_b["chip_state"])
+
+        pack_a = calculate_market_reasoning(**kwargs_a)
+        pack_b = calculate_market_reasoning(**kwargs_b)
+        self.assertEqual(round(pack_a["direction_score"], 4), round(pack_b["direction_score"], 4))
+        self.assertEqual(round(pack_a["risk_score"], 4), round(pack_b["risk_score"], 4))
+        self.assertIn("futures_snapshot", pack_a["data_quality"]["available_groups"])
+
+    def test_market_reasoning_uses_taifex_short_position_in_scores(self):
+        trend = {"sox": 0.4, "tsm": 0.3, "ewt": 0.2, "nq": 0.2}
+        base = calculate_market_reasoning(trend_data=trend)
+        bearish_short = calculate_market_reasoning(
+            trend_data=trend,
+            futures_snapshot={
+                "available": True,
+                "foreign_futures_short_change": 9000,
+                "foreign_futures_net_oi_lots": -85000,
+                "price_change_pct": -0.8,
+            },
+            institutional_flow={"f_10d": -6000},
+        )
+
+        self.assertTrue(bearish_short["short_position"]["available"])
+        self.assertEqual(bearish_short["short_position"]["top_class"], "directional_bear")
+        self.assertLess(bearish_short["direction_score"], base["direction_score"])
+        self.assertGreater(bearish_short["risk_score"], base["risk_score"])
+
     def test_short_position_classifier_identifies_hedge_when_cash_buys_and_futures_shorts_rise(self):
         result = classify_short_position(
             institutional_flow={"cash_net": 6200},
@@ -471,7 +521,7 @@ class MarketReasoningEngineTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(pack["model_version"], "V3-MR-Phase7-20260715")
+        self.assertEqual(pack["model_version"], "V3-MR-Phase7b-20260715")
         self.assertEqual(set(pack["scenarios"]), {"bull", "base", "bear"})
         self.assertAlmostEqual(sum(s["probability"] for s in pack["scenarios"].values()), 1.0)
         self.assertTrue(pack["reasoning_evidence"])
@@ -499,7 +549,7 @@ class MarketReasoningEngineTests(unittest.TestCase):
 
         self.assertEqual(payload["analysis_id"], "unit-test")
         self.assertEqual(payload["trade_date"], "2026-07-15")
-        self.assertEqual(payload["model_version"], "V3-MR-Phase7-20260715")
+        self.assertEqual(payload["model_version"], "V3-MR-Phase7b-20260715")
         self.assertIn("scenarios", payload)
         self.assertIn("evidence", payload)
         self.assertIn("source_snapshot", payload)
@@ -550,10 +600,15 @@ class MarketReasoningEngineTests(unittest.TestCase):
         prompt = build_market_ai_prompt(ai_input)
 
         self.assertEqual(ai_input["gateway_version"], MARKET_AI_GATEWAY_VERSION)
+        self.assertEqual(ai_input["analysis_scope"]["target"], "TAIWAN_EQUITY_MARKET")
         self.assertEqual(ai_input["stock"]["stock_id"], "2330")
+        self.assertIn("整體台股市場", ai_input["analysis_scope"]["description"])
+        self.assertIn("不得針對此單一股票", ai_input["stock"]["note"])
+        self.assertIn("整體台股市場", ai_input["rules"]["market_scope"])
         self.assertIn("只能根據 INPUT_JSON", ai_input["rules"]["data_boundary"])
         self.assertIn("output_schema", ai_input)
         self.assertIn("INPUT_JSON", prompt["user_prompt"])
+        self.assertIn("不得把結論寫成針對單一股票", prompt["system_instruction"])
         self.assertIn("不得自行上網", prompt["system_instruction"])
 
     def test_phase5_ai_gateway_validates_good_json_response(self):

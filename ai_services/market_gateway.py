@@ -9,7 +9,7 @@ from copy import deepcopy
 from market_reasoning import build_market_reasoning_api_payload
 
 
-MARKET_AI_GATEWAY_VERSION = "V3-AI-Gateway-Phase5-20260715"
+MARKET_AI_GATEWAY_VERSION = "V3-AI-Gateway-Phase5b-20260715"
 
 MARKET_AI_RESPONSE_REQUIRED_FIELDS = {
     "summary": str,
@@ -58,12 +58,20 @@ def build_market_ai_input(reasoning_pack, stock_id=None, stock_name=None, trade_
         "gateway_version": MARKET_AI_GATEWAY_VERSION,
         "task": "market_reasoning_ai_analysis",
         "language": "zh-TW",
+        "analysis_scope": {
+            "target": "TAIWAN_EQUITY_MARKET",
+            "description": "分析標的是整體台股市場，不是目前 UI 查詢的單一股票。",
+            "current_ui_stock_id": str(stock_id or ""),
+            "current_ui_stock_name": str(stock_name or ""),
+        },
         "stock": {
             "stock_id": str(stock_id or ""),
             "stock_name": str(stock_name or ""),
+            "note": "保留相容欄位；AI 市場分析不得針對此單一股票下結論。",
         },
         "rules": {
             "data_boundary": "只能根據 INPUT_JSON 分析，不得自行補資料或上網查詢。",
+            "market_scope": "本任務只分析整體台股市場。即使 stock 欄位有值，也只能視為 UI 當時查詢脈絡，不得寫成針對該股票的市場判斷。",
             "must_distinguish": "請區分客觀資料、規則引擎結果、AI 推論與不確定性。",
             "no_guarantee": "不得輸出保證式語言，不得把單一訊號當成確定預測。",
             "missing_data": "缺少資料時，必須降低 confidence 並在 risk_alerts 說明。",
@@ -96,7 +104,8 @@ def build_market_ai_input(reasoning_pack, stock_id=None, stock_name=None, trade_
 def build_market_ai_prompt(ai_input):
     """Build a stable prompt pair for Gemini / ChatGPT style model calls."""
     system_instruction = (
-        "你是台股市場分析助理。你只能根據使用者提供的 INPUT_JSON 分析。"
+        "你是台股整體市場分析助理。你只能根據使用者提供的 INPUT_JSON 分析整體台股市場。"
+        "即使 INPUT_JSON 內有 stock 或 current_ui_stock 欄位，也不得把結論寫成針對單一股票。"
         "你必須回傳完全符合 output_schema 的 JSON，不得增加欄位，不得輸出 Markdown。"
         "你不得自行上網、不得補缺漏數據、不得把單日訊號視為確定預測。"
     )

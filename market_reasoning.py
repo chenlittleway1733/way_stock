@@ -48,7 +48,7 @@ from datetime import datetime
 import pandas as pd
 
 
-MARKET_REASONING_VERSION = "V3-MR-Phase7-20260715"
+MARKET_REASONING_VERSION = "V3-MR-Phase7b-20260715"
 
 SHORT_POSITION_CLASSES = (
     "hedge",
@@ -339,10 +339,13 @@ def classify_short_position(
 
     Without futures data, the function intentionally returns unavailable.
     """
-    if not futures_snapshot:
+    if not futures_snapshot or (isinstance(futures_snapshot, dict) and futures_snapshot.get("available") is False):
+        missing_message = "缺少外資台指期淨部位或空單變化，暫不分類空單性質。"
+        if isinstance(futures_snapshot, dict):
+            missing_message = futures_snapshot.get("message") or missing_message
         return {
             "available": False,
-            "message": "缺少外資台指期淨部位或空單變化，暫不分類空單性質。",
+            "message": missing_message,
             "probabilities": {key: None for key in SHORT_POSITION_CLASSES},
             "top_class": None,
             "top_label": "資料不足",
@@ -463,6 +466,32 @@ def classify_short_position(
     }
 
 
+def _short_position_direction_score(short_position):
+    """Convert market-level futures short-position classification into a small direction score."""
+    if not isinstance(short_position, dict) or not short_position.get("available"):
+        return None
+    probabilities = short_position.get("probabilities") or {}
+    directional_bear = _to_float(probabilities.get("directional_bear")) or 0.0
+    hedge = _to_float(probabilities.get("hedge")) or 0.0
+    covering = _to_float(probabilities.get("covering")) or 0.0
+    arbitrage = _to_float(probabilities.get("arbitrage")) or 0.0
+    score = covering * 35.0 + hedge * 12.0 - directional_bear * 55.0 - arbitrage * 6.0
+    return _clamp(score, -45.0, 35.0)
+
+
+def _short_position_risk_score(short_position):
+    """Convert market-level futures short-position classification into a risk score."""
+    if not isinstance(short_position, dict) or not short_position.get("available"):
+        return None
+    probabilities = short_position.get("probabilities") or {}
+    directional_bear = _to_float(probabilities.get("directional_bear")) or 0.0
+    hedge = _to_float(probabilities.get("hedge")) or 0.0
+    covering = _to_float(probabilities.get("covering")) or 0.0
+    arbitrage = _to_float(probabilities.get("arbitrage")) or 0.0
+    risk = 42.0 + directional_bear * 34.0 + hedge * 8.0 + arbitrage * 12.0 - covering * 14.0
+    return _clamp(risk, 20.0, 85.0)
+
+
 def build_phase2_rule_features(
     institutional_flow=None,
     margin_credit=None,
@@ -547,6 +576,21 @@ def build_market_snapshot(
         "options_snapshot": bool(options_snapshot),
         "fx_snapshot": bool(fx_snapshot),
     }
+    expected_extensions = []
+    if chip_state is not None:
+        expected_extensions.append("institutional_flow")
+        expected_extensions.append("margin_credit")
+    if chip_state is None and institutional_flow is not None:
+        expected_extensions.append("institutional_flow")
+    if chip_state is None and margin_credit is not None:
+        expected_extensions.append("margin_credit")
+    if futures_snapshot is not None:
+        expected_extensions.append("futures_snapshot")
+    if options_snapshot is not None:
+        expected_extensions.append("options_snapshot")
+    if fx_snapshot is not None:
+        expected_extensions.append("fx_snapshot")
+    expected_extensions = list(dict.fromkeys(expected_extensions))
     missing_extensions = [name for name, available in extension_available.items() if not available]
     available_extensions = [name for name, available in extension_available.items() if available]
 
@@ -555,6 +599,7 @@ def build_market_snapshot(
         "built_at": metadata.get("built_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "source": "get_global_market_trend",
         "phase2_expected": any(value is not None for value in (chip_state, institutional_flow, margin_credit, futures_snapshot, options_snapshot, fx_snapshot)),
+        "expected_extensions": expected_extensions,
         "target_day": trend_data.get("target_day", "今日"),
         "time_status": trend_data.get("time_status", ""),
         "legacy_trend_text": trend_data.get("trend", ""),
@@ -586,6 +631,7 @@ def _calculate_direction_score(components, phase2_features=None):
     phase2_features = phase2_features or {}
     inst_score = (phase2_features.get("institutional_flow") or {}).get("direction_score")
     margin_score = (phase2_features.get("margin_credit") or {}).get("direction_score")
+    short_score = _short_position_direction_score(phase2_features.get("short_position"))
 
     weighted = []
     if global_score is not None:
@@ -594,6 +640,8 @@ def _calculate_direction_score(components, phase2_features=None):
         weighted.append((inst_score, 0.25))
     if margin_score is not None:
         weighted.append((margin_score, 0.10))
+    if short_score is not None:
+        weighted.append((short_score, 0.12))
     if not weighted:
         return None
     total_weight = sum(weight for _, weight in weighted)
@@ -620,6 +668,7 @@ def _calculate_risk_score(components, direction_score, phase2_features=None):
     phase2_features = phase2_features or {}
     inst_risk = (phase2_features.get("institutional_flow") or {}).get("risk_score")
     margin_risk = (phase2_features.get("margin_credit") or {}).get("risk_score")
+    short_risk = _short_position_risk_score(phase2_features.get("short_position"))
 
     weighted = []
     if global_risk is not None:
@@ -628,17 +677,23 @@ def _calculate_risk_score(components, direction_score, phase2_features=None):
         weighted.append((inst_risk, 0.15))
     if margin_risk is not None:
         weighted.append((margin_risk, 0.30))
+    if short_risk is not None:
+        weighted.append((short_risk, 0.15))
     if not weighted:
         return None
     total_weight = sum(weight for _, weight in weighted)
     return _clamp(sum(score * weight for score, weight in weighted) / total_weight, 0.0, 100.0)
 
 
-def _calculate_confidence_score(components, phase2_features=None, phase2_expected=False):
+def _calculate_confidence_score(components, phase2_features=None, phase2_expected=False, expected_features=None):
     available = [c for c in components if c.get("available")]
     global_ratio = len(available) / len(components) if components else 0.0
     phase2_features = phase2_features or {}
-    phase2_required = ["institutional_flow", "margin_credit"] if phase2_expected else []
+    feature_key_map = {"futures_snapshot": "short_position"}
+    if expected_features is not None:
+        phase2_required = [feature_key_map.get(name, name) for name in expected_features]
+    else:
+        phase2_required = ["institutional_flow", "margin_credit"] if phase2_expected else []
     phase2_available = [
         name for name in phase2_required
         if (phase2_features.get(name) or {}).get("available")
@@ -660,6 +715,9 @@ def _calculate_confidence_score(components, phase2_features=None, phase2_expecte
     margin_score = (phase2_features.get("margin_credit") or {}).get("direction_score")
     if margin_score is not None and abs(margin_score) >= 5:
         signs.append(1 if margin_score > 0 else -1)
+    short_score = _short_position_direction_score(phase2_features.get("short_position"))
+    if short_score is not None and abs(short_score) >= 5:
+        signs.append(1 if short_score > 0 else -1)
 
     if not signs:
         agreement_score = 45.0 if available else 0.0
@@ -721,17 +779,20 @@ def _build_data_quality(components, snapshot):
     available_count = len(components) - len(missing_fields)
     phase2_features = snapshot.get("phase2_features", {})
     phase2_expected = bool(snapshot.get("phase2_expected"))
+    expected_extensions = list(snapshot.get("expected_extensions") or [])
     available_groups = ["international_linkage"] if available_count else []
     required_groups = ["international_linkage"]
 
     if phase2_expected:
-        required_groups.extend(["institutional_flow", "margin_credit"])
-        for group_name in ("institutional_flow", "margin_credit"):
-            feature = phase2_features.get(group_name) or {}
+        feature_key_map = {"futures_snapshot": "short_position"}
+        required_groups.extend(expected_extensions)
+        for extension_name in expected_extensions:
+            feature_name = feature_key_map.get(extension_name, extension_name)
+            feature = phase2_features.get(feature_name) or {}
             if feature.get("available"):
-                available_groups.append(group_name)
+                available_groups.append(extension_name)
             else:
-                missing_fields.append(group_name)
+                missing_fields.append(extension_name)
 
     if set(required_groups).issubset(set(available_groups)):
         status = "OK"
@@ -748,7 +809,7 @@ def _build_data_quality(components, snapshot):
         "available_groups": available_groups,
         "required_groups": required_groups,
         "missing_extension_groups": snapshot.get("missing_extensions", []),
-        "note": "第二階段啟用國際連動、法人現貨與信用交易規則；期貨、選擇權、匯率未接入時只標示缺值。",
+        "note": "市場推理以國際連動為主，已接入資料才納入法人、信用交易、台指期外資空單、選擇權或匯率；未接入資料只標示缺值。",
     }
 
 
@@ -946,6 +1007,7 @@ def _compact_snapshot_for_payload(snapshot):
         "target_day": snapshot.get("target_day"),
         "source": snapshot.get("source"),
         "available_extensions": snapshot.get("available_extensions", []),
+        "expected_extensions": snapshot.get("expected_extensions", []),
         "missing_extensions": snapshot.get("missing_extensions", []),
         "components": [
             {
@@ -1098,6 +1160,7 @@ def calculate_market_reasoning(
         components,
         phase2_features,
         phase2_expected=bool(snapshot.get("phase2_expected")),
+        expected_features=snapshot.get("expected_extensions"),
     )
     regime, regime_label = _judge_regime(direction_score, risk_score, confidence_score, phase2_features)
     evidence, counter_evidence = _build_evidence(components, phase2_features)
@@ -1155,9 +1218,9 @@ def build_market_reasoning_report(reasoning_pack):
     rows = [
         {"項目": "模型版本", "結果": reasoning_pack.get("model_version", MARKET_REASONING_VERSION), "說明": "V3 市場推理第七階段"},
         {"項目": "市場狀態", "結果": reasoning_pack.get("regime_label", "資料不足"), "說明": reasoning_pack.get("regime", "")},
-        {"項目": "市場方向分數", "結果": _format_score(reasoning_pack.get("direction_score")), "說明": "SOX/TSM ADR/EWT/NQ 加權"},
-        {"項目": "風險分數", "結果": _format_score(reasoning_pack.get("risk_score")), "說明": "國際連動、法人分歧、信用交易綜合"},
-        {"項目": "信心分數", "結果": _format_score(reasoning_pack.get("confidence_score")), "說明": "資料完整度與方向一致性"},
+        {"項目": "市場方向分數", "結果": _format_score(reasoning_pack.get("direction_score")), "說明": "SOX/TSM ADR/EWT/NQ 為主，台指期外資空單小權重調整"},
+        {"項目": "風險分數", "結果": _format_score(reasoning_pack.get("risk_score")), "說明": "國際連動與已接入市場資料綜合；個股籌碼不應混入全市場分數"},
+        {"項目": "信心分數", "結果": _format_score(reasoning_pack.get("confidence_score")), "說明": "資料完整度、方向一致性與台指期空單資料可用性"},
         {
             "項目": "資料品質",
             "結果": reasoning_pack.get("data_quality", {}).get("status", "INSUFFICIENT"),
