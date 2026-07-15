@@ -1,106 +1,82 @@
-"""Prompt-pack panel extracted from ui_main.py."""
+"""Quote panel for ui_main.render_main_page."""
 
-import json
-
-from ui_common import components, st
+from ui_common import *
 
 
-def render_prompt_pack_panel(
-    *,
-    curr_id,
-    buy_decision_prompt,
-    research_prompt,
-    build_technical_suffix,
-):
-    """Render the copyable prompt-pack panel.
+def _quote_color(value, base):
+    if value > base:
+        return "#ff4d4d"
+    if value < base:
+        return "#00cc66"
+    return "#ffffff"
 
-    `build_technical_suffix` stays in ui_main for now because it depends on the
-    current stock chart locals. Keeping it as a callback lets this panel move
-    without changing prompt behavior.
+
+def render_quote_panel(*, hist, info):
+    """Render latest quote data and return values reused by valuation logic."""
+    st.markdown("#### ⚡ 即時報價與交易資訊")
+    info = info or {}
+    today_data = hist.iloc[-1]
+    prev_data = hist.iloc[-2] if len(hist) > 1 else today_data
+
+    curr_p = s_float(today_data.get("Close"), 0)
+    open_p = s_float(today_data.get("Open"), 0)
+    high_p = s_float(today_data.get("High"), 0)
+    low_p = s_float(today_data.get("Low"), 0)
+    vol_shares = s_float(today_data.get("Volume"), 0)
+
+    vol_lots = int(vol_shares // 1000) if vol_shares else 0
+    prev_vol_lots = int(s_float(prev_data.get("Volume"), 0) // 1000) if len(hist) > 1 else 0
+
+    prev_close = s_float(info.get("previousClose"), s_float(prev_data.get("Close"), 0))
+    change = curr_p - prev_close if prev_close else 0
+    change_pct = (change / prev_close) * 100 if prev_close else 0
+    amp = ((high_p - low_p) / prev_close) * 100 if prev_close and prev_close > 0 else 0
+    avg_price = (high_p + low_p + curr_p) / 3 if curr_p else 0
+    turnover_100m = (vol_shares * avg_price) / 100000000
+
+    c_curr = _quote_color(curr_p, prev_close)
+    c_open = _quote_color(open_p, prev_close)
+    c_high = _quote_color(high_p, prev_close)
+    c_low = _quote_color(low_p, prev_close)
+    c_change = _quote_color(change, 0)
+    arrow = "▲" if change > 0 else ("▼" if change < 0 else "")
+
+    quote_html = f"""
+    <style>
+    .q-container {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px 30px; background: #1e1e1e; padding: 15px 20px; border-radius: 8px; font-family: sans-serif; margin-bottom: 20px; border: 1px solid #333; }}
+    .q-item {{ display: flex; justify-content: space-between; border-bottom: 1px solid #333; padding-bottom: 4px; }}
+    .q-label {{ color: #aaa; font-size: 1rem; }}
+    .q-val {{ font-weight: bold; font-size: 1.1rem; }}
+    </style>
+    <div class="q-container">
+        <div class="q-item"><span class="q-label">成交</span><span class="q-val" style="color: {c_curr};">{curr_p:,.2f}</span></div>
+        <div class="q-item"><span class="q-label">昨收</span><span class="q-val" style="color: #fff;">{prev_close:,.2f}</span></div>
+        <div class="q-item"><span class="q-label">開盤</span><span class="q-val" style="color: {c_open};">{open_p:,.2f}</span></div>
+        <div class="q-item"><span class="q-label">漲跌幅</span><span class="q-val" style="color: {c_change};">{arrow} {abs(change_pct):.2f}%</span></div>
+        <div class="q-item"><span class="q-label">最高</span><span class="q-val" style="color: {c_high};">{high_p:,.2f}</span></div>
+        <div class="q-item"><span class="q-label">漲跌</span><span class="q-val" style="color: {c_change};">{arrow} {abs(change):.2f}</span></div>
+        <div class="q-item"><span class="q-label">最低</span><span class="q-val" style="color: {c_low};">{low_p:,.2f}</span></div>
+        <div class="q-item"><span class="q-label">總量 (張)</span><span class="q-val" style="color: #ffd700;">{vol_lots:,}</span></div>
+        <div class="q-item"><span class="q-label">均價</span><span class="q-val" style="color: #fff;">{avg_price:,.2f}</span></div>
+        <div class="q-item"><span class="q-label">昨量 (張)</span><span class="q-val" style="color: #fff;">{prev_vol_lots:,}</span></div>
+        <div class="q-item"><span class="q-label">成交金額(億)</span><span class="q-val" style="color: #fff;">{turnover_100m:,.2f}</span></div>
+        <div class="q-item"><span class="q-label">振幅</span><span class="q-val" style="color: #fff;">{amp:.2f}%</span></div>
+    </div>
     """
-    with st.expander("📋 點此複製【打包提示詞】至 Gemini Advanced 或 ChatGPT 發問", expanded=True):
-        prompt_mode = st.radio(
-            "提示詞版本",
-            ["買進決策版（精簡，建議平常使用）", "研究完整版（完整，適合深度分析）"],
-            horizontal=True,
-            key=f"prompt_pack_mode_{curr_id}",
-        )
-        technical_pack_mode = st.radio(
-            "技術面打包選項",
-            ["不加入技術面", "加入技術面摘要", "加入技術面摘要 + 技術線圖輔助規則"],
-            horizontal=True,
-            key=f"prompt_technical_pack_mode_{curr_id}",
-        )
+    st.markdown(clean_html(quote_html), unsafe_allow_html=True)
 
-        selected_prompt = buy_decision_prompt if prompt_mode.startswith("買進決策版") else research_prompt
-        technical_suffix = build_technical_suffix(technical_pack_mode)
-        if technical_suffix:
-            selected_prompt = selected_prompt.rstrip() + "\n\n" + technical_suffix
-        st.caption("買進決策版只保留會影響是否買進的採用值、系統/AI差異、估值層級、產業模型、Dynamic Cap 與燈號；研究完整版保留較完整資料品質與來源摘要。技術面可選擇不加入、加入摘要，或加入摘要與線圖輔助規則。")
-
-        safe_prompt_js = json.dumps(selected_prompt, ensure_ascii=False)
-        components.html(
-            f"""
-            <div style="margin: 10px 0 12px 0; font-family: sans-serif;">
-                <button
-                    onclick="copyPromptToClipboard()"
-                    style="
-                        width: 100%;
-                        padding: 13px 14px;
-                        border-radius: 10px;
-                        border: 1px solid #4b5563;
-                        background: #2563eb;
-                        color: white;
-                        font-size: 16px;
-                        font-weight: 700;
-                        cursor: pointer;
-                    "
-                >
-                    📋 一鍵複製目前版本提示詞
-                </button>
-                <div id="copyStatus" style="margin-top: 8px; color: #16a34a; font-size: 14px;"></div>
-            </div>
-
-            <script>
-            async function copyPromptToClipboard() {{
-                const text = {safe_prompt_js};
-                const status = document.getElementById("copyStatus");
-
-                try {{
-                    await navigator.clipboard.writeText(text);
-                    status.innerText = "✅ 已複製目前版本提示詞，可直接貼到 Gemini Advanced 或 ChatGPT。";
-                }} catch (err) {{
-                    const textarea = document.createElement("textarea");
-                    textarea.value = text;
-                    textarea.style.position = "fixed";
-                    textarea.style.left = "-9999px";
-                    textarea.style.top = "0";
-                    document.body.appendChild(textarea);
-                    textarea.focus();
-                    textarea.select();
-
-                    try {{
-                        document.execCommand("copy");
-                        status.innerText = "✅ 已複製目前版本提示詞，可直接貼上使用。";
-                    }} catch (fallbackErr) {{
-                        status.style.color = "#dc2626";
-                        status.innerText = "⚠️ 手機瀏覽器限制自動複製，請改用下方文字框長按複製。";
-                    }}
-
-                    document.body.removeChild(textarea);
-                }}
-            }}
-            </script>
-            """,
-            height=105,
-        )
-
-        mode_key = "buy" if prompt_mode.startswith("買進決策版") else "research"
-        st.text_area(
-            "提示詞內容",
-            value=selected_prompt,
-            height=330,
-            label_visibility="collapsed",
-            key=f"copy_prompt_textarea_{curr_id}_{mode_key}_{abs(hash(selected_prompt)) % 100000000}",
-        )
-
+    return {
+        "curr_p": curr_p,
+        "open_p": open_p,
+        "high_p": high_p,
+        "low_p": low_p,
+        "vol_shares": vol_shares,
+        "vol_lots": vol_lots,
+        "prev_vol_lots": prev_vol_lots,
+        "prev_close": prev_close,
+        "change": change,
+        "change_pct": change_pct,
+        "amp": amp,
+        "avg_price": avg_price,
+        "turnover_100m": turnover_100m,
+    }

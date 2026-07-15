@@ -1,73 +1,106 @@
-"""Peer comparison panel for ui_main.render_main_page."""
+"""Prompt-pack panel extracted from ui_main.py."""
 
-from ui_common import *
+import json
+
+from ui_common import components, st
 
 
-def render_peer_compare_panel(*, curr_id, stock_name):
-    if not st.session_state.show_pk:
-        return
+def render_prompt_pack_panel(
+    *,
+    curr_id,
+    buy_decision_prompt,
+    research_prompt,
+    build_technical_suffix,
+):
+    """Render the copyable prompt-pack panel.
 
-    st.markdown("#### ⚔️ 產業橫向對比 (同業估值與利潤率 PK)")
-    st.markdown("<small style='color:gray;'>*註：透過 AI 動態檢索業務相近的競爭對手，並抓取最新財報數據進行橫向比較。*</small>", unsafe_allow_html=True)
-    with st.spinner("AI 正在深度檢索產業鏈與競爭對手，並同步抓取最新財報數據..."):
-        peers = get_peers_from_ai(stock_name, curr_id, st.session_state.api_key)
-        if not peers:
-            st.error("AI 暫時找不到明確的同業數據，或請檢查您的 API Key 額度。")
-            st.markdown("---")
-            return
+    `build_technical_suffix` stays in ui_main for now because it depends on the
+    current stock chart locals. Keeping it as a callback lets this panel move
+    without changing prompt behavior.
+    """
+    with st.expander("📋 點此複製【打包提示詞】至 Gemini Advanced 或 ChatGPT 發問", expanded=True):
+        prompt_mode = st.radio(
+            "提示詞版本",
+            ["買進決策版（精簡，建議平常使用）", "研究完整版（完整，適合深度分析）"],
+            horizontal=True,
+            key=f"prompt_pack_mode_{curr_id}",
+        )
+        technical_pack_mode = st.radio(
+            "技術面打包選項",
+            ["不加入技術面", "加入技術面摘要", "加入技術面摘要 + 技術線圖輔助規則"],
+            horizontal=True,
+            key=f"prompt_technical_pack_mode_{curr_id}",
+        )
 
-        compare_list = [curr_id] + [p for p in peers if p != curr_id]
-        compare_data = []
-        for code in compare_list:
-            _, p_info = get_stock_data(code, st.session_state.fugle_key, st.session_state.finmind_key)
-            p_name = get_chinese_name(code) or code
-            if not p_info:
-                continue
+        selected_prompt = buy_decision_prompt if prompt_mode.startswith("買進決策版") else research_prompt
+        technical_suffix = build_technical_suffix(technical_pack_mode)
+        if technical_suffix:
+            selected_prompt = selected_prompt.rstrip() + "\n\n" + technical_suffix
+        st.caption("買進決策版只保留會影響是否買進的採用值、系統/AI差異、估值層級、產業模型、Dynamic Cap 與燈號；研究完整版保留較完整資料品質與來源摘要。技術面可選擇不加入、加入摘要，或加入摘要與線圖輔助規則。")
 
-            pe_val = s_float(p_info.get("trailingPE"))
-            pe_fmt = f"{pe_val:.2f}x" if pe_val is not None else "N/A"
-            gm_fmt = to_pct(s_float(p_info.get("grossMargins")))
-            om_fmt = to_pct(s_float(p_info.get("operatingMargins")))
-            roe_fmt = to_pct(s_float(p_info.get("returnOnEquity")))
-            prev_close_val = s_float(p_info.get("previousClose"))
-            prev_close_fmt = f"{prev_close_val:.2f}" if prev_close_val is not None else "N/A"
-            t_eps_p = s_float(p_info.get("trailingEps"))
-            f_eps_p = s_float(p_info.get("forwardEps"))
-            t_eps_p_str = f"{t_eps_p:.2f}" if t_eps_p is not None else "N/A"
-            f_eps_p_str = f"{f_eps_p:.2f}" if f_eps_p is not None else "N/A"
-            eps_display = f"{t_eps_p_str} / <span style='color:#00bfff;'>{f_eps_p_str}</span>"
-            if prev_close_val is not None and f_eps_p is not None and f_eps_p > 0:
-                fpe_fmt = f"<b style='color:#FFD700;'>{prev_close_val / f_eps_p:.1f}x</b>"
-            else:
-                fpe_fmt = "<span style='color:gray;'>N/A</span>"
-            target_mean_p = s_float(p_info.get("targetMeanPrice"))
-            if target_mean_p is not None and prev_close_val is not None and prev_close_val > 0:
-                upside = ((target_mean_p - prev_close_val) / prev_close_val) * 100
-                if upside >= 25:
-                    upside_fmt = f"<span style='color:#ff4d4d; font-weight:bold;'>+{upside:.1f}%</span>"
-                elif upside > 0:
-                    upside_fmt = f"<span style='color:#00cc66;'>+{upside:.1f}%</span>"
-                else:
-                    upside_fmt = f"<span style='color:#aaa;'>{upside:.1f}%</span>"
-                target_display = f"{target_mean_p:.1f} ({upside_fmt})"
-            else:
-                target_display = "<span style='color:gray;'>無資料</span>"
-            compare_data.append({
-                "代號": f"{p_name} ({code})",
-                "股價": prev_close_fmt,
-                "前瞻 P/E": fpe_fmt,
-                "預估 EPS": eps_display,
-                "目標價": target_display,
-                "毛利率": gm_fmt,
-                "營益率": om_fmt,
-                "ROE": roe_fmt,
-            })
+        safe_prompt_js = json.dumps(selected_prompt, ensure_ascii=False)
+        components.html(
+            f"""
+            <div style="margin: 10px 0 12px 0; font-family: sans-serif;">
+                <button
+                    onclick="copyPromptToClipboard()"
+                    style="
+                        width: 100%;
+                        padding: 13px 14px;
+                        border-radius: 10px;
+                        border: 1px solid #4b5563;
+                        background: #2563eb;
+                        color: white;
+                        font-size: 16px;
+                        font-weight: 700;
+                        cursor: pointer;
+                    "
+                >
+                    📋 一鍵複製目前版本提示詞
+                </button>
+                <div id="copyStatus" style="margin-top: 8px; color: #16a34a; font-size: 14px;"></div>
+            </div>
 
-        if compare_data:
-            table_html = "<table style='width:100%; text-align:center; border-collapse: collapse; margin-top: 10px; font-size: 1.05rem; color: #e0e0e0;'><tr style='background-color:#333; color:#fff; border-bottom: 2px solid #555;'><th style='padding:12px;'>公司名稱</th><th>最新收盤價</th><th>前瞻 P/E</th><th>預估 EPS (今/明)</th><th>目標價 (潛在空間)</th><th>毛利率</th><th>營益率</th><th>ROE</th></tr>"
-            for row in compare_data:
-                row_bg = "#2c3e50" if str(curr_id) in row["代號"] else "#1e1e1e"
-                table_html += f"<tr style='background-color:{row_bg}; border-bottom:1px solid #444;'><td style='padding:12px; color:#ffffff;'><b>{row['代號']}</b></td><td>{row['股價']}</td><td>{row['前瞻 P/E']}</td><td>{row['預估 EPS']}</td><td>{row['目標價']}</td><td>{row['毛利率']}</td><td>{row['營益率']}</td><td style='color:#00bfff;'><b>{row['ROE']}</b></td></tr>"
-            table_html += "</table>"
-            st.markdown(table_html, unsafe_allow_html=True)
-    st.markdown("---")
+            <script>
+            async function copyPromptToClipboard() {{
+                const text = {safe_prompt_js};
+                const status = document.getElementById("copyStatus");
+
+                try {{
+                    await navigator.clipboard.writeText(text);
+                    status.innerText = "✅ 已複製目前版本提示詞，可直接貼到 Gemini Advanced 或 ChatGPT。";
+                }} catch (err) {{
+                    const textarea = document.createElement("textarea");
+                    textarea.value = text;
+                    textarea.style.position = "fixed";
+                    textarea.style.left = "-9999px";
+                    textarea.style.top = "0";
+                    document.body.appendChild(textarea);
+                    textarea.focus();
+                    textarea.select();
+
+                    try {{
+                        document.execCommand("copy");
+                        status.innerText = "✅ 已複製目前版本提示詞，可直接貼上使用。";
+                    }} catch (fallbackErr) {{
+                        status.style.color = "#dc2626";
+                        status.innerText = "⚠️ 手機瀏覽器限制自動複製，請改用下方文字框長按複製。";
+                    }}
+
+                    document.body.removeChild(textarea);
+                }}
+            }}
+            </script>
+            """,
+            height=105,
+        )
+
+        mode_key = "buy" if prompt_mode.startswith("買進決策版") else "research"
+        st.text_area(
+            "提示詞內容",
+            value=selected_prompt,
+            height=330,
+            label_visibility="collapsed",
+            key=f"copy_prompt_textarea_{curr_id}_{mode_key}_{abs(hash(selected_prompt)) % 100000000}",
+        )
+

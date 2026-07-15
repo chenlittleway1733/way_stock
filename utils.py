@@ -1,13 +1,36 @@
 """
-UI 入口門面：
-為降低單一 ui.py 過大與後續維護困難，本檔只保留對外匯出的兩個入口函式。
-實際畫面邏輯已拆到：
-- ui_sidebar.py：側邊欄、自選股、策略掃描
-- ui_main.py：主畫面、圖表、AI/財務/ETF 面板
-- ui_common.py：共用 import
+UI 模組共用匯入。
+此檔案保留原 ui.py 需要的外部依賴，避免各模組重複維護 import。
 """
+import datetime
+import inspect
+import math
+import os
+import re
+import time
+import json
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import streamlit as st
+import streamlit.components.v1 as components
+from services import *
+from utils import *
+from scoring import calculate_strategy_score, normalize_screener_weights, backtest_return_from_hist, score_icon
 
-from ui_sidebar import render_sidebar
-from ui_main import render_main_page
+from industry_model import get_industry_valuation_profile, build_industry_valuation_model_report
 
-__all__ = ["render_sidebar", "render_main_page"]
+from dynamic_cap_model import calculate_dynamic_cap_v2
+
+
+def st_dataframe(data=None, *, width="stretch", **kwargs):
+    """Render dataframe with Streamlit 1.50+ width API and legacy fallback."""
+    caller = inspect.currentframe().f_back
+    st_target = caller.f_globals.get("st", st) if caller is not None else st
+    try:
+        return st_target.dataframe(data, width=width, **kwargs)
+    except TypeError as exc:
+        if "width" not in str(exc):
+            raise
+        use_container_width = width == "stretch"
+        return st_target.dataframe(data, use_container_width=use_container_width, **kwargs)

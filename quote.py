@@ -1,119 +1,73 @@
-"""Top-level overview panels for ui_main.render_main_page."""
+"""Peer comparison panel for ui_main.render_main_page."""
 
-from ui_common import (
-    clean_html,
-    get_ai_analysis_final,
-    reset_all_states_on_stock_change,
-    st,
-)
+from ui_common import *
 
 
-def render_topic_loading_panel(topic_q):
-    """Resolve a pending topic-search request and update session state."""
-    if st.session_state.topic_results != "LOADING":
-        return
-    with st.spinner(f"🤖 AI 正在連線推演「{topic_q}」..."):
-        data, links = get_ai_analysis_final(
-            topic_q,
-            st.session_state.api_key,
-            st.session_state.get("selected_model", "gemini-3.1-pro-preview"),
-        )
-        if isinstance(data, dict):
-            st.session_state.topic_results = {"data": data, "links": links, "topic": topic_q}
-            st.session_state.show_whale = False
-            st.rerun()
-        else:
-            st.error(f"AI 解析失敗或逾時無回應。\n\n詳細原因：{data}")
-            st.session_state.topic_results = None
-
-
-def render_topic_results_panel(topic_results):
-    """Render the AI topic stock-picking result panel."""
-    if not isinstance(topic_results, dict):
+def render_peer_compare_panel(*, curr_id, stock_name):
+    if not st.session_state.show_pk:
         return
 
-    st.success("✅ AI 議題推演完成！系統已為您捕捉以下關聯受惠股，點擊按鈕即可一鍵切換至該檔股票的戰情室面板！")
-    data = topic_results.get("data", {}) or {}
-    topic = topic_results.get("topic", "")
-    stocks = data.get("stocks", []) or []
+    st.markdown("#### ⚔️ 產業橫向對比 (同業估值與利潤率 PK)")
+    st.markdown("<small style='color:gray;'>*註：透過 AI 動態檢索業務相近的競爭對手，並抓取最新財報數據進行橫向比較。*</small>", unsafe_allow_html=True)
+    with st.spinner("AI 正在深度檢索產業鏈與競爭對手，並同步抓取最新財報數據..."):
+        peers = get_peers_from_ai(stock_name, curr_id, st.session_state.api_key)
+        if not peers:
+            st.error("AI 暫時找不到明確的同業數據，或請檢查您的 API Key 額度。")
+            st.markdown("---")
+            return
 
-    ai_topic_html = f"""
-    <div style='background: linear-gradient(90deg, #1e3c72 0%, #2a5298 100%); padding: 20px; border-radius: 10px; margin-bottom: 20px; border-left: 5px solid #FFD700;'>
-        <h3 style='color: white; margin-top: 0;'>💡 議題動態推演：【{topic}】</h3>
-        <div style='color: #e0e0e0; font-size: 1.05rem; line-height: 1.6;'>{data.get('reasoning', '無分析內容')}</div>
-    </div>
-    """
-    st.markdown(clean_html(ai_topic_html), unsafe_allow_html=True)
+        compare_list = [curr_id] + [p for p in peers if p != curr_id]
+        compare_data = []
+        for code in compare_list:
+            _, p_info = get_stock_data(code, st.session_state.fugle_key, st.session_state.finmind_key)
+            p_name = get_chinese_name(code) or code
+            if not p_info:
+                continue
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("#### 🛡️ 潛力權值股 (點擊切換)")
-        for item in [x for x in stocks if "權值" in x.get("type", "") or "潛力" in x.get("type", "")]:
-            st.button(
-                f"📌 {item.get('name', '未知')} ({item.get('id', '')})",
-                on_click=reset_all_states_on_stock_change,
-                args=(item.get("id", ""),),
-                key=f"tp_{item.get('id', '')}",
-                use_container_width=True,
-            )
-            st.caption(f"理由：{item.get('why', '')}")
-    with c2:
-        st.markdown("#### 🚀 爆發中小型股 (點擊切換)")
-        for item in [x for x in stocks if "中小" in x.get("type", "") or "爆發" in x.get("type", "")]:
-            st.button(
-                f"🔥 {item.get('name', '未知')} ({item.get('id', '')})",
-                on_click=reset_all_states_on_stock_change,
-                args=(item.get("id", ""),),
-                key=f"ts_{item.get('id', '')}",
-                use_container_width=True,
-            )
-            st.caption(f"理由：{item.get('why', '')}")
+            pe_val = s_float(p_info.get("trailingPE"))
+            pe_fmt = f"{pe_val:.2f}x" if pe_val is not None else "N/A"
+            gm_fmt = to_pct(s_float(p_info.get("grossMargins")))
+            om_fmt = to_pct(s_float(p_info.get("operatingMargins")))
+            roe_fmt = to_pct(s_float(p_info.get("returnOnEquity")))
+            prev_close_val = s_float(p_info.get("previousClose"))
+            prev_close_fmt = f"{prev_close_val:.2f}" if prev_close_val is not None else "N/A"
+            t_eps_p = s_float(p_info.get("trailingEps"))
+            f_eps_p = s_float(p_info.get("forwardEps"))
+            t_eps_p_str = f"{t_eps_p:.2f}" if t_eps_p is not None else "N/A"
+            f_eps_p_str = f"{f_eps_p:.2f}" if f_eps_p is not None else "N/A"
+            eps_display = f"{t_eps_p_str} / <span style='color:#00bfff;'>{f_eps_p_str}</span>"
+            if prev_close_val is not None and f_eps_p is not None and f_eps_p > 0:
+                fpe_fmt = f"<b style='color:#FFD700;'>{prev_close_val / f_eps_p:.1f}x</b>"
+            else:
+                fpe_fmt = "<span style='color:gray;'>N/A</span>"
+            target_mean_p = s_float(p_info.get("targetMeanPrice"))
+            if target_mean_p is not None and prev_close_val is not None and prev_close_val > 0:
+                upside = ((target_mean_p - prev_close_val) / prev_close_val) * 100
+                if upside >= 25:
+                    upside_fmt = f"<span style='color:#ff4d4d; font-weight:bold;'>+{upside:.1f}%</span>"
+                elif upside > 0:
+                    upside_fmt = f"<span style='color:#00cc66;'>+{upside:.1f}%</span>"
+                else:
+                    upside_fmt = f"<span style='color:#aaa;'>{upside:.1f}%</span>"
+                target_display = f"{target_mean_p:.1f} ({upside_fmt})"
+            else:
+                target_display = "<span style='color:gray;'>無資料</span>"
+            compare_data.append({
+                "代號": f"{p_name} ({code})",
+                "股價": prev_close_fmt,
+                "前瞻 P/E": fpe_fmt,
+                "預估 EPS": eps_display,
+                "目標價": target_display,
+                "毛利率": gm_fmt,
+                "營益率": om_fmt,
+                "ROE": roe_fmt,
+            })
 
-    links = topic_results.get("links", []) or []
-    if links:
-        with st.expander("🔗 查看 AI 參考來源"):
-            for link in links:
-                st.markdown(f"- [{link}]({link})")
+        if compare_data:
+            table_html = "<table style='width:100%; text-align:center; border-collapse: collapse; margin-top: 10px; font-size: 1.05rem; color: #e0e0e0;'><tr style='background-color:#333; color:#fff; border-bottom: 2px solid #555;'><th style='padding:12px;'>公司名稱</th><th>最新收盤價</th><th>前瞻 P/E</th><th>預估 EPS (今/明)</th><th>目標價 (潛在空間)</th><th>毛利率</th><th>營益率</th><th>ROE</th></tr>"
+            for row in compare_data:
+                row_bg = "#2c3e50" if str(curr_id) in row["代號"] else "#1e1e1e"
+                table_html += f"<tr style='background-color:{row_bg}; border-bottom:1px solid #444;'><td style='padding:12px; color:#ffffff;'><b>{row['代號']}</b></td><td>{row['股價']}</td><td>{row['前瞻 P/E']}</td><td>{row['預估 EPS']}</td><td>{row['目標價']}</td><td>{row['毛利率']}</td><td>{row['營益率']}</td><td style='color:#00bfff;'><b>{row['ROE']}</b></td></tr>"
+            table_html += "</table>"
+            st.markdown(table_html, unsafe_allow_html=True)
     st.markdown("---")
-
-
-def render_whale_panel():
-    """Render the quick whale-watch shortcut panel."""
-    st.markdown("### 🐳 近兩周大戶持股比例顯著增加標的")
-    whales = [("2317", "鴻海"), ("2382", "廣達"), ("1519", "華城"), ("6669", "緯穎"), ("3324", "雙鴻")]
-    cols = st.columns(5)
-    for idx, (code, name) in enumerate(whales):
-        with cols[idx]:
-            st.button(
-                f"{name}\n({code})",
-                on_click=reset_all_states_on_stock_change,
-                args=(code,),
-                key=f"w_{code}",
-                use_container_width=True,
-            )
-    st.markdown("---")
-
-
-def render_empty_stock_prompt():
-    """Render first-load guidance when no stock is selected."""
-    st.markdown(
-        """
-        <div style="
-            margin-top: 2.5rem;
-            padding: 1.4rem 1.6rem;
-            border: 1px solid rgba(0,0,0,0.10);
-            border-radius: 14px;
-            background: rgba(127,127,127,0.07);
-            max-width: 820px;
-        ">
-            <div style="font-size:1.35rem; font-weight:800; margin-bottom:0.55rem;">
-                🔎 請先輸入股票代號或使用左側下拉選股查詢
-            </div>
-            <div style="font-size:1.02rem; line-height:1.8; color:rgba(120,120,120,0.95);">
-                可在左側「輸入台股代號」欄位輸入，例如 <b>2330</b>、<b>3037</b>、<b>2454</b>，
-                輸入後請按 <b style="color:#ff8c00;">Enter</b> 確認送出；也可以從「快速選股名單」下拉選擇股票。
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
