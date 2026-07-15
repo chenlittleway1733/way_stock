@@ -1,30 +1,61 @@
-{
-  "created_at": "2026-06-20",
-  "description": "M10 margin benchmark rules derived from M09-01 to M09-18. Values are percentage points, not decimals.",
-  "margin_quality_counts": {
-    "A": 37,
-    "B": 35,
-    "C": 15,
-    "N/A": 3
-  },
-  "margin_rule_counts": {
-    "high_operating_margin_cap": 10,
-    "standard_margin_benchmark": 41,
-    "cycle_margin_sensitive": 4,
-    "high_gross_margin_profile": 5,
-    "event_or_cycle_tracking_only": 15,
-    "low_operating_margin_cap": 12,
-    "margin_not_applicable": 3
-  },
-  "rule_definitions": {
-    "margin_not_applicable": "金融業、舊代號、排除樣本或不適用製造業毛利率 / 營益率。",
-    "event_or_cycle_tracking_only": "事件型或景氣循環型，margin 僅作追蹤，不直接作固定估值。",
-    "negative_operating_margin_risk": "分類基礎營益率為負，需避免一般 P/E 或 margin 外推。",
-    "breakeven_operating_margin": "分類接近損益兩平，估值需保守。",
-    "low_operating_margin_cap": "低營益率分類，需低 margin cap。",
-    "high_operating_margin_cap": "高營益率分類，可使用較高 margin cap，但仍需估值上限。",
-    "high_gross_margin_profile": "高毛利分類，需檢查研發費用率與規模吸收。",
-    "cycle_margin_sensitive": "循環敏感分類，應搭配 P/B、稼動率、報價或景氣指標。",
-    "standard_margin_benchmark": "一般 margin benchmark，可用於分類基準比較。"
-  }
-}
+"""Post-processing for AI financial-fill responses."""
+
+import datetime
+import json
+
+from ai_services.financial_schema import normalize_ai_source_metadata
+from validators.candidate_review import build_financial_candidate_data
+from validators.financial_validation import validate_ai_financial_json
+
+
+def postprocess_financial_ai_payload(
+    parsed,
+    *,
+    marker_data=None,
+    stock_id="",
+    stock_name="",
+    target_year=None,
+    used_model="",
+    used_search=True,
+    fallback_reason="",
+    attempts=None,
+    prompt_text="",
+    system_prompt="",
+):
+    """Validate, source-normalize and candidate-wrap one AI financial payload."""
+    if not isinstance(parsed, dict):
+        return parsed
+
+    marker_data = marker_data or {}
+    parsed.update({k: v for k, v in marker_data.items() if v is not None and parsed.get(k) is None})
+    parsed = normalize_ai_source_metadata(parsed)
+    parsed = validate_ai_financial_json(parsed, stock_id=stock_id, stock_name=stock_name)
+    parsed = normalize_ai_source_metadata(parsed)
+
+    retrieved_at = datetime.datetime.now().isoformat(timespec="seconds")
+    parsed["model_used"] = used_model
+    parsed["ai_search_enabled"] = bool(used_search)
+    parsed["fallback_reason"] = fallback_reason
+    parsed["retrieved_at"] = retrieved_at
+    parsed["attempts"] = attempts or []
+    parsed["retry_policy"] = "Pro Only：gemini-3.1-pro-preview + Google Search；最多 3 次；不降級。"
+    parsed["_candidate_data"] = build_financial_candidate_data(
+        parsed,
+        stock_id=stock_id,
+        stock_name=stock_name,
+        retrieved_at=retrieved_at,
+        default_review_status="pending",
+    )
+    parsed["_candidate_data_status"] = f"pending_review_candidates={len(parsed['_candidate_data'])}"
+    parsed["query_payload"] = json.dumps({
+        "stock": f"{stock_name} ({stock_id})",
+        "target_year": target_year,
+        "model_used": used_model,
+        "google_search_enabled": bool(used_search),
+        "fallback_reason": fallback_reason or "無",
+        "retry_policy": "Pro Only same-model retry: delays 0s, 3s, 8s; no downgrade.",
+        "prompt": prompt_text,
+        "system_instruction": system_prompt,
+    }, ensure_ascii=False, indent=2)
+    return parsed
+

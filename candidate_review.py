@@ -1,106 +1,64 @@
-"""Prompt-pack panel extracted from ui_main.py."""
+"""Stock title, watchlist, and industry-classification panel."""
 
-import json
+from ui_common import (
+    SECTOR_MAP,
+    get_industry_valuation_profile,
+    get_watchlist,
+    st,
+    toggle_watchlist,
+    translate_to_zh,
+)
 
-from ui_common import components, st
 
+def render_stock_header_panel(*, curr_id, stock_name, info):
+    """Render stock heading and industry model summary.
 
-def render_prompt_pack_panel(
-    *,
-    curr_id,
-    buy_decision_prompt,
-    research_prompt,
-    build_technical_suffix,
-):
-    """Render the copyable prompt-pack panel.
-
-    `build_technical_suffix` stays in ui_main for now because it depends on the
-    current stock chart locals. Keeping it as a callback lets this panel move
-    without changing prompt behavior.
+    Returns:
+        (sector_display, industry_profile)
     """
-    with st.expander("📋 點此複製【打包提示詞】至 Gemini Advanced 或 ChatGPT 發問", expanded=True):
-        prompt_mode = st.radio(
-            "提示詞版本",
-            ["買進決策版（精簡，建議平常使用）", "研究完整版（完整，適合深度分析）"],
-            horizontal=True,
-            key=f"prompt_pack_mode_{curr_id}",
+    info = info or {}
+    col_title, col_star = st.columns([0.85, 0.15])
+    with col_title:
+        st.markdown(f"### 🏢 {stock_name} ({curr_id})")
+    with col_star:
+        in_watch = curr_id in get_watchlist()
+        btn_label = "⭐ 移除自選" if in_watch else "☆ 加入自選"
+        if st.button(btn_label, use_container_width=True):
+            toggle_watchlist(curr_id, stock_name)
+            st.rerun()
+
+    sector_disp = SECTOR_MAP.get(info.get("sector", "未知"), info.get("sector", "未知"))
+    early_ai_fin = st.session_state.ai_fetched_financials.get(curr_id, {}) if hasattr(st.session_state, "ai_fetched_financials") else {}
+    if isinstance(early_ai_fin, dict) and early_ai_fin:
+        if str(early_ai_fin.get("_stock_id") or curr_id) != str(curr_id):
+            early_ai_fin = {}
+
+    industry_profile = get_industry_valuation_profile(
+        curr_id,
+        stock_name,
+        sector_disp,
+        info.get("industry", "未知"),
+        ai_financials=early_ai_fin,
+    )
+    st.markdown(
+        f"**🏷️ 產業分類：** {sector_disp} / {info.get('industry', '未知')}｜"
+        f"估值模型：{industry_profile.get('model_label', '一般產業')}｜"
+        f"題材標籤：{industry_profile.get('themes_text', '—')}｜"
+        f"分類來源：{industry_profile.get('classification_source', industry_profile.get('mapping_source', '—'))}"
+    )
+    if industry_profile.get("classification_needs_manual_review"):
+        st.warning(
+            f"⚠️ 產業分類待確認：{industry_profile.get('classification_warning', '此分類不是正式 stock_mapping.py 指定。')}"
+            f"｜可信度：{industry_profile.get('classification_confidence', 'low')}"
+            f"｜Dynamic Cap 分類折扣：×{float(industry_profile.get('classification_confidence_factor', 1.0) or 1.0):.2f}"
         )
-        technical_pack_mode = st.radio(
-            "技術面打包選項",
-            ["不加入技術面", "加入技術面摘要", "加入技術面摘要 + 技術線圖輔助規則"],
-            horizontal=True,
-            key=f"prompt_technical_pack_mode_{curr_id}",
-        )
+    if industry_profile.get("pe_trap_warning"):
+        st.warning("⚠️ 本產業具有 P/E 陷阱風險：低 P/E 不一定代表低估，請優先檢查 P/B、週期位置、報價或訂單落地。")
+    if industry_profile.get("pe_model_suitable") is False:
+        st.warning("⚠️ 本分類不適合使用一般 P/E 公式估值作為買進依據，應以事件、訂單、籌碼與財報落地程度評估。")
 
-        selected_prompt = buy_decision_prompt if prompt_mode.startswith("買進決策版") else research_prompt
-        technical_suffix = build_technical_suffix(technical_pack_mode)
-        if technical_suffix:
-            selected_prompt = selected_prompt.rstrip() + "\n\n" + technical_suffix
-        st.caption("買進決策版只保留會影響是否買進的採用值、系統/AI差異、估值層級、產業模型、Dynamic Cap 與燈號；研究完整版保留較完整資料品質與來源摘要。技術面可選擇不加入、加入摘要，或加入摘要與線圖輔助規則。")
+    with st.expander("📖 查看公司詳細營業項目簡介 (自動英翻中)"):
+        st.write(translate_to_zh(info.get("longBusinessSummary", "暫無簡介。")))
 
-        safe_prompt_js = json.dumps(selected_prompt, ensure_ascii=False)
-        components.html(
-            f"""
-            <div style="margin: 10px 0 12px 0; font-family: sans-serif;">
-                <button
-                    onclick="copyPromptToClipboard()"
-                    style="
-                        width: 100%;
-                        padding: 13px 14px;
-                        border-radius: 10px;
-                        border: 1px solid #4b5563;
-                        background: #2563eb;
-                        color: white;
-                        font-size: 16px;
-                        font-weight: 700;
-                        cursor: pointer;
-                    "
-                >
-                    📋 一鍵複製目前版本提示詞
-                </button>
-                <div id="copyStatus" style="margin-top: 8px; color: #16a34a; font-size: 14px;"></div>
-            </div>
-
-            <script>
-            async function copyPromptToClipboard() {{
-                const text = {safe_prompt_js};
-                const status = document.getElementById("copyStatus");
-
-                try {{
-                    await navigator.clipboard.writeText(text);
-                    status.innerText = "✅ 已複製目前版本提示詞，可直接貼到 Gemini Advanced 或 ChatGPT。";
-                }} catch (err) {{
-                    const textarea = document.createElement("textarea");
-                    textarea.value = text;
-                    textarea.style.position = "fixed";
-                    textarea.style.left = "-9999px";
-                    textarea.style.top = "0";
-                    document.body.appendChild(textarea);
-                    textarea.focus();
-                    textarea.select();
-
-                    try {{
-                        document.execCommand("copy");
-                        status.innerText = "✅ 已複製目前版本提示詞，可直接貼上使用。";
-                    }} catch (fallbackErr) {{
-                        status.style.color = "#dc2626";
-                        status.innerText = "⚠️ 手機瀏覽器限制自動複製，請改用下方文字框長按複製。";
-                    }}
-
-                    document.body.removeChild(textarea);
-                }}
-            }}
-            </script>
-            """,
-            height=105,
-        )
-
-        mode_key = "buy" if prompt_mode.startswith("買進決策版") else "research"
-        st.text_area(
-            "提示詞內容",
-            value=selected_prompt,
-            height=330,
-            label_visibility="collapsed",
-            key=f"copy_prompt_textarea_{curr_id}_{mode_key}_{abs(hash(selected_prompt)) % 100000000}",
-        )
+    return sector_disp, industry_profile
 
