@@ -1,119 +1,91 @@
-"""Top-level overview panels for ui_main.render_main_page."""
+"""ETF exposure panel for ui_main.render_main_page."""
 
-from ui_common import (
-    clean_html,
-    get_ai_analysis_final,
-    reset_all_states_on_stock_change,
-    st,
-)
+from ui_common import *
 
 
-def render_topic_loading_panel(topic_q):
-    """Resolve a pending topic-search request and update session state."""
-    if st.session_state.topic_results != "LOADING":
-        return
-    with st.spinner(f"🤖 AI 正在連線推演「{topic_q}」..."):
-        data, links = get_ai_analysis_final(
-            topic_q,
-            st.session_state.api_key,
-            st.session_state.get("selected_model", "gemini-3.1-pro-preview"),
-        )
-        if isinstance(data, dict):
-            st.session_state.topic_results = {"data": data, "links": links, "topic": topic_q}
-            st.session_state.show_whale = False
-            st.rerun()
-        else:
-            st.error(f"AI 解析失敗或逾時無回應。\n\n詳細原因：{data}")
-            st.session_state.topic_results = None
+def _render_etf_holder_table(rows, title, source_tag):
+    rows = rows or []
+    if not rows:
+        return False
+    table_rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        weight = row.get("weight")
+        try:
+            weight_text = f"{float(weight):.2f}%" if weight is not None and str(weight).strip() != "" else "N/A"
+        except Exception:
+            weight_text = str(weight) if weight else "N/A"
+        table_rows.append({
+            "ETF名稱": row.get("etf_name") or "",
+            "代號": row.get("etf_code") or "",
+            "持股比例": weight_text,
+            "資料日期": row.get("data_date") or "來源未揭露",
+            "來源": row.get("source") or source_tag,
+            "資料性質": row.get("data_type") or source_tag,
+        })
+    if not table_rows:
+        return False
+    st.markdown(title)
+    st_dataframe(pd.DataFrame(table_rows), hide_index=True)
+    return True
 
 
-def render_topic_results_panel(topic_results):
-    """Render the AI topic stock-picking result panel."""
-    if not isinstance(topic_results, dict):
-        return
+def render_etf_exposure_panel(*, curr_id, stock_name):
+    """Render fast ETF exposure and optional AI ETF lookup.
 
-    st.success("✅ AI 議題推演完成！系統已為您捕捉以下關聯受惠股，點擊按鈕即可一鍵切換至該檔股票的戰情室面板！")
-    data = topic_results.get("data", {}) or {}
-    topic = topic_results.get("topic", "")
-    stocks = data.get("stocks", []) or []
-
-    ai_topic_html = f"""
-    <div style='background: linear-gradient(90deg, #1e3c72 0%, #2a5298 100%); padding: 20px; border-radius: 10px; margin-bottom: 20px; border-left: 5px solid #FFD700;'>
-        <h3 style='color: white; margin-top: 0;'>💡 議題動態推演：【{topic}】</h3>
-        <div style='color: #e0e0e0; font-size: 1.05rem; line-height: 1.6;'>{data.get('reasoning', '無分析內容')}</div>
-    </div>
+    Returns fast-query ETF rows so the prompt pack can stay synchronized with
+    the panel shown on screen.
     """
-    st.markdown(clean_html(ai_topic_html), unsafe_allow_html=True)
+    st.markdown("#### 📌 主要 ETF 持有概況")
+    with st.expander(f"查看含有 {stock_name} ({curr_id}) 的 ETF", expanded=False):
+        st.caption("一般頁面僅做快速查詢，不使用 AI、不掃描 MoneyDJ / Pocket / CMoney 快取，避免等待過久。此區主要來自 Yahoo 個股 ETF 頁，可能只涵蓋主要 / 前十大 ETF，不代表完整 ETF 持股清單。")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("#### 🛡️ 潛力權值股 (點擊切換)")
-        for item in [x for x in stocks if "權值" in x.get("type", "") or "潛力" in x.get("type", "")]:
-            st.button(
-                f"📌 {item.get('name', '未知')} ({item.get('id', '')})",
-                on_click=reset_all_states_on_stock_change,
-                args=(item.get("id", ""),),
-                key=f"tp_{item.get('id', '')}",
-                use_container_width=True,
-            )
-            st.caption(f"理由：{item.get('why', '')}")
-    with c2:
-        st.markdown("#### 🚀 爆發中小型股 (點擊切換)")
-        for item in [x for x in stocks if "中小" in x.get("type", "") or "爆發" in x.get("type", "")]:
-            st.button(
-                f"🔥 {item.get('name', '未知')} ({item.get('id', '')})",
-                on_click=reset_all_states_on_stock_change,
-                args=(item.get("id", ""),),
-                key=f"ts_{item.get('id', '')}",
-                use_container_width=True,
-            )
-            st.caption(f"理由：{item.get('why', '')}")
+        try:
+            etf_holders = get_stock_etf_holders(curr_id, stock_name)
+        except Exception as exc:
+            etf_holders = []
+            st.warning(f"⚠️ ETF 快速資料源暫時無法取得：{str(exc)[:120]}")
 
-    links = topic_results.get("links", []) or []
-    if links:
-        with st.expander("🔗 查看 AI 參考來源"):
-            for link in links:
-                st.markdown(f"- [{link}]({link})")
+        has_system_etf = _render_etf_holder_table(etf_holders, "**主要 / 前十大 ETF 快速查詢**", "主要/前十大快速查詢")
+        if not has_system_etf:
+            st.info("目前快速資料源查無 ETF 持有資料，或網站版面暫時無法解析。")
+
+        st.caption("⚠️ 此區不保證完整。像 00981A 這類主動式 ETF 可能因 Yahoo 個股頁只列主要/前十大而未出現；需要完整交叉檢查時，請按下方 AI 按鈕。")
+
+        st.markdown("---")
+        st.markdown("#### 🤖 AI 查完整 ETF 持有狀況")
+        st.caption("此按鈕與『AI 全方位校對與補齊財報』分開執行；只有按下時才會使用 AI + 搜尋補查 ETF，不會拖慢財報校對。")
+
+        if "ai_etf_holders" not in st.session_state:
+            st.session_state.ai_etf_holders = {}
+
+        if st.button(
+            "🤖 AI 查完整 ETF 持有狀況",
+            disabled=not st.session_state.api_key,
+            key=f"ai_etf_lookup_{curr_id}",
+            use_container_width=True,
+            help="獨立查詢 ETF 持股；會特別檢查主動式 ETF，例如 00981A、00987A、00988A、00400A、00403A。",
+        ):
+            with st.spinner("AI 正在獨立查詢 ETF 持有狀況，請稍候...（不會執行財報校對）"):
+                ai_etf_data = get_etf_holders_from_ai(curr_id, stock_name, st.session_state.api_key, get_selected_model_id())
+                st.session_state.ai_etf_holders[curr_id] = ai_etf_data
+            st.rerun()
+
+        ai_etf_data = st.session_state.ai_etf_holders.get(curr_id) if isinstance(st.session_state.get("ai_etf_holders"), dict) else None
+        if isinstance(ai_etf_data, dict) and ai_etf_data.get("error"):
+            st.error(f"AI ETF 查詢失敗：{ai_etf_data.get('error')}")
+        elif isinstance(ai_etf_data, dict):
+            ai_etf_rows = ai_etf_data.get("etf_holders_ai", [])
+            if ai_etf_rows:
+                _render_etf_holder_table(ai_etf_rows, "**🤖 AI 完整 ETF 補查結果**", "AI完整ETF補查")
+                st.caption("⚠️ AI ETF 資料為獨立聯網補查結果，只作交叉比對；正式持股仍請以投信公告、PCF 或 ETF 官方持股明細為準。")
+            else:
+                st.info("AI 已查詢，但沒有回傳可用的 ETF 持股清單。")
+            if ai_etf_data.get("summary"):
+                st.caption(f"AI 摘要：{ai_etf_data.get('summary')}")
+        else:
+            st.caption("尚未執行 AI ETF 補查。")
+
     st.markdown("---")
-
-
-def render_whale_panel():
-    """Render the quick whale-watch shortcut panel."""
-    st.markdown("### 🐳 近兩周大戶持股比例顯著增加標的")
-    whales = [("2317", "鴻海"), ("2382", "廣達"), ("1519", "華城"), ("6669", "緯穎"), ("3324", "雙鴻")]
-    cols = st.columns(5)
-    for idx, (code, name) in enumerate(whales):
-        with cols[idx]:
-            st.button(
-                f"{name}\n({code})",
-                on_click=reset_all_states_on_stock_change,
-                args=(code,),
-                key=f"w_{code}",
-                use_container_width=True,
-            )
-    st.markdown("---")
-
-
-def render_empty_stock_prompt():
-    """Render first-load guidance when no stock is selected."""
-    st.markdown(
-        """
-        <div style="
-            margin-top: 2.5rem;
-            padding: 1.4rem 1.6rem;
-            border: 1px solid rgba(0,0,0,0.10);
-            border-radius: 14px;
-            background: rgba(127,127,127,0.07);
-            max-width: 820px;
-        ">
-            <div style="font-size:1.35rem; font-weight:800; margin-bottom:0.55rem;">
-                🔎 請先輸入股票代號或使用左側下拉選股查詢
-            </div>
-            <div style="font-size:1.02rem; line-height:1.8; color:rgba(120,120,120,0.95);">
-                可在左側「輸入台股代號」欄位輸入，例如 <b>2330</b>、<b>3037</b>、<b>2454</b>，
-                輸入後請按 <b style="color:#ff8c00;">Enter</b> 確認送出；也可以從「快速選股名單」下拉選擇股票。
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    return etf_holders

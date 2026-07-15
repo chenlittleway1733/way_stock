@@ -1,106 +1,37 @@
-"""Prompt-pack panel extracted from ui_main.py."""
+"""Global market trend panel for ui_main.render_main_page."""
 
-import json
-
-from ui_common import components, st
+from ui_common import *
 
 
-def render_prompt_pack_panel(
-    *,
-    curr_id,
-    buy_decision_prompt,
-    research_prompt,
-    build_technical_suffix,
-):
-    """Render the copyable prompt-pack panel.
+def _trend_color(value):
+    if value > 0:
+        return "#ff4d4d"
+    if value < 0:
+        return "#00cc66"
+    return "#fff"
 
-    `build_technical_suffix` stays in ui_main for now because it depends on the
-    current stock chart locals. Keeping it as a callback lets this panel move
-    without changing prompt behavior.
+
+def render_market_trend_panel():
+    """Render international linkage trend data and return the raw snapshot."""
+    st.markdown("<br>", unsafe_allow_html=True)
+    trend_data = get_global_market_trend()
+    if not trend_data:
+        return trend_data
+
+    target_day_text = trend_data.get("target_day", "明日")
+    time_status_text = trend_data.get("time_status", "")
+    st.markdown(f"#### 🌍 國際連動與{target_day_text}趨勢推估 {time_status_text}", unsafe_allow_html=True)
+
+    trend_html = f"""
+    <div style='background:#1e1e1e; padding:15px; border-radius:8px; border-left: 5px solid {trend_data['color']}; margin-bottom: 20px; border-top:1px solid #333; border-right:1px solid #333; border-bottom:1px solid #333;'>
+        <div style='font-size:1.15rem; font-weight:bold; color:{trend_data['color']}; margin-bottom:10px;'>{trend_data['trend']}</div>
+        <div style='display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px;'>
+            <div style='background:#2c2c2c; padding:8px 15px; border-radius:5px;'><span style='color:#aaa; font-size:0.9rem;'>費城半導體 (^SOX)</span><br><b style='font-size:1.1rem; color:#fff;'>{trend_data["sox_p"]:,.2f}</b> <span style='font-size:1rem; color:{_trend_color(trend_data["sox"])};'>({trend_data["sox"]:+.2f}%)</span></div>
+            <div style='background:#2c2c2c; padding:8px 15px; border-radius:5px;'><span style='color:#aaa; font-size:0.9rem;'>台積電 ADR (TSM)</span><br><b style='font-size:1.1rem; color:#fff;'>{trend_data["tsm_p"]:,.2f}</b> <span style='font-size:1rem; color:{_trend_color(trend_data["tsm"])};'>({trend_data["tsm"]:+.2f}%)</span></div>
+            <div style='background:#2c2c2c; padding:8px 15px; border-radius:5px;'><span style='color:#aaa; font-size:0.9rem;'>納斯達克期貨 (NQ=F)</span><br><b style='font-size:1.1rem; color:#fff;'>{trend_data["nq_p"]:,.2f}</b> <span style='font-size:1rem; color:{_trend_color(trend_data["nq"])};'>({trend_data["nq"]:+.2f}%)</span></div>
+            <div style='background:#2c2c2c; padding:8px 15px; border-radius:5px;'><span style='color:#aaa; font-size:0.9rem;'>台股 ETF (EWT)</span><br><b style='font-size:1.1rem; color:#fff;'>{trend_data["ewt_p"]:,.2f}</b> <span style='font-size:1rem; color:{_trend_color(trend_data["ewt"])};'>({trend_data["ewt"]:+.2f}%)</span></div>
+        </div>
+    </div>
     """
-    with st.expander("📋 點此複製【打包提示詞】至 Gemini Advanced 或 ChatGPT 發問", expanded=True):
-        prompt_mode = st.radio(
-            "提示詞版本",
-            ["買進決策版（精簡，建議平常使用）", "研究完整版（完整，適合深度分析）"],
-            horizontal=True,
-            key=f"prompt_pack_mode_{curr_id}",
-        )
-        technical_pack_mode = st.radio(
-            "技術面打包選項",
-            ["不加入技術面", "加入技術面摘要", "加入技術面摘要 + 技術線圖輔助規則"],
-            horizontal=True,
-            key=f"prompt_technical_pack_mode_{curr_id}",
-        )
-
-        selected_prompt = buy_decision_prompt if prompt_mode.startswith("買進決策版") else research_prompt
-        technical_suffix = build_technical_suffix(technical_pack_mode)
-        if technical_suffix:
-            selected_prompt = selected_prompt.rstrip() + "\n\n" + technical_suffix
-        st.caption("買進決策版只保留會影響是否買進的採用值、系統/AI差異、估值層級、產業模型、Dynamic Cap 與燈號；研究完整版保留較完整資料品質與來源摘要。技術面可選擇不加入、加入摘要，或加入摘要與線圖輔助規則。")
-
-        safe_prompt_js = json.dumps(selected_prompt, ensure_ascii=False)
-        components.html(
-            f"""
-            <div style="margin: 10px 0 12px 0; font-family: sans-serif;">
-                <button
-                    onclick="copyPromptToClipboard()"
-                    style="
-                        width: 100%;
-                        padding: 13px 14px;
-                        border-radius: 10px;
-                        border: 1px solid #4b5563;
-                        background: #2563eb;
-                        color: white;
-                        font-size: 16px;
-                        font-weight: 700;
-                        cursor: pointer;
-                    "
-                >
-                    📋 一鍵複製目前版本提示詞
-                </button>
-                <div id="copyStatus" style="margin-top: 8px; color: #16a34a; font-size: 14px;"></div>
-            </div>
-
-            <script>
-            async function copyPromptToClipboard() {{
-                const text = {safe_prompt_js};
-                const status = document.getElementById("copyStatus");
-
-                try {{
-                    await navigator.clipboard.writeText(text);
-                    status.innerText = "✅ 已複製目前版本提示詞，可直接貼到 Gemini Advanced 或 ChatGPT。";
-                }} catch (err) {{
-                    const textarea = document.createElement("textarea");
-                    textarea.value = text;
-                    textarea.style.position = "fixed";
-                    textarea.style.left = "-9999px";
-                    textarea.style.top = "0";
-                    document.body.appendChild(textarea);
-                    textarea.focus();
-                    textarea.select();
-
-                    try {{
-                        document.execCommand("copy");
-                        status.innerText = "✅ 已複製目前版本提示詞，可直接貼上使用。";
-                    }} catch (fallbackErr) {{
-                        status.style.color = "#dc2626";
-                        status.innerText = "⚠️ 手機瀏覽器限制自動複製，請改用下方文字框長按複製。";
-                    }}
-
-                    document.body.removeChild(textarea);
-                }}
-            }}
-            </script>
-            """,
-            height=105,
-        )
-
-        mode_key = "buy" if prompt_mode.startswith("買進決策版") else "research"
-        st.text_area(
-            "提示詞內容",
-            value=selected_prompt,
-            height=330,
-            label_visibility="collapsed",
-            key=f"copy_prompt_textarea_{curr_id}_{mode_key}_{abs(hash(selected_prompt)) % 100000000}",
-        )
-
+    st.markdown(clean_html(trend_html), unsafe_allow_html=True)
+    return trend_data

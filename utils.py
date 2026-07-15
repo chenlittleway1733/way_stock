@@ -2124,6 +2124,16 @@ def build_final_operation_signal(
     pe_model_suitable = bool(industry_profile.get("pe_model_suitable", True))
     target_rank = int(target_confidence.get("rank", 1) or 1)
     pricing_pack = pricing_horizon if isinstance(pricing_horizon, dict) else {"code": str(pricing_horizon or ""), "label": str(pricing_horizon or "未判斷"), "explanation": "", "decision_rule": ""}
+    if pricing_pack.get("code") == "FY1_SOFT_OR_FY2_WATCH":
+        pricing_pack = dict(pricing_pack)
+        pricing_pack.update({
+            "code": "FY1_SOFT_PRICED",
+            "label": "FY1 樂觀定價",
+            "rank": _pricing_horizon_rank("FY1_SOFT_PRICED"),
+            "is_future_priced": False,
+            "explanation": "現價可由 FY1 一年預估 EPS × soft 樂觀倍率解釋；這是 FY1 樂觀區，不代表必須用 FY2 EPS 才能解釋。",
+            "decision_rule": "估值偏樂觀，新買需保留安全邊際；若高於可操作區間，應等待回檔或基本面再確認。",
+        })
     pricing_code = pricing_pack.get("code", "")
     pricing_label = pricing_pack.get("label", pricing_code or "未判斷")
     pricing_rank = _pricing_horizon_rank(pricing_code)

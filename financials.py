@@ -1,185 +1,141 @@
-"""Institutional and ownership chip panels for ui_main.render_main_page."""
+"""Financial quality report context builders for ui_main.render_main_page."""
 
 from ui_common import *
 
 
-def render_chip_panels(*, curr_id, info, ai_shares, eff_eg):
-    """Render institutional flow and ownership panels.
+def adopt_source(sys_val, ai_val, sys_label="系統", ai_label_text="AI補齊"):
+    return sys_label if sys_val is not None else (ai_label_text if ai_val is not None else "無可用資料")
 
-    Returns the values consumed later by the prompt-pack summary so the prompt
-    stays aligned with the visual panel.
-    """
-    result = {"has_institutional_data": False}
-    shares_out = s_float(info.get("sharesOutstanding"))
-    if ai_shares is not None:
-        shares_out = ai_shares
-    share_capital = shares_out * 10 if shares_out is not None else None
 
-    st.markdown("#### 📡 主力籌碼追蹤雷達 (聰明錢動向與背離陷阱)", unsafe_allow_html=True)
-    inst_df = get_inst_data(curr_id, st.session_state.finmind_key)
+def fy_year_display_safe(year_value):
+    try:
+        if year_value is None or str(year_value).strip() in ["", "None", "nan"]:
+            return "年期未明"
+        text = str(year_value).strip()
+        return f"{text}E" if re.match(r"^\d{4}$", text) else text
+    except Exception:
+        return "年期未明"
 
-    if inst_df is not None and not inst_df.empty:
-        f_streak = get_streak(inst_df["Foreign"])
-        t_streak = get_streak(inst_df["Trust"])
-        f_10d = inst_df["Foreign"].tail(10).sum()
-        t_10d = inst_df["Trust"].tail(10).sum()
 
-        f_status = f"連買 {f_streak} 天 🔥" if f_streak > 0 else (f"連賣 {-f_streak} 天 ⚠️" if f_streak < 0 else "無連續動向")
-        t_status = f"連買 {t_streak} 天 🔥" if t_streak > 0 else (f"連賣 {-t_streak} 天 ⚠️" if t_streak < 0 else "無連續動向")
+def _ai_src(ai_fin, has_ai_fin_fetch, ai_period_text, field_key, fallback_label="AI補齊"):
+    return format_ai_source_detail(ai_fin, field_key, ai_period_text, fallback_label) if has_ai_fin_fetch else "AI未啟動"
 
-        f_color = "#ff4d4d" if f_10d > 0 else "#00cc66"
-        t_color = "#ff4d4d" if t_10d > 0 else "#00cc66"
 
-        if (eff_eg is not None and eff_eg > 0) and ((f_10d + t_10d) < -1000):
-            trap_warning = "<div style='background:linear-gradient(90deg, #8b0000 0%, #ff4d4d 100%); color:white; padding:12px; border-radius:8px; margin-top:10px; font-weight:bold;'>🚨 【高危陷阱警示】基本面看似亮眼，但外資/投信近 10 日聯手倒貨超過千張！請提防主力趁利多逢高出貨！</div>"
-        elif (f_streak >= 3 or t_streak >= 3) and ((f_10d + t_10d) > 1000):
-            trap_warning = "<div style='background:linear-gradient(90deg, #006400 0%, #00cc66 100%); color:white; padding:12px; border-radius:8px; margin-top:10px; font-weight:bold;'>🚀 【聰明錢上車】三大法人近期連買且大幅建倉，籌碼動能強勁，極具波段上攻潛力！</div>"
-        else:
-            trap_warning = "<div style='background:#1e1e1e; color:#aaa; padding:12px; border-radius:8px; border:1px solid #333; margin-top:10px;'>目前三大法人買賣超動向無極端異常訊號。</div>"
+def _ai_url(ai_fin, has_ai_fin_fetch, field_key):
+    return get_ai_source_url(ai_fin, field_key) if has_ai_fin_fetch else ""
 
-        radar_html = f"""
-        <div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin-bottom:10px;'>
-            <div style='background:#1e1e1e; padding:15px; border-radius:8px; border-left: 5px solid {f_color};'>
-                <div style='color:#aaa; font-size:0.9rem;'>外資近 10 日淨買賣</div>
-                <div style='font-size:1.6rem; font-weight:bold; color:{f_color};'>{f_10d:,.0f} 張</div>
-                <div style='font-size:1rem; font-weight:bold; color:#fff; margin-top:5px;'>動向: {f_status}</div>
-            </div>
-            <div style='background:#1e1e1e; padding:15px; border-radius:8px; border-left: 5px solid {t_color};'>
-                <div style='color:#aaa; font-size:0.9rem;'>投信近 10 日淨買賣</div>
-                <div style='font-size:1.6rem; font-weight:bold; color:{t_color};'>{t_10d:,.0f} 張</div>
-                <div style='font-size:1rem; font-weight:bold; color:#fff; margin-top:5px;'>動向: {t_status}</div>
-            </div>
-        </div>
-        {trap_warning}
-        """
-        st.markdown(clean_html(radar_html), unsafe_allow_html=True)
-        result.update({
-            "has_institutional_data": True,
-            "f_10d": f_10d,
-            "t_10d": t_10d,
-            "f_status": f_status,
-            "t_status": t_status,
-            "trap_warning": trap_warning,
-        })
-    else:
-        if not st.session_state.finmind_key:
-            st.warning("⚠️ 系統無法獲取主力籌碼雷達。請至左側上傳 `key.txt` 匯入 FinMind 金鑰以解除限制。")
-        else:
-            st.warning("⚠️ 此檔股票近期無三大法人買賣超數據，無法啟動籌碼雷達。")
 
-    st.markdown("#### 💳 信用交易風險（融資融券）", unsafe_allow_html=True)
-    margin_df = get_margin_credit_data(curr_id, st.session_state.finmind_key)
-    margin_credit = build_margin_credit_summary(margin_df, shares_outstanding=shares_out)
-    if margin_credit.get("available"):
-        def _fmt_lots(value):
-            value = s_float(value)
-            return "N/A" if value is None else f"{value:,.0f} 張"
+def build_quality_report_context(
+    *,
+    curr_p,
+    ai_fin,
+    has_ai_fin_fetch,
+    raw_ai_period,
+    dq_warnings,
+    latest_rev_month,
+    latest_rev_display_label,
+    latest_rev_notice,
+    latest_mom_val,
+    latest_rev_source_url,
+    latest_rev_source_rule,
+    latest_rev_announce_date,
+    latest_rev_announce_month,
+    latest_rev_revenue_month,
+    pe_ratio,
+    ai_pe,
+    sys_forward_pe,
+    ai_fpe,
+    eff_forward_pe,
+    orig_peg,
+    ai_peg,
+    eff_peg,
+    pb_ratio,
+    ai_pb,
+    ai_latest_month_eps,
+    sys_latest_quarter_eps,
+    ai_latest_quarter_eps,
+    sys_ttm_eps,
+    ai_ttm_eps,
+    eff_t_eps,
+    sys_fiscal_year_eps,
+    ai_fiscal_year_eps,
+    sys_forward_eps_system,
+    ai_forward_eps_consensus,
+    ai_forward_eps_ai,
+    ai_f_eps_calc,
+    ai_forward_eps_fy1,
+    ai_forward_eps_fy2,
+    ai_forward_eps_fy3,
+    ai_forward_eps_fy1_year,
+    ai_forward_eps_fy2_year,
+    ai_forward_eps_fy3_year,
+    rev_growth,
+    ai_yoy,
+    eff_rg,
+    ai_mom,
+    gross_margin,
+    ai_gm,
+    eff_gm,
+    op_margin,
+    ai_om,
+    eff_om,
+    roe,
+    ai_roe,
+    eff_roe,
+    sys_de,
+    ai_de,
+    eff_de,
+    ttm_eps_adoption=None,
+):
+    """Build the financial quality report rows and derived period metadata."""
+    dq_note_text = "；".join(dq_warnings) if dq_warnings else ""
+    ai_period_text = raw_ai_period if raw_ai_period else "AI未啟動或未揭露期間"
+    latest_rev_period = latest_rev_display_label if latest_rev_month and latest_rev_month != "無資料" else "未取得月營收"
+    rev_is_stale = revenue_month_is_older(latest_rev_month) if latest_rev_month and latest_rev_month != "無資料" else False
+    ttm_eps_adoption = ttm_eps_adoption if isinstance(ttm_eps_adoption, dict) else {}
+    ttm_notes = "；".join(ttm_eps_adoption.get("notes") or [])
+    if ttm_eps_adoption.get("warnings"):
+        warn_text = "；".join(str(x) for x in ttm_eps_adoption.get("warnings") or [])
+        ttm_notes = (ttm_notes + "；" if ttm_notes else "") + warn_text
+    if not ttm_notes:
+        ttm_notes = "用於歷史 P/E；近四季 EPS 合計優先，yfinance trailingEps 僅作備援。"
+    ttm_adopted_source = ttm_eps_adoption.get("adopted_source") or adopt_source(sys_ttm_eps, ai_ttm_eps)
+    ttm_period = ai_period_text if ttm_eps_adoption.get("adopted_value") == ai_ttm_eps and ai_ttm_eps is not None else "系統/備援"
 
-        def _fmt_pct(value):
-            value = s_float(value)
-            return "N/A" if value is None else f"{value:.2%}"
+    def src(field_key, fallback_label="AI補齊"):
+        return _ai_src(ai_fin, has_ai_fin_fetch, ai_period_text, field_key, fallback_label)
 
-        risk_color = margin_credit.get("risk_color", "#FFD700")
-        credit_html = f"""
-        <div style='background:#1e1e1e; padding:15px; border-radius:8px; border-left:5px solid {risk_color}; margin-top:8px; margin-bottom:10px;'>
-            <div style='display:flex; justify-content:space-between; align-items:flex-start; gap:14px; margin-bottom:10px;'>
-                <div>
-                    <div style='font-size:1.1rem; font-weight:bold; color:#fff;'>融資比例與信用風險</div>
-                    <div style='color:#aaa; font-size:0.82rem;'>資料日期：{margin_credit.get("latest_date", "N/A")}｜來源：{margin_credit.get("source", "FinMind")}</div>
-                </div>
-                <div style='background:{risk_color}; color:#000; padding:3px 10px; border-radius:12px; font-size:0.85rem; font-weight:bold;'>{margin_credit.get("risk_label", "資料不足")}</div>
-            </div>
-            <div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px;'>
-                <div style='background:#111827; padding:10px; border-radius:6px;'>
-                    <div style='color:#9CA3AF; font-size:0.82rem;'>融資使用率</div>
-                    <div style='color:#F3F4F6; font-weight:bold; font-size:1.25rem;'>{_fmt_pct(margin_credit.get("margin_usage_ratio"))}</div>
-                </div>
-                <div style='background:#111827; padding:10px; border-radius:6px;'>
-                    <div style='color:#9CA3AF; font-size:0.82rem;'>融資占股本</div>
-                    <div style='color:#F3F4F6; font-weight:bold; font-size:1.25rem;'>{_fmt_pct(margin_credit.get("margin_to_shares_ratio"))}</div>
-                </div>
-                <div style='background:#111827; padding:10px; border-radius:6px;'>
-                    <div style='color:#9CA3AF; font-size:0.82rem;'>融資餘額 / 1日</div>
-                    <div style='color:#F3F4F6; font-weight:bold; font-size:1.25rem;'>{_fmt_lots(margin_credit.get("margin_balance"))}</div>
-                    <div style='color:#CBD5E1; font-size:0.78rem;'>變化 {_fmt_lots(margin_credit.get("margin_change_1d"))}</div>
-                </div>
-                <div style='background:#111827; padding:10px; border-radius:6px;'>
-                    <div style='color:#9CA3AF; font-size:0.82rem;'>券資比 / 融券餘額</div>
-                    <div style='color:#F3F4F6; font-weight:bold; font-size:1.25rem;'>{_fmt_pct(margin_credit.get("short_margin_ratio"))}</div>
-                    <div style='color:#CBD5E1; font-size:0.78rem;'>融券 {_fmt_lots(margin_credit.get("short_balance"))}</div>
-                </div>
-            </div>
-            <div style='color:#E5E7EB; font-size:0.86rem; margin-top:10px; line-height:1.55;'>{margin_credit.get("risk_note", "")}</div>
-        </div>
-        """
-        st.markdown(clean_html(credit_html), unsafe_allow_html=True)
-        with st.expander("查看融資融券明細", expanded=False):
-            st_dataframe(margin_credit.get("report"), hide_index=True)
-    else:
-        if not st.session_state.finmind_key:
-            st.warning("⚠️ 系統無法獲取融資融券資料。請至左側上傳 `key.txt` 匯入 FinMind 金鑰。")
-        else:
-            st.warning(f"⚠️ 此檔股票近期無融資融券資料。{margin_credit.get('message', '')}")
-    result["margin_credit"] = margin_credit
-    st.markdown("---")
+    def url(field_key):
+        return _ai_url(ai_fin, has_ai_fin_fetch, field_key)
 
-    st.markdown("#### 🐳 內部人與控盤主力推估", unsafe_allow_html=True)
-    insider_pct = s_float(info.get("heldPercentInsiders"))
-    inst_pct = s_float(info.get("heldPercentInstitutions"))
-
-    if share_capital is not None:
-        if share_capital >= 10_000_000_000:
-            cap_type, driver, cap_color, driver_desc = "大型權值股", "🌍 外資主導", "#4169E1", f"股本約 {share_capital/100000000:.0f} 億。籌碼龐大，走勢受外資資金影響大。"
-        elif share_capital <= 3_000_000_000:
-            cap_type, driver, cap_color, driver_desc = "中小型飆股", "🔥 投信/內資主力", "#ff8c00", f"股本約 {share_capital/100000000:.0f} 億。籌碼輕薄，易受投信作帳帶動。"
-        else:
-            cap_type, driver, cap_color, driver_desc = "中型中堅股", "🤝 土洋共議", "#9370DB", f"股本約 {share_capital/100000000:.0f} 億。出現土洋合作易有波段行情。"
-    else:
-        cap_type, driver, cap_color, driver_desc = "無資料", "未知", "gray", "無法獲取股本資料"
-
-    inst_str = to_pct(inst_pct)
-    inst_color, inst_eval = ("#ff4d4d", "高度集中 (留意結帳)") if inst_pct is not None and inst_pct > 0.40 else ("#FFD700", "穩定認可") if inst_pct is not None and inst_pct > 0.15 else ("#00bfff", "內資/散戶主導") if inst_pct is not None else ("gray", "數據不足")
-
-    insider_str = to_pct(insider_pct)
-    in_color, in_eval = ("#ff4d4d", "籌碼極度安定") if insider_pct is not None and insider_pct > 0.40 else ("#FFD700", "相對穩健") if insider_pct is not None and insider_pct > 0.20 else ("#00cc66", "籌碼較渙散 (警戒)") if insider_pct is not None else ("gray", "數據不足")
-
-    chip_html = f"""
-    <div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin-top:10px;'>
-        <div style='background:#1e1e1e; padding:15px; border-radius:8px; border-left: 5px solid {inst_color};'>
-            <div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;'>
-                <div style='font-size:1.1rem; font-weight:bold; color:#fff;'>🏦 外資/機構總持股率</div>
-                <div style='background:{inst_color}; color:#000; padding:2px 8px; border-radius:10px; font-size:0.8rem; font-weight:bold;'>{inst_eval}</div>
-            </div>
-            <div style='font-size:1.8rem; font-weight:bold; color:#fff; margin-bottom:5px;'>{inst_str}</div>
-        </div>
-        <div style='background:#1e1e1e; padding:15px; border-radius:8px; border-left: 5px solid {in_color};'>
-            <div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;'>
-                <div style='font-size:1.1rem; font-weight:bold; color:#fff;'>🏢 內部人與大股東持股</div>
-                <div style='background:{in_color}; color:#000; padding:2px 8px; border-radius:10px; font-size:0.8rem; font-weight:bold;'>{in_eval}</div>
-            </div>
-            <div style='font-size:1.8rem; font-weight:bold; color:#fff; margin-bottom:5px;'>{insider_str}</div>
-        </div>
-        <div style='background:#1e1e1e; padding:15px; border-radius:8px; border-left: 5px solid {cap_color};'>
-            <div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;'>
-                <div style='font-size:1.1rem; font-weight:bold; color:#fff;'>🎯 控盤主力推估</div>
-                <div style='background:{cap_color}; color:#fff; padding:2px 8px; border-radius:10px; font-size:0.8rem; font-weight:bold;'>{cap_type}</div>
-            </div>
-            <div style='font-size:1.3rem; font-weight:bold; color:{cap_color}; margin-bottom:10px;'>{driver}</div>
-            <div style='color:#aaa; font-size:0.85rem; line-height:1.5;'>{driver_desc}</div>
-        </div>
-    </div>
-    """
-    st.markdown(clean_html(chip_html), unsafe_allow_html=True)
-    st.markdown("---")
-
-    result.update({
-        "inst_str": inst_str,
-        "inst_eval": inst_eval,
-        "insider_str": insider_str,
-        "in_eval": in_eval,
-        "share_capital": share_capital,
-        "cap_type": cap_type,
-        "driver": driver,
-        "driver_desc": driver_desc,
-    })
-    return result
+    quality_rows = [
+        {"field": "現價", "system_source": "Yahoo/yfinance 即時或延遲行情", "system_value": curr_p, "ai_source": "不使用AI", "ai_value": None, "adopted_value": curr_p, "adopted_source": "系統行情", "period": "即時/延遲", "fmt": "price"},
+        {"field": "P/E", "system_source": "yfinance；異常時 FinMind PER 備援", "system_value": pe_ratio, "ai_source": src("pe"), "ai_source_url": url("pe"), "ai_value": ai_pe, "adopted_value": pe_ratio if pe_ratio is not None else ai_pe, "adopted_source": adopt_source(pe_ratio, ai_pe), "period": ai_period_text if pe_ratio is None and ai_pe is not None else "系統最新可得", "fmt": "x"},
+        {"field": "Forward P/E", "system_source": "yfinance forwardPE 或 EPS 反推", "system_value": sys_forward_pe, "ai_source": src("forward_eps"), "ai_source_url": url("forward_eps"), "ai_value": ai_fpe, "adopted_value": eff_forward_pe, "adopted_source": adopt_source(sys_forward_pe, ai_fpe), "period": ai_period_text if sys_forward_pe is None and ai_fpe is not None else "系統/反推", "fmt": "x"},
+        {"field": "PEG", "system_source": "Forward P/E ÷ 預估成長率", "system_value": orig_peg, "ai_source": src("yoy"), "ai_source_url": url("yoy"), "ai_value": ai_peg, "adopted_value": None if eff_peg == -999 else eff_peg, "adopted_source": "系統優先/AI備援", "period": "推估值", "fmt": "x", "notes": "成長率為負時 PEG 無意義" if eff_peg == -999 else ""},
+        {"field": "P/B", "system_source": "yfinance；異常時 FinMind PBR 備援", "system_value": pb_ratio, "ai_source": src("pb"), "ai_source_url": url("pb"), "ai_value": ai_pb, "adopted_value": pb_ratio if pb_ratio is not None else ai_pb, "adopted_source": adopt_source(pb_ratio, ai_pb), "period": ai_period_text if pb_ratio is None and ai_pb is not None else "系統最新可得", "fmt": "x"},
+        {"field": "最新單月 EPS", "system_source": "系統未穩定提供，需 AI 查自結/注意股公告", "system_value": None, "ai_source": src("latest_month_eps"), "ai_source_url": url("latest_month_eps"), "ai_value": ai_latest_month_eps, "adopted_value": ai_latest_month_eps, "adopted_source": "AI補齊/自結公告" if ai_latest_month_eps is not None else "無可用資料", "period": ai_period_text, "fmt": "num", "notes": "若取得，目前估值優先採單月 EPS ×12"},
+        {"field": "最新單季 EPS", "system_source": "系統未穩定提供，避免用 TTM 冒充", "system_value": sys_latest_quarter_eps, "ai_source": src("latest_quarter_eps"), "ai_source_url": url("latest_quarter_eps"), "ai_value": ai_latest_quarter_eps, "adopted_value": ai_latest_quarter_eps, "adopted_source": "AI補齊" if ai_latest_quarter_eps is not None else "無可用資料", "period": ai_period_text, "fmt": "num", "notes": "判斷最新獲利動能"},
+        {"field": "TTM EPS", "system_source": "yfinance trailingEps / 現價÷P/E 反推備援", "system_value": sys_ttm_eps, "ai_source": src("ttm_eps"), "ai_source_url": url("ttm_eps"), "ai_value": ai_ttm_eps, "adopted_value": eff_t_eps, "adopted_source": ttm_adopted_source, "period": ttm_period, "fmt": "num", "notes": ttm_notes},
+        {"field": "完整年度 EPS", "system_source": "未穩定提供，需 AI/年報補齊", "system_value": sys_fiscal_year_eps, "ai_source": src("fiscal_year_eps"), "ai_source_url": url("fiscal_year_eps"), "ai_value": ai_fiscal_year_eps, "adopted_value": ai_fiscal_year_eps, "adopted_source": "AI補齊" if ai_fiscal_year_eps is not None else "無可用資料", "period": ai_period_text, "fmt": "num", "notes": "年度基準，不與 TTM 混用"},
+        {"field": "Forward EPS－系統", "system_source": "yfinance forwardEps；必要時由 TTM EPS×成長率推估", "system_value": sys_forward_eps_system, "ai_source": "不使用AI", "ai_source_url": "", "ai_value": None, "adopted_value": sys_forward_eps_system, "adopted_source": "系統/推估" if sys_forward_eps_system is not None else "無可用資料", "period": "系統/推估", "fmt": "num"},
+        {"field": "Forward EPS－AI/共識", "system_source": "不使用系統", "system_value": None, "ai_source": src("forward_eps_consensus") if ai_forward_eps_consensus is not None else src("forward_eps_ai"), "ai_source_url": url("forward_eps_consensus") if ai_forward_eps_consensus is not None else url("forward_eps_ai"), "ai_value": ai_f_eps_calc, "adopted_value": ai_f_eps_calc, "adopted_source": "法人共識/FY1" if ai_forward_eps_fy1 is not None or ai_forward_eps_consensus is not None else ("AI補齊" if ai_forward_eps_ai is not None else "無可用資料"), "period": ai_period_text, "fmt": "num", "notes": "與系統 Forward EPS 分開比較"},
+        {"field": "Forward EPS－FY1", "system_source": "不使用系統", "system_value": None, "ai_source": src("forward_eps_fy1"), "ai_source_url": url("forward_eps_fy1"), "ai_value": ai_forward_eps_fy1, "adopted_value": ai_forward_eps_fy1, "adopted_source": "AI/法人FY1" if ai_forward_eps_fy1 is not None else "無可用資料", "period": fy_year_display_safe(ai_forward_eps_fy1_year), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY1 一年預估估值用"},
+        {"field": "Forward EPS－FY2", "system_source": "不使用系統", "system_value": None, "ai_source": src("forward_eps_fy2"), "ai_source_url": url("forward_eps_fy2"), "ai_value": ai_forward_eps_fy2, "adopted_value": ai_forward_eps_fy2, "adopted_source": "AI/法人FY2" if ai_forward_eps_fy2 is not None else "無可用資料", "period": fy_year_display_safe(ai_forward_eps_fy2_year), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY2 第二年預估估值用，不直接當買點"},
+        {"field": "Forward EPS－FY3", "system_source": "不使用系統", "system_value": None, "ai_source": src("forward_eps_fy3"), "ai_source_url": url("forward_eps_fy3"), "ai_value": ai_forward_eps_fy3, "adopted_value": ai_forward_eps_fy3, "adopted_source": "AI/法人FY3" if ai_forward_eps_fy3 is not None else "無可用資料", "period": fy_year_display_safe(ai_forward_eps_fy3_year), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY3 第三年預估/高風險情境，不作買點"},
+        {"field": "營收 YoY", "system_source": "MOPS/FinMind/Yahoo 月營收；不採 yfinance revenueGrowth", "system_source_url": latest_rev_source_url, "source_rule": latest_rev_source_rule, "announce_date": latest_rev_announce_date, "announce_month": latest_rev_announce_month, "revenue_month": latest_rev_revenue_month, "system_value": rev_growth, "ai_source": src("yoy"), "ai_source_url": url("yoy"), "ai_value": ai_yoy, "adopted_value": eff_rg, "adopted_source": adopt_source(rev_growth, ai_yoy, "月營收公告值", "AI補齊"), "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale, "notes": latest_rev_notice or ("月營收可能不是最新公告月份" if rev_is_stale else "")},
+        {"field": "營收 MoM", "system_source": "MOPS/FinMind/Yahoo 月營收", "system_source_url": latest_rev_source_url, "source_rule": latest_rev_source_rule, "announce_date": latest_rev_announce_date, "announce_month": latest_rev_announce_month, "revenue_month": latest_rev_revenue_month, "system_value": (latest_mom_val / 100.0) if latest_mom_val is not None else None, "ai_source": src("mom"), "ai_source_url": url("mom"), "ai_value": ai_mom, "adopted_value": (latest_mom_val / 100.0) if latest_mom_val is not None else ai_mom, "adopted_source": "月營收公告值/AI覆蓋", "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale},
+        {"field": "毛利率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": gross_margin, "ai_source": src("gross_margin"), "ai_source_url": url("gross_margin"), "ai_value": ai_gm, "adopted_value": eff_gm, "adopted_source": adopt_source(gross_margin, ai_gm), "period": ai_period_text if gross_margin is None and ai_gm is not None else "系統最新可得", "fmt": "pct", "notes": dq_note_text if "毛利率" in dq_note_text else ""},
+        {"field": "營益率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": op_margin, "ai_source": src("operating_margin"), "ai_source_url": url("operating_margin"), "ai_value": ai_om, "adopted_value": eff_om, "adopted_source": adopt_source(op_margin, ai_om), "period": ai_period_text if op_margin is None and ai_om is not None else "系統最新可得", "fmt": "pct", "notes": dq_note_text if "營益率" in dq_note_text else ""},
+        {"field": "ROE", "system_source": "yfinance；或用 P/B÷P/E 校正", "system_value": roe, "ai_source": src("roe"), "ai_source_url": url("roe"), "ai_value": ai_roe, "adopted_value": eff_roe, "adopted_source": adopt_source(roe, ai_roe, "系統/恆等式校正", "AI補齊"), "period": ai_period_text if roe is None and ai_roe is not None else "系統/校正", "fmt": "pct"},
+        {"field": "D/E", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": sys_de, "ai_source": src("debt_to_equity"), "ai_source_url": url("debt_to_equity"), "ai_value": ai_de, "adopted_value": eff_de, "adopted_source": adopt_source(sys_de, ai_de), "period": ai_period_text if sys_de is None and ai_de is not None else "系統最新可得", "fmt": "x", "notes": dq_note_text if "D/E" in dq_note_text or "債" in dq_note_text else ""},
+    ]
+    dq_report_df = build_financial_quality_report(quality_rows)
+    return {
+        "quality_rows": quality_rows,
+        "dq_report_df": dq_report_df,
+        "dq_note_text": dq_note_text,
+        "ai_period_text": ai_period_text,
+        "latest_rev_period": latest_rev_period,
+        "rev_is_stale": rev_is_stale,
+    }

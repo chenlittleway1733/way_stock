@@ -1,64 +1,67 @@
-"""Stock title, watchlist, and industry-classification panel."""
-
-from ui_common import (
-    SECTOR_MAP,
-    get_industry_valuation_profile,
-    get_watchlist,
-    st,
-    toggle_watchlist,
-    translate_to_zh,
-)
+"""Implied Forward P/E context builders for ui_main.render_main_page."""
 
 
-def render_stock_header_panel(*, curr_id, stock_name, info):
-    """Render stock heading and industry model summary.
+def _fmt_implied(value):
+    return f"{value:.1f}x" if value is not None else "N/A"
 
-    Returns:
-        (sector_display, industry_profile)
-    """
-    info = info or {}
-    col_title, col_star = st.columns([0.85, 0.15])
-    with col_title:
-        st.markdown(f"### 🏢 {stock_name} ({curr_id})")
-    with col_star:
-        in_watch = curr_id in get_watchlist()
-        btn_label = "⭐ 移除自選" if in_watch else "☆ 加入自選"
-        if st.button(btn_label, use_container_width=True):
-            toggle_watchlist(curr_id, stock_name)
-            st.rerun()
 
-    sector_disp = SECTOR_MAP.get(info.get("sector", "未知"), info.get("sector", "未知"))
-    early_ai_fin = st.session_state.ai_fetched_financials.get(curr_id, {}) if hasattr(st.session_state, "ai_fetched_financials") else {}
-    if isinstance(early_ai_fin, dict) and early_ai_fin:
-        if str(early_ai_fin.get("_stock_id") or curr_id) != str(curr_id):
-            early_ai_fin = {}
+def build_implied_pe_context(
+    *,
+    current_price,
+    adopted_forward_eps,
+    broker_target_avg,
+    broker_target_high,
+    broker_target_low,
+    hard_pe_cap,
+    soft_pe_cap,
+    operable_pe_cap,
+    dynamic_cap_pack,
+):
+    """Build market/broker implied Forward P/E values and sync dynamic cap pack."""
+    implied_eps = adopted_forward_eps
+    market_implied_pe = current_price / implied_eps if implied_eps is not None and implied_eps > 0 and current_price is not None else None
+    target_avg_implied_pe = broker_target_avg / implied_eps if implied_eps is not None and implied_eps > 0 and broker_target_avg is not None else None
+    target_high_implied_pe = broker_target_high / implied_eps if implied_eps is not None and implied_eps > 0 and broker_target_high is not None else None
+    target_low_implied_pe = broker_target_low / implied_eps if implied_eps is not None and implied_eps > 0 and broker_target_low is not None else None
 
-    industry_profile = get_industry_valuation_profile(
-        curr_id,
-        stock_name,
-        sector_disp,
-        info.get("industry", "未知"),
-        ai_financials=early_ai_fin,
-    )
-    st.markdown(
-        f"**🏷️ 產業分類：** {sector_disp} / {info.get('industry', '未知')}｜"
-        f"估值模型：{industry_profile.get('model_label', '一般產業')}｜"
-        f"題材標籤：{industry_profile.get('themes_text', '—')}｜"
-        f"分類來源：{industry_profile.get('classification_source', industry_profile.get('mapping_source', '—'))}"
-    )
-    if industry_profile.get("classification_needs_manual_review"):
-        st.warning(
-            f"⚠️ 產業分類待確認：{industry_profile.get('classification_warning', '此分類不是正式 stock_mapping.py 指定。')}"
-            f"｜可信度：{industry_profile.get('classification_confidence', 'low')}"
-            f"｜Dynamic Cap 分類折扣：×{float(industry_profile.get('classification_confidence_factor', 1.0) or 1.0):.2f}"
+    implied_status = "Forward EPS 缺值或 <= 0，無法反推市場 / 法人隱含 Forward P/E。"
+    if market_implied_pe is not None:
+        if hard_pe_cap is not None and market_implied_pe > hard_pe_cap:
+            implied_status = "現價隱含倍率已高於系統 hard ceiling，屬市場重估 / 題材動能區，不代表可操作買點。"
+        elif soft_pe_cap is not None and market_implied_pe > soft_pe_cap:
+            implied_status = "現價隱含倍率高於 soft ceiling，屬偏樂觀估值區。"
+        elif operable_pe_cap is not None and market_implied_pe > operable_pe_cap:
+            implied_status = "現價隱含倍率高於可操作倍率，但仍未突破系統 hard ceiling。"
+        else:
+            implied_status = "現價隱含倍率未高於可操作倍率。"
+
+    implied_html = ""
+    if market_implied_pe is not None or target_avg_implied_pe is not None:
+        eps_text = f"{implied_eps:.2f}" if implied_eps is not None else "N/A"
+        implied_html = (
+            "<div style='background:#1f2937;color:#E5E7EB;padding:7px 9px;border-radius:6px;margin-top:7px;line-height:1.55;'>"
+            "<b>🧭 市場 / 法人隱含倍率對照</b><br>"
+            f"採用 Forward EPS：{eps_text}｜現價隱含：{_fmt_implied(market_implied_pe)}｜"
+            f"法人均價隱含：{_fmt_implied(target_avg_implied_pe)}｜"
+            f"法人高標隱含：{_fmt_implied(target_high_implied_pe)}｜"
+            f"法人低標隱含：{_fmt_implied(target_low_implied_pe)}<br>"
+            f"<span style='color:#FBBF24;'>{implied_status}</span></div>"
         )
-    if industry_profile.get("pe_trap_warning"):
-        st.warning("⚠️ 本產業具有 P/E 陷阱風險：低 P/E 不一定代表低估，請優先檢查 P/B、週期位置、報價或訂單落地。")
-    if industry_profile.get("pe_model_suitable") is False:
-        st.warning("⚠️ 本分類不適合使用一般 P/E 公式估值作為買進依據，應以事件、訂單、籌碼與財報落地程度評估。")
 
-    with st.expander("📖 查看公司詳細營業項目簡介 (自動英翻中)"):
-        st.write(translate_to_zh(info.get("longBusinessSummary", "暫無簡介。")))
+    if isinstance(dynamic_cap_pack, dict):
+        dynamic_cap_pack["market_implied_forward_pe"] = market_implied_pe
+        dynamic_cap_pack["target_avg_implied_forward_pe"] = target_avg_implied_pe
+        dynamic_cap_pack["target_high_implied_forward_pe"] = target_high_implied_pe
+        dynamic_cap_pack["target_low_implied_forward_pe"] = target_low_implied_pe
+        dynamic_cap_pack["implied_forward_eps"] = implied_eps
+        dynamic_cap_pack["implied_status"] = implied_status
 
-    return sector_disp, industry_profile
-
+    return {
+        "implied_eps": implied_eps,
+        "market_implied_pe": market_implied_pe,
+        "target_avg_implied_pe": target_avg_implied_pe,
+        "target_high_implied_pe": target_high_implied_pe,
+        "target_low_implied_pe": target_low_implied_pe,
+        "implied_status": implied_status,
+        "implied_html": implied_html,
+    }

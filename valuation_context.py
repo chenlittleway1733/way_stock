@@ -1,141 +1,245 @@
-"""Financial quality report context builders for ui_main.render_main_page."""
+"""Financial data context builders for ui_main.render_main_page."""
 
 from ui_common import *
 
 
-def adopt_source(sys_val, ai_val, sys_label="系統", ai_label_text="AI補齊"):
-    return sys_label if sys_val is not None else (ai_label_text if ai_val is not None else "無可用資料")
-
-
-def fy_year_display_safe(year_value):
+def _row_text(row, key, default=""):
     try:
-        if year_value is None or str(year_value).strip() in ["", "None", "nan"]:
-            return "年期未明"
-        text = str(year_value).strip()
-        return f"{text}E" if re.match(r"^\d{4}$", text) else text
+        value = row.get(key, default)
     except Exception:
-        return "年期未明"
+        return default
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+    text = str(value).strip()
+    return "" if text.lower() in {"nan", "none", "nat", "null"} else text
 
 
-def _ai_src(ai_fin, has_ai_fin_fetch, ai_period_text, field_key, fallback_label="AI補齊"):
-    return format_ai_source_detail(ai_fin, field_key, ai_period_text, fallback_label) if has_ai_fin_fetch else "AI未啟動"
+def build_financial_base_context(*, stock_id, info, current_price, finmind_key, has_ai_financial_snapshot=False):
+    """Collect system/FinMind financial inputs before valuation calculations."""
+    info = info or {}
+    df_rev_bk = get_monthly_revenue(stock_id, finmind_key)
+    df_per_bk = get_pe_pb_data(stock_id, finmind_key)
+    fm_health = get_finmind_financial_health(stock_id, finmind_key)
 
+    if df_rev_bk is not None and not df_rev_bk.empty:
+        latest_rev_row = df_rev_bk.iloc[-1]
+        if "actual_revenue_month" in df_rev_bk.columns:
+            latest_rev_month = normalize_revenue_month(df_rev_bk["actual_revenue_month"].iloc[-1])
+        else:
+            latest_rev_month = normalize_revenue_month(df_rev_bk["Month"].iloc[-1])
+        latest_mom_val = s_float(df_rev_bk["monthly_revenue_mom"].iloc[-1]) if "monthly_revenue_mom" in df_rev_bk.columns else s_float(df_rev_bk["MoM"].iloc[-1])
+        latest_yoy_val = s_float(df_rev_bk["monthly_revenue_yoy"].iloc[-1]) if "monthly_revenue_yoy" in df_rev_bk.columns else (s_float(df_rev_bk["YoY"].iloc[-1]) if "YoY" in df_rev_bk.columns else None)
+        latest_monthly_yoy = latest_yoy_val / 100.0 if latest_yoy_val is not None else None
+        latest_rev_source = _row_text(latest_rev_row, "revenue_source", "月營收資料源") or "月營收資料源"
+        latest_rev_source_url = _row_text(latest_rev_row, "source_url")
+        latest_rev_source_rule = _row_text(latest_rev_row, "source_rule")
+        latest_rev_announce_date = _row_text(latest_rev_row, "announce_date")
+        latest_rev_announce_month = normalize_revenue_month(_row_text(latest_rev_row, "announce_month"))
+        latest_rev_revenue_month = normalize_revenue_month(
+            _row_text(latest_rev_row, "revenue_month")
+            or _row_text(latest_rev_row, "actual_revenue_month")
+            or _row_text(latest_rev_row, "Month")
+            or latest_rev_month
+        )
+        rev_notice_pack = build_revenue_month_notice(latest_rev_month)
+        latest_rev_notice = rev_notice_pack.get("notice", "")
+        latest_rev_display_label = rev_notice_pack.get("display_label", f"公告月份：{latest_rev_month}")
+    else:
+        latest_rev_month = "無資料"
+        latest_mom_val = None
+        latest_monthly_yoy = None
+        latest_rev_notice = "未取得月營收資料，營收 YoY / MoM 將改用其他資料源或顯示 N/A。"
+        latest_rev_display_label = "公告月份：未取得"
+        latest_rev_source = ""
+        latest_rev_source_url = ""
+        latest_rev_source_rule = ""
+        latest_rev_announce_date = ""
+        latest_rev_announce_month = ""
+        latest_rev_revenue_month = ""
 
-def _ai_url(ai_fin, has_ai_fin_fetch, field_key):
-    return get_ai_source_url(ai_fin, field_key) if has_ai_fin_fetch else ""
+    pe_ratio = s_float(info.get("trailingPE"))
+    if (pe_ratio is None or pe_ratio > 1000) and df_per_bk is not None and not df_per_bk.empty:
+        if (pd.Timestamp.today() - df_per_bk.iloc[-1]["date"]).days < 30:
+            pe_ratio = s_float(df_per_bk["PER"].iloc[-1])
 
+    pb_ratio = s_float(info.get("priceToBook"))
+    if (pb_ratio is None or pb_ratio > 500) and df_per_bk is not None and not df_per_bk.empty and "PBR" in df_per_bk.columns:
+        pb_ratio = s_float(df_per_bk["PBR"].iloc[-1])
 
-def build_quality_report_context(
-    *,
-    curr_p,
-    ai_fin,
-    has_ai_fin_fetch,
-    raw_ai_period,
-    dq_warnings,
-    latest_rev_month,
-    latest_rev_display_label,
-    latest_rev_notice,
-    latest_mom_val,
-    latest_rev_source_url,
-    latest_rev_source_rule,
-    latest_rev_announce_date,
-    latest_rev_announce_month,
-    latest_rev_revenue_month,
-    pe_ratio,
-    ai_pe,
-    sys_forward_pe,
-    ai_fpe,
-    eff_forward_pe,
-    orig_peg,
-    ai_peg,
-    eff_peg,
-    pb_ratio,
-    ai_pb,
-    ai_latest_month_eps,
-    sys_latest_quarter_eps,
-    ai_latest_quarter_eps,
-    sys_ttm_eps,
-    ai_ttm_eps,
-    eff_t_eps,
-    sys_fiscal_year_eps,
-    ai_fiscal_year_eps,
-    sys_forward_eps_system,
-    ai_forward_eps_consensus,
-    ai_forward_eps_ai,
-    ai_f_eps_calc,
-    ai_forward_eps_fy1,
-    ai_forward_eps_fy2,
-    ai_forward_eps_fy3,
-    ai_forward_eps_fy1_year,
-    ai_forward_eps_fy2_year,
-    ai_forward_eps_fy3_year,
-    rev_growth,
-    ai_yoy,
-    eff_rg,
-    ai_mom,
-    gross_margin,
-    ai_gm,
-    eff_gm,
-    op_margin,
-    ai_om,
-    eff_om,
-    roe,
-    ai_roe,
-    eff_roe,
-    sys_de,
-    ai_de,
-    eff_de,
-    ttm_eps_adoption=None,
-):
-    """Build the financial quality report rows and derived period metadata."""
-    dq_note_text = "；".join(dq_warnings) if dq_warnings else ""
-    ai_period_text = raw_ai_period if raw_ai_period else "AI未啟動或未揭露期間"
-    latest_rev_period = latest_rev_display_label if latest_rev_month and latest_rev_month != "無資料" else "未取得月營收"
-    rev_is_stale = revenue_month_is_older(latest_rev_month) if latest_rev_month and latest_rev_month != "無資料" else False
-    ttm_eps_adoption = ttm_eps_adoption if isinstance(ttm_eps_adoption, dict) else {}
-    ttm_notes = "；".join(ttm_eps_adoption.get("notes") or [])
-    if ttm_eps_adoption.get("warnings"):
-        warn_text = "；".join(str(x) for x in ttm_eps_adoption.get("warnings") or [])
-        ttm_notes = (ttm_notes + "；" if ttm_notes else "") + warn_text
-    if not ttm_notes:
-        ttm_notes = "用於歷史 P/E；近四季 EPS 合計優先，yfinance trailingEps 僅作備援。"
-    ttm_adopted_source = ttm_eps_adoption.get("adopted_source") or adopt_source(sys_ttm_eps, ai_ttm_eps)
-    ttm_period = ai_period_text if ttm_eps_adoption.get("adopted_value") == ai_ttm_eps and ai_ttm_eps is not None else "系統/備援"
+    roe = s_float(info.get("returnOnEquity"))
+    sys_de = s_float(info.get("debtToEquity"))
+    if sys_de is not None:
+        sys_de = sys_de / 100.0
 
-    def src(field_key, fallback_label="AI補齊"):
-        return _ai_src(ai_fin, has_ai_fin_fetch, ai_period_text, field_key, fallback_label)
+    gross_margin = s_float(info.get("grossMargins"))
+    op_margin = s_float(info.get("operatingMargins"))
 
-    def url(field_key):
-        return _ai_url(ai_fin, has_ai_fin_fetch, field_key)
+    if gross_margin is None:
+        gross_margin = fm_health.get("grossMargins")
+    if op_margin is None:
+        op_margin = fm_health.get("operatingMargins")
+    if sys_de is None:
+        sys_de = fm_health.get("debtToEquity")
 
-    quality_rows = [
-        {"field": "現價", "system_source": "Yahoo/yfinance 即時或延遲行情", "system_value": curr_p, "ai_source": "不使用AI", "ai_value": None, "adopted_value": curr_p, "adopted_source": "系統行情", "period": "即時/延遲", "fmt": "price"},
-        {"field": "P/E", "system_source": "yfinance；異常時 FinMind PER 備援", "system_value": pe_ratio, "ai_source": src("pe"), "ai_source_url": url("pe"), "ai_value": ai_pe, "adopted_value": pe_ratio if pe_ratio is not None else ai_pe, "adopted_source": adopt_source(pe_ratio, ai_pe), "period": ai_period_text if pe_ratio is None and ai_pe is not None else "系統最新可得", "fmt": "x"},
-        {"field": "Forward P/E", "system_source": "yfinance forwardPE 或 EPS 反推", "system_value": sys_forward_pe, "ai_source": src("forward_eps"), "ai_source_url": url("forward_eps"), "ai_value": ai_fpe, "adopted_value": eff_forward_pe, "adopted_source": adopt_source(sys_forward_pe, ai_fpe), "period": ai_period_text if sys_forward_pe is None and ai_fpe is not None else "系統/反推", "fmt": "x"},
-        {"field": "PEG", "system_source": "Forward P/E ÷ 預估成長率", "system_value": orig_peg, "ai_source": src("yoy"), "ai_source_url": url("yoy"), "ai_value": ai_peg, "adopted_value": None if eff_peg == -999 else eff_peg, "adopted_source": "系統優先/AI備援", "period": "推估值", "fmt": "x", "notes": "成長率為負時 PEG 無意義" if eff_peg == -999 else ""},
-        {"field": "P/B", "system_source": "yfinance；異常時 FinMind PBR 備援", "system_value": pb_ratio, "ai_source": src("pb"), "ai_source_url": url("pb"), "ai_value": ai_pb, "adopted_value": pb_ratio if pb_ratio is not None else ai_pb, "adopted_source": adopt_source(pb_ratio, ai_pb), "period": ai_period_text if pb_ratio is None and ai_pb is not None else "系統最新可得", "fmt": "x"},
-        {"field": "最新單月 EPS", "system_source": "系統未穩定提供，需 AI 查自結/注意股公告", "system_value": None, "ai_source": src("latest_month_eps"), "ai_source_url": url("latest_month_eps"), "ai_value": ai_latest_month_eps, "adopted_value": ai_latest_month_eps, "adopted_source": "AI補齊/自結公告" if ai_latest_month_eps is not None else "無可用資料", "period": ai_period_text, "fmt": "num", "notes": "若取得，目前估值優先採單月 EPS ×12"},
-        {"field": "最新單季 EPS", "system_source": "系統未穩定提供，避免用 TTM 冒充", "system_value": sys_latest_quarter_eps, "ai_source": src("latest_quarter_eps"), "ai_source_url": url("latest_quarter_eps"), "ai_value": ai_latest_quarter_eps, "adopted_value": ai_latest_quarter_eps, "adopted_source": "AI補齊" if ai_latest_quarter_eps is not None else "無可用資料", "period": ai_period_text, "fmt": "num", "notes": "判斷最新獲利動能"},
-        {"field": "TTM EPS", "system_source": "yfinance trailingEps / 現價÷P/E 反推備援", "system_value": sys_ttm_eps, "ai_source": src("ttm_eps"), "ai_source_url": url("ttm_eps"), "ai_value": ai_ttm_eps, "adopted_value": eff_t_eps, "adopted_source": ttm_adopted_source, "period": ttm_period, "fmt": "num", "notes": ttm_notes},
-        {"field": "完整年度 EPS", "system_source": "未穩定提供，需 AI/年報補齊", "system_value": sys_fiscal_year_eps, "ai_source": src("fiscal_year_eps"), "ai_source_url": url("fiscal_year_eps"), "ai_value": ai_fiscal_year_eps, "adopted_value": ai_fiscal_year_eps, "adopted_source": "AI補齊" if ai_fiscal_year_eps is not None else "無可用資料", "period": ai_period_text, "fmt": "num", "notes": "年度基準，不與 TTM 混用"},
-        {"field": "Forward EPS－系統", "system_source": "yfinance forwardEps；必要時由 TTM EPS×成長率推估", "system_value": sys_forward_eps_system, "ai_source": "不使用AI", "ai_source_url": "", "ai_value": None, "adopted_value": sys_forward_eps_system, "adopted_source": "系統/推估" if sys_forward_eps_system is not None else "無可用資料", "period": "系統/推估", "fmt": "num"},
-        {"field": "Forward EPS－AI/共識", "system_source": "不使用系統", "system_value": None, "ai_source": src("forward_eps_consensus") if ai_forward_eps_consensus is not None else src("forward_eps_ai"), "ai_source_url": url("forward_eps_consensus") if ai_forward_eps_consensus is not None else url("forward_eps_ai"), "ai_value": ai_f_eps_calc, "adopted_value": ai_f_eps_calc, "adopted_source": "法人共識/FY1" if ai_forward_eps_fy1 is not None or ai_forward_eps_consensus is not None else ("AI補齊" if ai_forward_eps_ai is not None else "無可用資料"), "period": ai_period_text, "fmt": "num", "notes": "與系統 Forward EPS 分開比較"},
-        {"field": "Forward EPS－FY1", "system_source": "不使用系統", "system_value": None, "ai_source": src("forward_eps_fy1"), "ai_source_url": url("forward_eps_fy1"), "ai_value": ai_forward_eps_fy1, "adopted_value": ai_forward_eps_fy1, "adopted_source": "AI/法人FY1" if ai_forward_eps_fy1 is not None else "無可用資料", "period": fy_year_display_safe(ai_forward_eps_fy1_year), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY1 一年預估估值用"},
-        {"field": "Forward EPS－FY2", "system_source": "不使用系統", "system_value": None, "ai_source": src("forward_eps_fy2"), "ai_source_url": url("forward_eps_fy2"), "ai_value": ai_forward_eps_fy2, "adopted_value": ai_forward_eps_fy2, "adopted_source": "AI/法人FY2" if ai_forward_eps_fy2 is not None else "無可用資料", "period": fy_year_display_safe(ai_forward_eps_fy2_year), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY2 第二年預估估值用，不直接當買點"},
-        {"field": "Forward EPS－FY3", "system_source": "不使用系統", "system_value": None, "ai_source": src("forward_eps_fy3"), "ai_source_url": url("forward_eps_fy3"), "ai_value": ai_forward_eps_fy3, "adopted_value": ai_forward_eps_fy3, "adopted_source": "AI/法人FY3" if ai_forward_eps_fy3 is not None else "無可用資料", "period": fy_year_display_safe(ai_forward_eps_fy3_year), "fmt": "num", "notes": "第17-C-9c-hotfix442：FY3 第三年預估/高風險情境，不作買點"},
-        {"field": "營收 YoY", "system_source": "MOPS/FinMind/Yahoo 月營收；不採 yfinance revenueGrowth", "system_source_url": latest_rev_source_url, "source_rule": latest_rev_source_rule, "announce_date": latest_rev_announce_date, "announce_month": latest_rev_announce_month, "revenue_month": latest_rev_revenue_month, "system_value": rev_growth, "ai_source": src("yoy"), "ai_source_url": url("yoy"), "ai_value": ai_yoy, "adopted_value": eff_rg, "adopted_source": adopt_source(rev_growth, ai_yoy, "月營收公告值", "AI補齊"), "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale, "notes": latest_rev_notice or ("月營收可能不是最新公告月份" if rev_is_stale else "")},
-        {"field": "營收 MoM", "system_source": "MOPS/FinMind/Yahoo 月營收", "system_source_url": latest_rev_source_url, "source_rule": latest_rev_source_rule, "announce_date": latest_rev_announce_date, "announce_month": latest_rev_announce_month, "revenue_month": latest_rev_revenue_month, "system_value": (latest_mom_val / 100.0) if latest_mom_val is not None else None, "ai_source": src("mom"), "ai_source_url": url("mom"), "ai_value": ai_mom, "adopted_value": (latest_mom_val / 100.0) if latest_mom_val is not None else ai_mom, "adopted_source": "月營收公告值/AI覆蓋", "period": latest_rev_period, "fmt": "pct", "is_stale": rev_is_stale},
-        {"field": "毛利率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": gross_margin, "ai_source": src("gross_margin"), "ai_source_url": url("gross_margin"), "ai_value": ai_gm, "adopted_value": eff_gm, "adopted_source": adopt_source(gross_margin, ai_gm), "period": ai_period_text if gross_margin is None and ai_gm is not None else "系統最新可得", "fmt": "pct", "notes": dq_note_text if "毛利率" in dq_note_text else ""},
-        {"field": "營益率", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": op_margin, "ai_source": src("operating_margin"), "ai_source_url": url("operating_margin"), "ai_value": ai_om, "adopted_value": eff_om, "adopted_source": adopt_source(op_margin, ai_om), "period": ai_period_text if op_margin is None and ai_om is not None else "系統最新可得", "fmt": "pct", "notes": dq_note_text if "營益率" in dq_note_text else ""},
-        {"field": "ROE", "system_source": "yfinance；或用 P/B÷P/E 校正", "system_value": roe, "ai_source": src("roe"), "ai_source_url": url("roe"), "ai_value": ai_roe, "adopted_value": eff_roe, "adopted_source": adopt_source(roe, ai_roe, "系統/恆等式校正", "AI補齊"), "period": ai_period_text if roe is None and ai_roe is not None else "系統/校正", "fmt": "pct"},
-        {"field": "D/E", "system_source": "yfinance；缺值時 FinMind 財報健康度", "system_value": sys_de, "ai_source": src("debt_to_equity"), "ai_source_url": url("debt_to_equity"), "ai_value": ai_de, "adopted_value": eff_de, "adopted_source": adopt_source(sys_de, ai_de), "period": ai_period_text if sys_de is None and ai_de is not None else "系統最新可得", "fmt": "x", "notes": dq_note_text if "D/E" in dq_note_text or "債" in dq_note_text else ""},
-    ]
-    dq_report_df = build_financial_quality_report(quality_rows)
+    # yfinance revenueGrowth 常是季度/TTM 口徑，不等於台股最新單月營收 YoY。
+    # 系統「營收 YoY」只採公告月份的月營收資料；缺值時留空，後續可由 AI 單月 YoY 補齊。
+    rev_growth = latest_monthly_yoy
+    earn_growth = s_float(info.get("earningsGrowth"))
+
+    t_eps = s_float(info.get("trailingEps"))
+    sys_ttm_eps_source = "yfinance trailingEps"
+    sys_ttm_eps_is_inferred = False
+    if t_eps is None and pe_ratio is not None and pe_ratio > 0 and current_price > 0:
+        t_eps = current_price / pe_ratio
+        sys_ttm_eps_source = "現價 / P/E 反推"
+        sys_ttm_eps_is_inferred = True
+
+    sys_f_eps_calc = s_float(info.get("forwardEps"))
+
     return {
-        "quality_rows": quality_rows,
-        "dq_report_df": dq_report_df,
-        "dq_note_text": dq_note_text,
-        "ai_period_text": ai_period_text,
-        "latest_rev_period": latest_rev_period,
-        "rev_is_stale": rev_is_stale,
+        "df_rev_bk": df_rev_bk,
+        "df_per_bk": df_per_bk,
+        "fm_health": fm_health,
+        "latest_rev_month": latest_rev_month,
+        "latest_mom_val": latest_mom_val,
+        "latest_rev_notice": latest_rev_notice,
+        "latest_rev_display_label": latest_rev_display_label,
+        "latest_rev_source": latest_rev_source,
+        "latest_rev_source_url": latest_rev_source_url,
+        "latest_rev_source_rule": latest_rev_source_rule,
+        "latest_rev_announce_date": latest_rev_announce_date,
+        "latest_rev_announce_month": latest_rev_announce_month,
+        "latest_rev_revenue_month": latest_rev_revenue_month,
+        "pe_ratio": pe_ratio,
+        "pb_ratio": pb_ratio,
+        "roe": roe,
+        "sys_de": sys_de,
+        "gross_margin": gross_margin,
+        "op_margin": op_margin,
+        "rev_growth": rev_growth,
+        "earn_growth": earn_growth,
+        "t_eps": t_eps,
+        "sys_ttm_eps_source": sys_ttm_eps_source if t_eps is not None else "",
+        "sys_ttm_eps_is_inferred": sys_ttm_eps_is_inferred,
+        "sys_f_eps_calc": sys_f_eps_calc,
+        "sys_latest_quarter_eps": None,
+        "sys_ttm_eps": t_eps,
+        "sys_fiscal_year_eps": None,
+        "sys_forward_eps_system": sys_f_eps_calc,
+        "show_ai_financial_warning": pe_ratio is None and t_eps is None and not has_ai_financial_snapshot,
+    }
+
+
+def first_valid_analyst_count(*vals):
+    for value in vals:
+        float_value = s_float(value)
+        if float_value is not None and float_value > 0:
+            return int(float_value)
+    return None
+
+
+def build_ai_financial_context(*, stock_id, info, ai_financial_store):
+    """Normalize an existing AI financial snapshot into variables used by ui_main."""
+    info = info or {}
+    ai_financial_store = ai_financial_store if isinstance(ai_financial_store, dict) else {}
+    ai_fin = ai_financial_store.get(stock_id, {})
+    if isinstance(ai_fin, dict) and ai_fin:
+        bound_stock_id = str(ai_fin.get("_stock_id") or stock_id)
+        if bound_stock_id != str(stock_id):
+            ai_fin = {}
+            ai_financial_store.pop(stock_id, None)
+    if not isinstance(ai_fin, dict):
+        ai_fin = {}
+
+    has_ai_fin_fetch = bool(ai_fin)
+    ai_pe = s_float(ai_fin.get("pe")) if has_ai_fin_fetch else None
+    ai_pb = s_float(ai_fin.get("pb")) if has_ai_fin_fetch else None
+    ai_latest_month_eps = pick_first_number(ai_fin.get("latest_month_eps")) if has_ai_fin_fetch else None
+    ai_latest_quarter_eps = pick_first_number(ai_fin.get("latest_quarter_eps")) if has_ai_fin_fetch else None
+    ai_previous_quarter_eps = pick_first_number(ai_fin.get("previous_quarter_eps")) if has_ai_fin_fetch else None
+    ai_last_two_quarter_eps = pick_first_number(ai_fin.get("last_two_quarter_eps")) if has_ai_fin_fetch else None
+    if ai_last_two_quarter_eps is None and ai_latest_quarter_eps is not None and ai_previous_quarter_eps is not None:
+        ai_last_two_quarter_eps = ai_latest_quarter_eps + ai_previous_quarter_eps
+    ai_ttm_eps = pick_first_number(ai_fin.get("ttm_eps"), ai_fin.get("trailing_eps")) if has_ai_fin_fetch else None
+    ai_fiscal_year_eps = pick_first_number(ai_fin.get("fiscal_year_eps")) if has_ai_fin_fetch else None
+    ai_forward_eps_ai = pick_first_number(ai_fin.get("forward_eps_ai"), ai_fin.get("forward_eps")) if has_ai_fin_fetch else None
+    ai_forward_eps_consensus = pick_first_number(ai_fin.get("forward_eps_consensus")) if has_ai_fin_fetch else None
+    ai_forward_eps_fy1 = pick_first_number(ai_fin.get("forward_eps_fy1"), ai_forward_eps_consensus, ai_forward_eps_ai) if has_ai_fin_fetch else None
+    ai_forward_eps_fy2 = pick_first_number(ai_fin.get("forward_eps_fy2")) if has_ai_fin_fetch else None
+    ai_forward_eps_fy3 = pick_first_number(ai_fin.get("forward_eps_fy3")) if has_ai_fin_fetch else None
+    ai_forward_eps_fy1_year = ai_fin.get("forward_eps_fy1_year") if has_ai_fin_fetch else None
+    ai_forward_eps_fy2_year = ai_fin.get("forward_eps_fy2_year") if has_ai_fin_fetch else None
+    ai_forward_eps_fy3_year = ai_fin.get("forward_eps_fy3_year") if has_ai_fin_fetch else None
+    ai_forward_eps_fy_source_note = ai_fin.get("forward_eps_fy_source_note") if has_ai_fin_fetch else None
+    ai_forward_eps_fy_basis = ai_fin.get("forward_eps_fy_basis") if has_ai_fin_fetch else None
+    ai_t_eps = ai_ttm_eps
+    ai_f_eps_calc = pick_first_number(ai_forward_eps_fy1, ai_forward_eps_consensus, ai_forward_eps_ai) if has_ai_fin_fetch else None
+    ai_yoy = s_float(ai_fin.get("yoy")) if has_ai_fin_fetch else None
+    ai_gm = s_float(ai_fin.get("gross_margin")) if has_ai_fin_fetch else None
+    ai_om = s_float(ai_fin.get("operating_margin")) if has_ai_fin_fetch else None
+    ai_roe = s_float(ai_fin.get("roe")) if has_ai_fin_fetch else None
+    ai_de = s_float(ai_fin.get("debt_to_equity")) if has_ai_fin_fetch else None
+    ai_dy = s_float(ai_fin.get("dividend_yield")) if has_ai_fin_fetch else None
+    ai_fcf = s_float(ai_fin.get("free_cash_flow")) if has_ai_fin_fetch else None
+    ai_cr = s_float(ai_fin.get("current_ratio")) if has_ai_fin_fetch else None
+    ai_shares = s_float(ai_fin.get("shares_outstanding")) if has_ai_fin_fetch else None
+    ai_target_price = s_float(ai_fin.get("target_price")) if has_ai_fin_fetch else None
+    ai_hi_val = s_float(ai_fin.get("target_price_high")) if has_ai_fin_fetch else None
+    ai_me_val = (s_float(ai_fin.get("target_price_avg")) or ai_target_price) if has_ai_fin_fetch else None
+    ai_lo_val = s_float(ai_fin.get("target_price_low")) if has_ai_fin_fetch else None
+    ai_analyst_count = ai_fin.get("target_price_analyst_count") if has_ai_fin_fetch else None
+    ai_target_rationale = str(ai_fin.get("target_price_rationale") or "").strip() if has_ai_fin_fetch else ""
+    sys_analyst_count = info.get("numberOfAnalystOpinions")
+    ai_analyst_count = first_valid_analyst_count(
+        ai_analyst_count,
+        ai_fin.get("analyst_count") if has_ai_fin_fetch else None,
+        ai_fin.get("target_analyst_count") if has_ai_fin_fetch else None,
+        sys_analyst_count,
+    )
+    ai_mom = normalize_financial_ratio(ai_fin.get("mom")) if has_ai_fin_fetch else None
+
+    return {
+        "ai_fin": ai_fin,
+        "has_ai_fin_fetch": has_ai_fin_fetch,
+        "ai_pe": ai_pe,
+        "ai_pb": ai_pb,
+        "ai_latest_month_eps": ai_latest_month_eps,
+        "ai_latest_quarter_eps": ai_latest_quarter_eps,
+        "ai_previous_quarter_eps": ai_previous_quarter_eps,
+        "ai_last_two_quarter_eps": ai_last_two_quarter_eps,
+        "ai_ttm_eps": ai_ttm_eps,
+        "ai_fiscal_year_eps": ai_fiscal_year_eps,
+        "ai_forward_eps_ai": ai_forward_eps_ai,
+        "ai_forward_eps_consensus": ai_forward_eps_consensus,
+        "ai_forward_eps_fy1": ai_forward_eps_fy1,
+        "ai_forward_eps_fy2": ai_forward_eps_fy2,
+        "ai_forward_eps_fy3": ai_forward_eps_fy3,
+        "ai_forward_eps_fy1_year": ai_forward_eps_fy1_year,
+        "ai_forward_eps_fy2_year": ai_forward_eps_fy2_year,
+        "ai_forward_eps_fy3_year": ai_forward_eps_fy3_year,
+        "ai_forward_eps_fy_source_note": ai_forward_eps_fy_source_note,
+        "ai_forward_eps_fy_basis": ai_forward_eps_fy_basis,
+        "ai_t_eps": ai_t_eps,
+        "ai_f_eps_calc": ai_f_eps_calc,
+        "ai_yoy": ai_yoy,
+        "ai_gm": ai_gm,
+        "ai_om": ai_om,
+        "ai_roe": ai_roe,
+        "ai_de": ai_de,
+        "ai_dy": ai_dy,
+        "ai_fcf": ai_fcf,
+        "ai_cr": ai_cr,
+        "ai_shares": ai_shares,
+        "ai_target_price": ai_target_price,
+        "ai_hi_val": ai_hi_val,
+        "ai_me_val": ai_me_val,
+        "ai_lo_val": ai_lo_val,
+        "ai_analyst_count": ai_analyst_count,
+        "ai_target_rationale": ai_target_rationale,
+        "ai_mom": ai_mom,
     }

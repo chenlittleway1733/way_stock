@@ -1,107 +1,119 @@
-"""Valuation river charts for ui_main.render_main_page."""
+"""Top-level overview panels for ui_main.render_main_page."""
 
-from ui_common import *
+from ui_common import (
+    clean_html,
+    get_ai_analysis_final,
+    reset_all_states_on_stock_change,
+    st,
+)
 
 
-def render_valuation_river_charts(*, hist, df_per_bk):
-    if df_per_bk is None or df_per_bk.empty:
+def render_topic_loading_panel(topic_q):
+    """Resolve a pending topic-search request and update session state."""
+    if st.session_state.topic_results != "LOADING":
+        return
+    with st.spinner(f"🤖 AI 正在連線推演「{topic_q}」..."):
+        data, links = get_ai_analysis_final(
+            topic_q,
+            st.session_state.api_key,
+            st.session_state.get("selected_model", "gemini-3.1-pro-preview"),
+        )
+        if isinstance(data, dict):
+            st.session_state.topic_results = {"data": data, "links": links, "topic": topic_q}
+            st.session_state.show_whale = False
+            st.rerun()
+        else:
+            st.error(f"AI 解析失敗或逾時無回應。\n\n詳細原因：{data}")
+            st.session_state.topic_results = None
+
+
+def render_topic_results_panel(topic_results):
+    """Render the AI topic stock-picking result panel."""
+    if not isinstance(topic_results, dict):
         return
 
-    st.markdown("### 🌊 估值位階雙河流圖 (P/E & P/B River)")
-    st.markdown("<small style='color:gray;'>*實戰密技：『成長股』看本益比判斷潛力；『景氣循環股』(航運/鋼鐵/面板) 獲利不穩定，必須看淨值比(P/B)河流圖抄底！*</small>", unsafe_allow_html=True)
+    st.success("✅ AI 議題推演完成！系統已為您捕捉以下關聯受惠股，點擊按鈕即可一鍵切換至該檔股票的戰情室面板！")
+    data = topic_results.get("data", {}) or {}
+    topic = topic_results.get("topic", "")
+    stocks = data.get("stocks", []) or []
 
-    h_reset = hist.copy()
-    h_reset.index.name = "Date"
-    h_reset = h_reset.reset_index()
+    ai_topic_html = f"""
+    <div style='background: linear-gradient(90deg, #1e3c72 0%, #2a5298 100%); padding: 20px; border-radius: 10px; margin-bottom: 20px; border-left: 5px solid #FFD700;'>
+        <h3 style='color: white; margin-top: 0;'>💡 議題動態推演：【{topic}】</h3>
+        <div style='color: #e0e0e0; font-size: 1.05rem; line-height: 1.6;'>{data.get('reasoning', '無分析內容')}</div>
+    </div>
+    """
+    st.markdown(clean_html(ai_topic_html), unsafe_allow_html=True)
 
-    if h_reset["Date"].dt.tz is not None:
-        h_reset["Date"] = h_reset["Date"].dt.tz_localize(None)
-    h_reset["Date_only"] = h_reset["Date"].dt.date
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("#### 🛡️ 潛力權值股 (點擊切換)")
+        for item in [x for x in stocks if "權值" in x.get("type", "") or "潛力" in x.get("type", "")]:
+            st.button(
+                f"📌 {item.get('name', '未知')} ({item.get('id', '')})",
+                on_click=reset_all_states_on_stock_change,
+                args=(item.get("id", ""),),
+                key=f"tp_{item.get('id', '')}",
+                use_container_width=True,
+            )
+            st.caption(f"理由：{item.get('why', '')}")
+    with c2:
+        st.markdown("#### 🚀 爆發中小型股 (點擊切換)")
+        for item in [x for x in stocks if "中小" in x.get("type", "") or "爆發" in x.get("type", "")]:
+            st.button(
+                f"🔥 {item.get('name', '未知')} ({item.get('id', '')})",
+                on_click=reset_all_states_on_stock_change,
+                args=(item.get("id", ""),),
+                key=f"ts_{item.get('id', '')}",
+                use_container_width=True,
+            )
+            st.caption(f"理由：{item.get('why', '')}")
 
-    d_per = df_per_bk.drop_duplicates(subset=["date"], keep="last").copy()
-    d_per["date_only"] = d_per["date"].dt.date
-    h_reset = h_reset.drop_duplicates(subset=["Date_only"], keep="last")
-
-    merged = pd.merge(h_reset, d_per, left_on="Date_only", right_on="date_only", how="inner").sort_values("Date_only")
-    if merged.empty:
-        st.markdown("---")
-        return
-
-    tab_pe, tab_pb = st.tabs(["🌊 本益比河流圖 (P/E River)", "⚓ 股價淨值比河流圖 (P/B River - 循環股剋星)"])
-
-    with tab_pe:
-        merged_pe = merged[merged["PER"] > 0].copy()
-        if len(merged_pe) > 60:
-            merged_pe["EPS_calc"] = merged_pe["Close"] / merged_pe["PER"]
-            pe_quantiles = merged_pe["PER"].quantile([0.1, 0.25, 0.5, 0.75, 0.9]).values
-
-            fig_river = go.Figure()
-            b1 = merged_pe["EPS_calc"] * pe_quantiles[0]
-            b2 = merged_pe["EPS_calc"] * pe_quantiles[1]
-            b3 = merged_pe["EPS_calc"] * pe_quantiles[2]
-            b4 = merged_pe["EPS_calc"] * pe_quantiles[3]
-            b5 = merged_pe["EPS_calc"] * pe_quantiles[4]
-
-            fig_river.add_trace(go.Scatter(x=merged_pe["Date"], y=b1, mode="lines", line=dict(color="#00cc66", width=1), name=f"悲觀區 ({pe_quantiles[0]:.1f}x)"))
-            fig_river.add_trace(go.Scatter(x=merged_pe["Date"], y=b2, mode="lines", fill="tonexty", fillcolor="rgba(0, 204, 102, 0.2)", line=dict(color="#00cc66", width=1), name=f"低估區 ({pe_quantiles[1]:.1f}x)"))
-            fig_river.add_trace(go.Scatter(x=merged_pe["Date"], y=b3, mode="lines", fill="tonexty", fillcolor="rgba(255, 215, 0, 0.2)", line=dict(color="#FFD700", width=1), name=f"合理區 ({pe_quantiles[2]:.1f}x)"))
-            fig_river.add_trace(go.Scatter(x=merged_pe["Date"], y=b4, mode="lines", fill="tonexty", fillcolor="rgba(255, 140, 0, 0.2)", line=dict(color="#ff8c00", width=1), name=f"高估區 ({pe_quantiles[3]:.1f}x)"))
-            fig_river.add_trace(go.Scatter(x=merged_pe["Date"], y=b5, mode="lines", fill="tonexty", fillcolor="rgba(255, 77, 77, 0.2)", line=dict(color="#ff4d4d", width=1), name=f"瘋狂區 ({pe_quantiles[4]:.1f}x)"))
-            fig_river.add_trace(go.Scatter(x=merged_pe["Date"], y=merged_pe["Close"], mode="lines", line=dict(color="#0033cc", width=3), name="實際股價"))
-
-            current_pe = merged_pe["PER"].iloc[-1]
-            current_price = merged_pe["Close"].iloc[-1]
-            if current_price <= b2.iloc[-1]:
-                pe_status, status_color = "🔥 處於歷史低估區間！(潛在買點)", "#00cc66"
-            elif current_price >= b5.iloc[-1]:
-                pe_status, status_color = "🚨 突破歷史瘋狂區間！(極度高估)", "#ff4d4d"
-            elif current_price >= b4.iloc[-1]:
-                pe_status, status_color = "⚠️ 處於歷史高估區間！(留意風險)", "#ff8c00"
-            else:
-                pe_status, status_color = "⚖️ 處於歷史合理區間", "#FFD700"
-
-            fig_river.update_layout(height=450, margin=dict(l=10, r=10, t=50, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0), hovermode="x unified")
-            fig_river.update_yaxes(title_text="股價 (元)", showgrid=True, gridcolor="#e0e0e0")
-            st.markdown(f"<div style='background:#f8f9fa; border-left:4px solid {status_color}; padding:10px; border-radius:5px; margin-bottom:10px; color:#333;'>目前位階推估：<b><span style='color:{status_color};'>{pe_status}</span></b> (最新本益比約 {current_pe:.1f}x)</div>", unsafe_allow_html=True)
-            st.plotly_chart(fig_river, use_container_width=True)
-        else:
-            st.info("⚠️ 缺乏足夠的有效本益比數據 (通常因為過去常處於虧損狀態)，建議切換查看「股價淨值比河流圖」。")
-
-    with tab_pb:
-        merged_pb = merged[merged["PBR"] > 0].copy()
-        if len(merged_pb) > 60:
-            merged_pb["BVPS_calc"] = merged_pb["Close"] / merged_pb["PBR"]
-            pb_quantiles = merged_pb["PBR"].quantile([0.1, 0.25, 0.5, 0.75, 0.9]).values
-
-            fig_pb = go.Figure()
-            pb1 = merged_pb["BVPS_calc"] * pb_quantiles[0]
-            pb2 = merged_pb["BVPS_calc"] * pb_quantiles[1]
-            pb3 = merged_pb["BVPS_calc"] * pb_quantiles[2]
-            pb4 = merged_pb["BVPS_calc"] * pb_quantiles[3]
-            pb5 = merged_pb["BVPS_calc"] * pb_quantiles[4]
-
-            fig_pb.add_trace(go.Scatter(x=merged_pb["Date"], y=pb1, mode="lines", line=dict(color="#00cc66", width=1), name=f"悲觀區 ({pb_quantiles[0]:.2f}x)"))
-            fig_pb.add_trace(go.Scatter(x=merged_pb["Date"], y=pb2, mode="lines", fill="tonexty", fillcolor="rgba(0, 204, 102, 0.2)", line=dict(color="#00cc66", width=1), name=f"低估區 ({pb_quantiles[1]:.2f}x)"))
-            fig_pb.add_trace(go.Scatter(x=merged_pb["Date"], y=pb3, mode="lines", fill="tonexty", fillcolor="rgba(255, 215, 0, 0.2)", line=dict(color="#FFD700", width=1), name=f"合理區 ({pb_quantiles[2]:.2f}x)"))
-            fig_pb.add_trace(go.Scatter(x=merged_pb["Date"], y=pb4, mode="lines", fill="tonexty", fillcolor="rgba(255, 140, 0, 0.2)", line=dict(color="#ff8c00", width=1), name=f"高估區 ({pb_quantiles[3]:.2f}x)"))
-            fig_pb.add_trace(go.Scatter(x=merged_pb["Date"], y=pb5, mode="lines", fill="tonexty", fillcolor="rgba(255, 77, 77, 0.2)", line=dict(color="#ff4d4d", width=1), name=f"瘋狂區 ({pb_quantiles[4]:.2f}x)"))
-            fig_pb.add_trace(go.Scatter(x=merged_pb["Date"], y=merged_pb["Close"], mode="lines", line=dict(color="#0033cc", width=3), name="實際股價"))
-
-            current_pb = merged_pb["PBR"].iloc[-1]
-            current_price_pb = merged_pb["Close"].iloc[-1]
-            if current_price_pb <= pb2.iloc[-1]:
-                pb_status, status_color_pb = "⚓ 跌入歷史低估淨值區！(循環股潛買點)", "#00cc66"
-            elif current_price_pb >= pb5.iloc[-1]:
-                pb_status, status_color_pb = "🚨 突破歷史瘋狂淨值區！(極度高估)", "#ff4d4d"
-            elif current_price_pb >= pb4.iloc[-1]:
-                pb_status, status_color_pb = "⚠️ 處於歷史高估淨值區！(留意風險)", "#ff8c00"
-            else:
-                pb_status, status_color_pb = "⚖️ 處於歷史合理淨值區", "#FFD700"
-
-            fig_pb.update_layout(height=450, margin=dict(l=10, r=10, t=50, b=10), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0), hovermode="x unified")
-            fig_pb.update_yaxes(title_text="股價 (元)", showgrid=True, gridcolor="#e0e0e0")
-            st.markdown(f"<div style='background:#f8f9fa; border-left:4px solid {status_color_pb}; padding:10px; border-radius:5px; margin-bottom:10px; color:#333;'>目前位階推估：<b><span style='color:{status_color_pb};'>{pb_status}</span></b> (最新淨值比約 {current_pb:.2f}x)</div>", unsafe_allow_html=True)
-            st.plotly_chart(fig_pb, use_container_width=True)
-        else:
-            st.info("缺乏足夠的淨值比數據。")
+    links = topic_results.get("links", []) or []
+    if links:
+        with st.expander("🔗 查看 AI 參考來源"):
+            for link in links:
+                st.markdown(f"- [{link}]({link})")
     st.markdown("---")
+
+
+def render_whale_panel():
+    """Render the quick whale-watch shortcut panel."""
+    st.markdown("### 🐳 近兩周大戶持股比例顯著增加標的")
+    whales = [("2317", "鴻海"), ("2382", "廣達"), ("1519", "華城"), ("6669", "緯穎"), ("3324", "雙鴻")]
+    cols = st.columns(5)
+    for idx, (code, name) in enumerate(whales):
+        with cols[idx]:
+            st.button(
+                f"{name}\n({code})",
+                on_click=reset_all_states_on_stock_change,
+                args=(code,),
+                key=f"w_{code}",
+                use_container_width=True,
+            )
+    st.markdown("---")
+
+
+def render_empty_stock_prompt():
+    """Render first-load guidance when no stock is selected."""
+    st.markdown(
+        """
+        <div style="
+            margin-top: 2.5rem;
+            padding: 1.4rem 1.6rem;
+            border: 1px solid rgba(0,0,0,0.10);
+            border-radius: 14px;
+            background: rgba(127,127,127,0.07);
+            max-width: 820px;
+        ">
+            <div style="font-size:1.35rem; font-weight:800; margin-bottom:0.55rem;">
+                🔎 請先輸入股票代號或使用左側下拉選股查詢
+            </div>
+            <div style="font-size:1.02rem; line-height:1.8; color:rgba(120,120,120,0.95);">
+                可在左側「輸入台股代號」欄位輸入，例如 <b>2330</b>、<b>3037</b>、<b>2454</b>，
+                輸入後請按 <b style="color:#ff8c00;">Enter</b> 確認送出；也可以從「快速選股名單」下拉選擇股票。
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
