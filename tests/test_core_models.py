@@ -159,6 +159,7 @@ from utils import (
     build_candidate_data_report,
     build_financial_candidate_data,
     build_financial_quality_report,
+    build_forward_eps_calendar_notice,
     build_ttm_eps_adoption,
     build_forward_eps_tiered_valuation_report,
     build_divergence_warnings,
@@ -1127,6 +1128,34 @@ class FieldSourcePriorityTests(unittest.TestCase):
         self.assertIn("標準化成倍數", de["採用規則"])
         self.assertIn("D/E > 8", de["校驗/降權規則"])
 
+    def test_forward_eps_calendar_notice_flags_h2_and_q4_without_changing_fy_sequence(self):
+        june = build_forward_eps_calendar_notice(
+            current_date="2026-06-15",
+            fy1_year="2026",
+            fy2_year="2027",
+            fy3_year="2028",
+        )
+        july = build_forward_eps_calendar_notice(
+            current_date="2026-07-15",
+            fy1_year="2026",
+            fy2_year="2027",
+            fy3_year="2028",
+        )
+        october = build_forward_eps_calendar_notice(
+            current_date="2026-10-15",
+            fy1_year="2026",
+            fy2_year="2027",
+            fy3_year="2028",
+        )
+
+        self.assertEqual(june["phase"], "h1_fy1_primary")
+        self.assertEqual(june["ui_notice"], "")
+        self.assertEqual(july["fy_sequence_text"], "FY1=2026E / FY2=2027E / FY3=2028E")
+        self.assertIn("同步參考 FY2", july["ui_notice"])
+        self.assertEqual(october["phase"], "q4_fy2_primary_reference")
+        self.assertIn("FY2 作主要前瞻參考", october["ui_notice"])
+        self.assertIn("FY1/FY2/FY3 EPS 計算方式不變", october["prompt_notice"])
+
     def test_financial_base_context_uses_monthly_yoy_not_yfinance_revenue_growth(self):
         old_monthly = financial_context.get_monthly_revenue
         old_pepb = financial_context.get_pe_pb_data
@@ -1800,6 +1829,7 @@ class ValuationLogicTests(unittest.TestCase):
             base_cap=18,
             soft_ceiling=22,
             hard_ceiling=28,
+            current_date="2026-10-15",
         )
         report = result["report"]
 
@@ -1811,6 +1841,8 @@ class ValuationLogicTests(unittest.TestCase):
         self.assertEqual(result["summary"]["base_cap"], 18)
         self.assertEqual(result["summary"]["soft_cap"], 22)
         self.assertEqual(result["summary"]["hard_cap"], 28)
+        self.assertEqual(result["summary"]["fy_sequence_text"], "FY1=2026E / FY2=2027E / FY3=2028E")
+        self.assertIn("FY2 作主要前瞻參考", result["summary"]["fy_calendar_ui_notice"])
 
     def test_infer_pricing_horizon_detects_fy2_pricing(self):
         result = infer_pricing_horizon(
@@ -2484,6 +2516,9 @@ class PromptContextTests(unittest.TestCase):
             run_rate_label="獲利動能加速",
             run_rate_action="近二季年化高於 TTM",
             fy1_eps=6,
+            fy1_year="2026",
+            fy2_year="2027",
+            fy3_year="2028",
             formula_cap=18,
             base_cap=18,
             soft_cap=22,
@@ -2492,6 +2527,7 @@ class PromptContextTests(unittest.TestCase):
             fy1_base_price=108,
             fy1_soft_price=132,
             fy1_hard_price=168,
+            current_date="2026-10-15",
         )
 
         self.assertIn("1-1. 目前估值", summary)
@@ -2504,6 +2540,9 @@ class PromptContextTests(unittest.TestCase):
         self.assertIn("目前實際獲利支撐度", summary)
         self.assertIn("系統原始公式價=126.0元", summary)
         self.assertIn("系統 Forward EPS 更接近 FY2", summary)
+        self.assertIn("目前台北時間月份=10月", summary)
+        self.assertIn("FY1=2026E / FY2=2027E / FY3=2028E", summary)
+        self.assertIn("FY2 可作主要前瞻參考", summary)
 
     def test_eps_adoption_summary_includes_current_valuation_price(self):
         summary = prompt_eps_adoption_sync_summary(
